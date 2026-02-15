@@ -22,7 +22,7 @@ vi.mock("@mariozechner/pi-coding-agent", () => ({
 }));
 
 import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import { generateDraftWithLoader, type HandoffContext } from "../pi-extensions/handoff.js";
+import { generateDraftWithLoader, type HandoffContext } from "../pi-extensions/handoff/index.js";
 
 function buildContext(): HandoffContext {
   return {

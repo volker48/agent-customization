@@ -1,21 +1,3 @@
-/**
- * Handoff extension (V1)
- *
- * Command:
- *   /handoff <goal>
- *
- * Workflow:
- *   1) Generate a handoff draft from current session context.
- *   2) Open draft in editor for review/tweaks.
- *   3) Create a new session and prefill the edited draft.
- *   4) User manually submits in the new session.
- *
- * V1 limits:
- *   - No label/checkpoint slicing
- *   - No auto-submit
- *   - No handoff artifact file writes
- */
-
 import {
   complete,
   type AssistantMessage,
@@ -25,7 +7,6 @@ import {
   type UserMessage,
 } from "@mariozechner/pi-ai";
 import type {
-  ExtensionAPI,
   ExtensionCommandContext,
   KeybindingsManager,
   SessionEntry,
@@ -34,28 +15,13 @@ import type {
 import { BorderedLoader, Theme } from "@mariozechner/pi-coding-agent";
 import type { TUI } from "@mariozechner/pi-tui";
 
-type ToolCallSummary = {
-  name: string;
-  summary: string;
-};
+import type { DraftGenerationResult, HandoffContext, ToolCallSummary } from "./types.js";
 
-export type HandoffContext = {
-  goal: string;
-  conversationText: string;
-  relevantFiles: string[];
-  toolCalls: ToolCallSummary[];
-};
+export const MAX_CONVERSATION_CHARS = 40_000;
+export const MAX_RELEVANT_FILES = 20;
+export const MAX_NOTABLE_COMMANDS = 20;
 
-type DraftGenerationResult =
-  | { status: "ok"; draft: string }
-  | { status: "cancelled" }
-  | { status: "error"; message: string };
-
-const MAX_CONVERSATION_CHARS = 40_000;
-const MAX_RELEVANT_FILES = 20;
-const MAX_NOTABLE_COMMANDS = 20;
-
-const REQUIRED_HEADINGS = [
+export const REQUIRED_HEADINGS = [
   "Objective",
   "Context",
   "Decisions Made",
@@ -65,7 +31,7 @@ const REQUIRED_HEADINGS = [
   "Open Questions / Risks",
 ] as const;
 
-const SYSTEM_PROMPT = `You are a handoff prompt generator for coding work.
+export const SYSTEM_PROMPT = `You are a handoff prompt generator for coding work.
 
 Generate a self-contained markdown handoff prompt for a NEW session/agent.
 The handoff must be concrete, implementation-focused, and concise.
@@ -85,7 +51,7 @@ STRICT OUTPUT RULES:
 5. Acceptance Criteria must be checklist items (- [ ] ...).
 6. Keep fluff out. The new agent should be able to start coding immediately.`;
 
-const USAGE_TEXT = "Usage: /handoff <goal for the new session>";
+export const USAGE_TEXT = "Usage: /handoff <goal for the new session>";
 
 export function truncateText(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
@@ -253,7 +219,7 @@ function buildConversationText(entries: SessionEntry[]): string {
   return truncateText(serialized, MAX_CONVERSATION_CHARS);
 }
 
-function buildHandoffContext(entries: SessionEntry[], goal: string): HandoffContext {
+export function buildHandoffContext(entries: SessionEntry[], goal: string): HandoffContext {
   const conversationText = buildConversationText(entries);
   const allText: string[] = [];
   const allToolCalls: ToolCallSummary[] = [];
@@ -462,72 +428,4 @@ export async function generateDraftWithLoader(
   )) as DraftGenerationResult | null;
 
   return result ?? { status: "cancelled" };
-}
-
-export default function handoffExtension(pi: ExtensionAPI) {
-  pi.registerCommand("handoff", {
-    description: "Generate a reviewed handoff prompt and start a new session",
-    handler: async (args, ctx) => {
-      await ctx.waitForIdle();
-
-      if (!ctx.hasUI) {
-        ctx.ui.notify("handoff requires interactive mode", "error");
-        return;
-      }
-
-      const goal = args.trim();
-      if (!goal) {
-        ctx.ui.notify(USAGE_TEXT, "error");
-        return;
-      }
-
-      if (!ctx.model) {
-        ctx.ui.notify("No model selected", "error");
-        return;
-      }
-
-      const branch = ctx.sessionManager.getBranch();
-      const hasMessages = branch.some((entry: SessionEntry) => entry.type === "message");
-      if (!hasMessages) {
-        ctx.ui.notify("No conversation found to hand off", "warning");
-        return;
-      }
-
-      const handoffContext = buildHandoffContext(branch, goal);
-      if (!handoffContext.conversationText.trim()) {
-        ctx.ui.notify("No usable conversation context found", "warning");
-        return;
-      }
-
-      const generationResult = await generateDraftWithLoader(handoffContext, ctx);
-      if (generationResult.status === "cancelled") {
-        ctx.ui.notify("Cancelled", "info");
-        return;
-      }
-      if (generationResult.status === "error") {
-        ctx.ui.notify(`Handoff generation failed: ${generationResult.message}`, "error");
-        return;
-      }
-
-      const schemaDraft = enforceSchema(generationResult.draft, handoffContext);
-      const editedPrompt = await ctx.ui.editor("Edit handoff prompt", schemaDraft);
-      if (editedPrompt === undefined) {
-        ctx.ui.notify("Cancelled", "info");
-        return;
-      }
-
-      const currentSessionFile = ctx.sessionManager.getSessionFile();
-      const newSessionResult = await ctx.newSession({
-        parentSession: currentSessionFile,
-      });
-
-      if (newSessionResult.cancelled) {
-        ctx.ui.notify("New session creation cancelled", "info");
-        return;
-      }
-
-      ctx.ui.setEditorText(editedPrompt);
-      ctx.ui.notify("Handoff ready. Submit when ready.", "info");
-    },
-  });
 }
