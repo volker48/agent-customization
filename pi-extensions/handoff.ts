@@ -16,26 +16,34 @@
  *   - No handoff artifact file writes
  */
 
-import { complete, type Message } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, SessionEntry } from "@mariozechner/pi-coding-agent";
-import { BorderedLoader, convertToLlm, serializeConversation } from "@mariozechner/pi-coding-agent";
+import {
+  complete,
+  type AssistantMessage,
+  type Message,
+  type TextContent,
+  type ToolCall,
+  type UserMessage,
+} from "@mariozechner/pi-ai";
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  KeybindingsManager,
+  SessionEntry,
+  SessionMessageEntry,
+} from "@mariozechner/pi-coding-agent";
+import { BorderedLoader, Theme } from "@mariozechner/pi-coding-agent";
+import type { TUI } from "@mariozechner/pi-tui";
 
-type ToolCallBlock = {
-  type?: string;
-  name?: string;
-  arguments?: Record<string, unknown>;
-};
-
-type TextBlock = {
-  type?: string;
-  text?: string;
+type ToolCallSummary = {
+  name: string;
+  summary: string;
 };
 
 export type HandoffContext = {
   goal: string;
   conversationText: string;
   relevantFiles: string[];
-  notableCommands: string[];
+  toolCalls: ToolCallSummary[];
 };
 
 type DraftGenerationResult =
@@ -88,60 +96,92 @@ export function truncateText(text: string, maxChars: number): string {
   ].join("\n\n");
 }
 
-function uniqueLimited(items: string[], limit: number): string[] {
+function uniqueLimited<T>(items: T[], limit: number, keyFn: (item: T) => string): T[] {
   const seen = new Set<string>();
-  const result: string[] = [];
+  const result: T[] = [];
 
   for (const item of items) {
-    const trimmed = item.trim();
-    if (!trimmed) continue;
-    if (seen.has(trimmed)) continue;
-    seen.add(trimmed);
-    result.push(trimmed);
+    const key = keyFn(item);
+    if (!key) continue;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(item);
     if (result.length >= limit) break;
   }
 
   return result;
 }
 
-function getMessageBlocks(message: any): unknown[] {
-  const content = message?.content;
-  if (!Array.isArray(content)) return [];
-  return content;
+function isUserMessage(message: Message): message is UserMessage {
+  return message.role === "user";
 }
 
-function extractTextFromMessage(message: any): string {
-  const content = message?.content;
-
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-
-  const parts: string[] = [];
-  for (const block of content) {
-    if (!block || typeof block !== "object") continue;
-    const textBlock = block as TextBlock;
-    if (textBlock.type === "text" && typeof textBlock.text === "string") {
-      parts.push(textBlock.text);
-    }
-  }
-
-  return parts.join("\n").trim();
+function isAssistantMessage(message: Message): message is AssistantMessage {
+  return message.role === "assistant";
 }
 
-function extractToolCallCommands(message: any): string[] {
-  const commands: string[] = [];
-
-  for (const block of getMessageBlocks(message)) {
-    if (!block || typeof block !== "object") continue;
-    const toolCall = block as ToolCallBlock;
-    if (toolCall.type !== "toolCall" || toolCall.name !== "bash") continue;
-    const command = toolCall.arguments?.command;
-    if (typeof command === "string" && command.trim()) {
-      commands.push(command.trim());
-    }
+function extractTextFromMessage(message: Message): string {
+  if (isUserMessage(message)) {
+    if (typeof message.content === "string") return message.content;
+    return message.content
+      .filter((block): block is TextContent => block.type === "text")
+      .map((block) => block.text)
+      .join("\n")
+      .trim();
   }
 
-  return commands;
+  if (isAssistantMessage(message)) {
+    return message.content
+      .filter((block): block is TextContent => block.type === "text")
+      .map((block) => block.text)
+      .join("\n")
+      .trim();
+  }
+
+  return "";
+}
+
+function summarizeToolCall(toolCall: ToolCall): ToolCallSummary {
+  const { name, arguments: args } = toolCall;
+  const normalizedName = name.toLowerCase();
+
+  switch (normalizedName) {
+    case "bash": {
+      const command = args.command as string | undefined;
+      return { name: "Bash", summary: command ? `\`${command}\`` : "(no command)" };
+    }
+    case "read": {
+      const path = args.path as string | undefined;
+      return { name: "Read", summary: path ?? "(no path)" };
+    }
+    case "write": {
+      const path = args.path as string | undefined;
+      return { name: "Write", summary: path ?? "(no path)" };
+    }
+    case "edit": {
+      const path = args.path as string | undefined;
+      return { name: "Edit", summary: path ?? "(no path)" };
+    }
+    case "webfetch": {
+      const url = args.url as string | undefined;
+      return { name: "WebFetch", summary: url ?? "(no url)" };
+    }
+    default: {
+      const keyArgs = Object.entries(args)
+        .slice(0, 2)
+        .map(([k, v]) => `${k}: ${String(v).slice(0, 40)}`)
+        .join(", ");
+      return { name, summary: keyArgs || "(no args)" };
+    }
+  }
+}
+
+function extractToolCalls(message: Message): ToolCallSummary[] {
+  if (!isAssistantMessage(message)) return [];
+
+  return message.content
+    .filter((block): block is ToolCall => block.type === "toolCall")
+    .map(summarizeToolCall);
 }
 
 export function extractFileCandidates(text: string): string[] {
@@ -167,14 +207,48 @@ export function extractFileCandidates(text: string): string[] {
   return files;
 }
 
+function isSessionMessageEntry(entry: SessionEntry): entry is SessionMessageEntry {
+  return entry.type === "message";
+}
+
+function serializeMessageForHandoff(message: Message): string | null {
+  // Skip tool result messages entirely - they contain noisy output
+  if (message.role === "toolResult") return null;
+
+  const role = message.role === "user" ? "User" : "Assistant";
+  const text = extractTextFromMessage(message);
+
+  // For assistant messages, also note tool calls (but not their results)
+  if (isAssistantMessage(message)) {
+    const toolCalls = extractToolCalls(message);
+    const toolCallText = toolCalls.map((tc) => `  [${tc.name}] ${tc.summary}`).join("\n");
+
+    if (text && toolCallText) {
+      return `${role}:\n${text}\n${toolCallText}`;
+    }
+    if (toolCallText) {
+      return `${role}:\n${toolCallText}`;
+    }
+    if (text) {
+      return `${role}:\n${text}`;
+    }
+    return null;
+  }
+
+  if (!text) return null;
+  return `${role}:\n${text}`;
+}
+
 function buildConversationText(entries: SessionEntry[]): string {
   const messages = entries
-    .filter((entry): entry is SessionEntry & { type: "message" } => entry.type === "message")
-    .map((entry) => (entry as any).message)
-    .filter((message) => message?.role === "user" || message?.role === "assistant");
+    .filter(isSessionMessageEntry)
+    .map((entry) => entry.message as Message)
+    .filter((message) => message.role === "user" || message.role === "assistant");
 
-  const llmMessages = convertToLlm(messages as any);
-  const serialized = serializeConversation(llmMessages);
+  const serialized = messages
+    .map(serializeMessageForHandoff)
+    .filter((text): text is string => text !== null)
+    .join("\n\n---\n\n");
 
   return truncateText(serialized, MAX_CONVERSATION_CHARS);
 }
@@ -182,26 +256,38 @@ function buildConversationText(entries: SessionEntry[]): string {
 function buildHandoffContext(entries: SessionEntry[], goal: string): HandoffContext {
   const conversationText = buildConversationText(entries);
   const allText: string[] = [];
-  const allCommands: string[] = [];
+  const allToolCalls: ToolCallSummary[] = [];
 
   for (const entry of entries) {
-    if (entry.type !== "message") continue;
-    const message = (entry as any).message;
+    if (!isSessionMessageEntry(entry)) continue;
+    const message = entry.message as Message;
     allText.push(extractTextFromMessage(message));
-    allCommands.push(...extractToolCallCommands(message));
+    allToolCalls.push(...extractToolCalls(message));
   }
 
+  // Extract files from both text content and tool call paths
+  const textFileCandidates = extractFileCandidates(allText.join("\n"));
+  const fileToolNames = new Set(["read", "write", "edit"]);
+  const toolCallPaths = allToolCalls
+    .filter((tc) => fileToolNames.has(tc.name.toLowerCase()))
+    .map((tc) => tc.summary);
+
   const relevantFiles = uniqueLimited(
-    extractFileCandidates(allText.join("\n")),
+    [...toolCallPaths, ...textFileCandidates],
     MAX_RELEVANT_FILES,
+    (f) => f.trim(),
   );
-  const notableCommands = uniqueLimited(allCommands, MAX_NOTABLE_COMMANDS);
+  const toolCalls = uniqueLimited(
+    allToolCalls,
+    MAX_NOTABLE_COMMANDS,
+    (tc) => `${tc.name}:${tc.summary}`,
+  );
 
   return {
     goal,
     conversationText,
     relevantFiles,
-    notableCommands,
+    toolCalls,
   };
 }
 
@@ -209,17 +295,17 @@ function buildGenerationPayload(context: HandoffContext): string {
   const filesSection =
     context.relevantFiles.length > 0
       ? context.relevantFiles.map((file) => `- ${file}`).join("\n")
-      : "- (No explicit file paths detected)";
+      : "(No explicit file paths detected)";
 
-  const commandsSection =
-    context.notableCommands.length > 0
-      ? context.notableCommands.map((command) => `- ${command}`).join("\n")
-      : "- (No notable bash commands detected)";
+  const toolCallsSection =
+    context.toolCalls.length > 0
+      ? context.toolCalls.map((tc) => `- [${tc.name}] ${tc.summary}`).join("\n")
+      : "(No tool calls detected)";
 
   return [
     `Goal:\n${context.goal}`,
     `Detected relevant files:\n${filesSection}`,
-    `Detected notable commands:\n${commandsSection}`,
+    `Tool calls made:\n${toolCallsSection}`,
     `Conversation history:\n${context.conversationText}`,
   ].join("\n\n");
 }
@@ -258,35 +344,26 @@ export function enforceSchema(draft: string, context: HandoffContext): string {
   }
 
   const objective = extracted["Objective"] ?? context.goal;
-  const summaryFallback = normalized
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .slice(0, 8)
-    .join("\n");
 
   const contextSection =
-    extracted["Context"] ??
-    (summaryFallback || "- Continue from the prior implementation discussion.");
+    extracted["Context"] ?? "(Model did not generate context - review conversation manually)";
+
   const decisions =
-    extracted["Decisions Made"] ??
-    "- Preserve previously discussed constraints and architecture choices.";
+    extracted["Decisions Made"] ?? "(No decisions extracted - review conversation for constraints)";
+
   const relevantFiles =
     extracted["Relevant Files"] ??
     (context.relevantFiles.length > 0
       ? context.relevantFiles.map((file) => `- ${file}`).join("\n")
-      : "- (No explicit file paths were identified in the prior session.)");
+      : "(No file paths detected in conversation)");
+
   const implementationPlan =
-    extracted["Implementation Plan"] ??
-    [
-      "1. Reconfirm current code state in relevant files.",
-      "2. Implement the Objective with minimal, focused changes.",
-      "3. Validate behavior and summarize what changed.",
-    ].join("\n");
+    extracted["Implementation Plan"] ?? "(Model did not generate a plan - define steps manually)";
+
   const acceptanceCriteria = ensureAcceptanceChecklist(extracted["Acceptance Criteria"] ?? "");
+
   const risks =
-    extracted["Open Questions / Risks"] ??
-    "- Confirm any ambiguous requirements before implementation.";
+    extracted["Open Questions / Risks"] ?? "(No risks identified - consider edge cases)";
 
   return [
     "## Objective",
@@ -314,7 +391,7 @@ export function enforceSchema(draft: string, context: HandoffContext): string {
 
 export async function generateDraftWithLoader(
   context: HandoffContext,
-  ctx: any,
+  ctx: ExtensionCommandContext,
 ): Promise<DraftGenerationResult> {
   if (!ctx.model) {
     return { status: "error", message: "No model selected" };
@@ -322,9 +399,15 @@ export async function generateDraftWithLoader(
 
   const apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
   const payload = buildGenerationPayload(context);
+  const model = ctx.model;
 
   const result = (await ctx.ui.custom(
-    (tui: any, theme: any, _kb: any, done: (value: DraftGenerationResult) => void) => {
+    (
+      tui: TUI,
+      theme: Theme,
+      _kb: KeybindingsManager,
+      done: (value: DraftGenerationResult) => void,
+    ) => {
       const loader = new BorderedLoader(tui, theme, "Generating handoff draft...");
       let completed = false;
       const completeOnce = (value: DraftGenerationResult) => {
@@ -336,7 +419,7 @@ export async function generateDraftWithLoader(
       loader.onAbort = () => completeOnce({ status: "cancelled" });
 
       const generate = async (): Promise<DraftGenerationResult> => {
-        const userMessage: Message = {
+        const userMessage: UserMessage = {
           role: "user",
           content: [{ type: "text", text: payload }],
           timestamp: Date.now(),
@@ -344,7 +427,7 @@ export async function generateDraftWithLoader(
 
         const options = apiKey ? { apiKey, signal: loader.signal } : { signal: loader.signal };
         const response = await complete(
-          ctx.model,
+          model,
           { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
           options,
         );
@@ -354,7 +437,7 @@ export async function generateDraftWithLoader(
         }
 
         const draft = response.content
-          .filter((block): block is { type: "text"; text: string } => block.type === "text")
+          .filter((block): block is TextContent => block.type === "text")
           .map((block) => block.text)
           .join("\n")
           .trim();
@@ -368,7 +451,7 @@ export async function generateDraftWithLoader(
 
       generate()
         .then(completeOnce)
-        .catch((error) => {
+        .catch((error: unknown) => {
           console.error("handoff generation failed", error);
           const message = error instanceof Error ? error.message : String(error);
           completeOnce({ status: "error", message });

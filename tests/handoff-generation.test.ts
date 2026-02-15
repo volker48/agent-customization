@@ -19,10 +19,9 @@ vi.mock("@mariozechner/pi-coding-agent", () => ({
 
     constructor(_tui: unknown, _theme: unknown, _label: string) {}
   },
-  convertToLlm: vi.fn(),
-  serializeConversation: vi.fn(),
 }));
 
+import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { generateDraftWithLoader, type HandoffContext } from "../pi-extensions/handoff.js";
 
 function buildContext(): HandoffContext {
@@ -30,11 +29,11 @@ function buildContext(): HandoffContext {
     goal: "goal",
     conversationText: "conversation",
     relevantFiles: ["pi-extensions/handoff.ts"],
-    notableCommands: ["pnpm run typecheck"],
+    toolCalls: [{ name: "Bash", summary: "`pnpm run typecheck`" }],
   };
 }
 
-function buildCtx(customImpl?: (loader: LoaderLike) => void) {
+function buildCtx(customImpl?: (loader: LoaderLike) => void): ExtensionCommandContext {
   return {
     model: "test-model",
     modelRegistry: {
@@ -56,7 +55,7 @@ function buildCtx(customImpl?: (loader: LoaderLike) => void) {
           }),
       ),
     },
-  };
+  } as unknown as ExtensionCommandContext;
 }
 
 describe("generateDraftWithLoader", () => {

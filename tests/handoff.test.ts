@@ -29,7 +29,7 @@ describe("handoff helpers", () => {
       goal: "Ship the handoff patch",
       conversationText: "previous discussion",
       relevantFiles: ["pi-extensions/handoff.ts"],
-      notableCommands: ["pnpm run typecheck"],
+      toolCalls: [{ name: "Bash", summary: "`pnpm run typecheck`" }],
     };
 
     const schema = enforceSchema("Draft with no headings", context);
