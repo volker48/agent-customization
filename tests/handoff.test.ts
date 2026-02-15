@@ -6,7 +6,7 @@ import {
   extractFileCandidates,
   truncateText,
   type HandoffContext,
-} from "./handoff.js";
+} from "../pi-extensions/handoff.js";
 
 describe("handoff helpers", () => {
   it("keeps the newest conversation text when truncating", () => {

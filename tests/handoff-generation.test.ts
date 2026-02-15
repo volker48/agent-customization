@@ -23,7 +23,7 @@ vi.mock("@mariozechner/pi-coding-agent", () => ({
   serializeConversation: vi.fn(),
 }));
 
-import { generateDraftWithLoader, type HandoffContext } from "./handoff.js";
+import { generateDraftWithLoader, type HandoffContext } from "../pi-extensions/handoff.js";
 
 function buildContext(): HandoffContext {
   return {
