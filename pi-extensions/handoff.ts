@@ -31,12 +31,17 @@ type TextBlock = {
   text?: string;
 };
 
-type HandoffContext = {
+export type HandoffContext = {
   goal: string;
   conversationText: string;
   relevantFiles: string[];
   notableCommands: string[];
 };
+
+type DraftGenerationResult =
+  | { status: "ok"; draft: string }
+  | { status: "cancelled" }
+  | { status: "error"; message: string };
 
 const MAX_CONVERSATION_CHARS = 40_000;
 const MAX_RELEVANT_FILES = 20;
@@ -74,9 +79,13 @@ STRICT OUTPUT RULES:
 
 const USAGE_TEXT = "Usage: /handoff <goal for the new session>";
 
-function truncateText(text: string, maxChars: number): string {
+export function truncateText(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
-  return `${text.slice(0, maxChars)}\n\n[Conversation truncated for handoff generation]`;
+
+  return [
+    "[Conversation truncated for handoff generation; showing most recent context]",
+    text.slice(-maxChars),
+  ].join("\n\n");
 }
 
 function uniqueLimited(items: string[], limit: number): string[] {
@@ -135,7 +144,7 @@ function extractToolCallCommands(message: any): string[] {
   return commands;
 }
 
-function extractFileCandidates(text: string): string[] {
+export function extractFileCandidates(text: string): string[] {
   if (!text) return [];
 
   const files: string[] = [];
@@ -149,7 +158,9 @@ function extractFileCandidates(text: string): string[] {
     while ((match = pattern.exec(text)) !== null) {
       const raw = match[1] ?? "";
       const normalized = raw.startsWith("@") ? raw.slice(1) : raw;
-      if (normalized) files.push(normalized);
+      if (!normalized) continue;
+      if (/\.[0-9]+$/.test(normalized)) continue;
+      files.push(normalized);
     }
   }
 
@@ -225,7 +236,7 @@ function getSection(
   return sectionBody || undefined;
 }
 
-function ensureAcceptanceChecklist(text: string): string {
+export function ensureAcceptanceChecklist(text: string): string {
   if (/^-\s*\[\s?[xX ]\]\s+/m.test(text)) return text;
 
   const lines = text
@@ -238,7 +249,7 @@ function ensureAcceptanceChecklist(text: string): string {
   return "- [ ] Implementation satisfies the Objective\n- [ ] Verification or test steps are included";
 }
 
-function enforceSchema(draft: string, context: HandoffContext): string {
+export function enforceSchema(draft: string, context: HandoffContext): string {
   const normalized = draft.trim();
   const extracted: Record<string, string | undefined> = {};
 
@@ -301,56 +312,73 @@ function enforceSchema(draft: string, context: HandoffContext): string {
   ].join("\n");
 }
 
-async function generateDraftWithLoader(context: HandoffContext, ctx: any): Promise<string | null> {
-  if (!ctx.model) return null;
-
-  const apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
-  if (!apiKey) {
-    ctx.ui.notify("No API key available for current model", "error");
-    return null;
+export async function generateDraftWithLoader(
+  context: HandoffContext,
+  ctx: any,
+): Promise<DraftGenerationResult> {
+  if (!ctx.model) {
+    return { status: "error", message: "No model selected" };
   }
 
+  const apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
   const payload = buildGenerationPayload(context);
 
   const result = (await ctx.ui.custom(
-    (tui: any, theme: any, _kb: any, done: (value: string | null) => void) => {
+    (tui: any, theme: any, _kb: any, done: (value: DraftGenerationResult) => void) => {
       const loader = new BorderedLoader(tui, theme, "Generating handoff draft...");
-      loader.onAbort = () => done(null);
+      let completed = false;
+      const completeOnce = (value: DraftGenerationResult) => {
+        if (completed) return;
+        completed = true;
+        done(value);
+      };
 
-      const generate = async () => {
+      loader.onAbort = () => completeOnce({ status: "cancelled" });
+
+      const generate = async (): Promise<DraftGenerationResult> => {
         const userMessage: Message = {
           role: "user",
           content: [{ type: "text", text: payload }],
           timestamp: Date.now(),
         };
 
+        const options = apiKey ? { apiKey, signal: loader.signal } : { signal: loader.signal };
         const response = await complete(
           ctx.model,
           { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-          { apiKey, signal: loader.signal },
+          options,
         );
 
-        if (response.stopReason === "aborted") return null;
+        if (response.stopReason === "aborted") {
+          return { status: "cancelled" };
+        }
 
-        return response.content
+        const draft = response.content
           .filter((block): block is { type: "text"; text: string } => block.type === "text")
           .map((block) => block.text)
           .join("\n")
           .trim();
+
+        if (!draft) {
+          return { status: "error", message: "Model returned an empty handoff draft" };
+        }
+
+        return { status: "ok", draft };
       };
 
       generate()
-        .then(done)
+        .then(completeOnce)
         .catch((error) => {
           console.error("handoff generation failed", error);
-          done(null);
+          const message = error instanceof Error ? error.message : String(error);
+          completeOnce({ status: "error", message });
         });
 
       return loader;
     },
-  )) as string | null;
+  )) as DraftGenerationResult | null;
 
-  return result;
+  return result ?? { status: "cancelled" };
 }
 
 export default function handoffExtension(pi: ExtensionAPI) {
@@ -388,13 +416,17 @@ export default function handoffExtension(pi: ExtensionAPI) {
         return;
       }
 
-      const draft = await generateDraftWithLoader(handoffContext, ctx);
-      if (!draft) {
+      const generationResult = await generateDraftWithLoader(handoffContext, ctx);
+      if (generationResult.status === "cancelled") {
         ctx.ui.notify("Cancelled", "info");
         return;
       }
+      if (generationResult.status === "error") {
+        ctx.ui.notify(`Handoff generation failed: ${generationResult.message}`, "error");
+        return;
+      }
 
-      const schemaDraft = enforceSchema(draft, handoffContext);
+      const schemaDraft = enforceSchema(generationResult.draft, handoffContext);
       const editedPrompt = await ctx.ui.editor("Edit handoff prompt", schemaDraft);
       if (editedPrompt === undefined) {
         ctx.ui.notify("Cancelled", "info");
