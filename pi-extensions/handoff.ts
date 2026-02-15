@@ -296,7 +296,7 @@ async function generateDraftWithLoader(context: HandoffContext, ctx: any): Promi
 
 	const payload = buildGenerationPayload(context);
 
-	const result = await ctx.ui.custom<string | null>((tui: any, theme: any, _kb: any, done: (value: string | null) => void) => {
+	const result = (await ctx.ui.custom((tui: any, theme: any, _kb: any, done: (value: string | null) => void) => {
 		const loader = new BorderedLoader(tui, theme, "Generating handoff draft...");
 		loader.onAbort = () => done(null);
 
@@ -330,7 +330,7 @@ async function generateDraftWithLoader(context: HandoffContext, ctx: any): Promi
 			});
 
 		return loader;
-	});
+	})) as string | null;
 
 	return result;
 }

@@ -157,7 +157,7 @@ function playRandomSound(eventName: EventName): void {
   }
 }
 
-export const SoundNotifications: Plugin = async ({ client }) => {
+export const SoundNotifications: Plugin = async ({ client: _client }) => {
   const eventFileMap = new Map<EventName, string[]>();
 
   for (const event of SUPPORTED_EVENTS) {
