@@ -27,7 +27,12 @@ import {
 
 // Re-export public types and functions for external use
 export type { HandoffContext } from "./types.js";
-export { truncateText, extractFileCandidates, ensureAcceptanceChecklist, enforceSchema } from "./helpers.js";
+export {
+  truncateText,
+  extractFileCandidates,
+  ensureAcceptanceChecklist,
+  enforceSchema,
+} from "./helpers.js";
 export { generateDraftWithLoader } from "./helpers.js";
 
 export default function handoffExtension(pi: ExtensionAPI) {
