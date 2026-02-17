@@ -8,6 +8,10 @@ import webfetchExtension from "../pi-extensions/webfetch.js";
 type WebFetchParams = {
   url: string;
   maxChars?: number;
+  mode?: "full" | "probe";
+  strategy?: "direct" | "smart";
+  accept?: string;
+  headers?: Record<string, string>;
 };
 
 type ToolResult = {
@@ -24,10 +28,29 @@ type RegisteredTool = {
 type WebFetchTestDetails = {
   requestedUrl: string;
   resolvedUrl: string;
+  finalUrl?: string;
+  redirectChain?: string[];
+  acceptHeader?: string;
+  requestHeaders?: Record<string, string>;
+  blockedRequestHeaders?: string[];
+  mode?: "full" | "probe";
+  strategy?: "direct" | "smart";
   status: number;
   statusText: string;
   contentType: string;
+  contentLength?: number;
+  durationMs?: number;
   truncated: boolean;
+  truncatedByLines?: boolean;
+  truncatedByBytes?: boolean;
+  truncatedByMaxChars?: boolean;
+  detectedJsShell?: boolean;
+  jsShellSignals?: string[];
+  alternateCandidates?: string[];
+  alternateUrlUsed?: string;
+  smartNotes?: string[];
+  probeBytesRead?: number;
+  probeByteLimit?: number;
   fullOutputPath?: string;
 };
 
@@ -132,6 +155,7 @@ describe("webfetch extension", () => {
     expect(result.content[0]?.text).toContain("URL: https://example.com/missing");
     expect(result.content[0]?.text).toContain("Status: 404 Not Found");
     expect(result.content[0]?.text).toContain("Content-Type: text/plain; charset=utf-8");
+    expect(details?.strategy).toBe("direct");
     expect(details?.status).toBe(404);
   });
 
@@ -160,6 +184,229 @@ describe("webfetch extension", () => {
       Accept: "text/markdown, text/html",
       "Accept-Encoding": "identity",
     });
+  });
+
+  it("supports Accept override, custom headers, and redacts sensitive header diagnostics", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response('{"ok":true}', {
+        status: 200,
+        headers: { "Content-Type": "application/json", "Content-Length": "11" },
+      }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_headers",
+      {
+        url: "https://api.example.com/data",
+        accept: "application/json",
+        headers: {
+          Authorization: "Bearer super-secret",
+          Connection: "keep-alive",
+          "X-Test": "hello",
+        },
+      },
+      new AbortController().signal,
+    );
+
+    expect(result.isError).toBeUndefined();
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    const sentHeaders = init?.headers as Record<string, string>;
+    expect(sentHeaders.Accept).toBe("application/json");
+    expect(sentHeaders["Accept-Encoding"]).toBe("identity");
+    expect(sentHeaders.Authorization).toBe("Bearer super-secret");
+    expect(sentHeaders["X-Test"]).toBe("hello");
+    expect(sentHeaders.Connection).toBeUndefined();
+
+    const details = result.details as WebFetchTestDetails | undefined;
+    expect(details?.acceptHeader).toBe("application/json");
+    expect(details?.requestHeaders?.Authorization).toBe("[redacted]");
+    expect(details?.blockedRequestHeaders).toContain("Connection");
+    expect(details?.contentLength).toBe(11);
+    expect(typeof details?.durationMs).toBe("number");
+  });
+
+  it("tracks redirect chain and final URL", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response("", {
+          status: 302,
+          statusText: "Found",
+          headers: { Location: "/final" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response("done", {
+          status: 200,
+          headers: { "Content-Type": "text/plain" },
+        }),
+      );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_redirect",
+      { url: "https://example.com/start" },
+      new AbortController().signal,
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.content[0]?.text).toContain("URL: https://example.com/final");
+
+    const details = result.details as WebFetchTestDetails | undefined;
+    expect(details?.finalUrl).toBe("https://example.com/final");
+    expect(details?.redirectChain).toEqual([
+      "https://example.com/start",
+      "https://example.com/final",
+    ]);
+  });
+
+  it("supports probe mode diagnostics and JS-shell detection", async () => {
+    const shellHtml = [
+      "<!doctype html>",
+      "<html><head>",
+      '<script src="/static/app.js"></script>',
+      "<script>window.__NEXT_DATA__={}</script>",
+      "</head><body>",
+      '<div id="root"></div>',
+      "<noscript>This app requires JavaScript.</noscript>",
+      "</body></html>",
+    ].join("");
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(shellHtml, {
+        status: 200,
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_probe",
+      { url: "https://example.com/spa", mode: "probe", maxChars: 100000 },
+      new AbortController().signal,
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0]?.text).toContain("Probe mode: sampled");
+
+    const details = result.details as WebFetchTestDetails | undefined;
+    expect(details?.mode).toBe("probe");
+    expect(details?.detectedJsShell).toBe(true);
+    expect(details?.jsShellSignals?.length).toBeGreaterThan(0);
+    expect(details?.probeBytesRead).toBeGreaterThan(0);
+  });
+
+  it("smart strategy auto-follows markdown alternates from Link headers", async () => {
+    const shellHtml = [
+      "<!doctype html>",
+      "<html><head>",
+      '<script src="/static/app.js"></script>',
+      "<script>window.__NEXT_DATA__={}</script>",
+      "</head><body>",
+      '<div id="root"></div>',
+      "<noscript>This app requires JavaScript.</noscript>",
+      "</body></html>",
+    ].join("");
+
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(shellHtml, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            Link: '</docs/page.md>; rel="alternate"; type="text/markdown"',
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response("# Docs\n\nLoaded from alternate markdown.", {
+          status: 200,
+          headers: { "Content-Type": "text/markdown" },
+        }),
+      );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_smart_alternate",
+      { url: "https://example.com/docs/page", strategy: "smart" },
+      new AbortController().signal,
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.content[0]?.text).toContain("URL: https://example.com/docs/page.md");
+
+    const details = result.details as WebFetchTestDetails | undefined;
+    expect(details?.strategy).toBe("smart");
+    expect(details?.alternateCandidates).toContain("https://example.com/docs/page.md");
+    expect(details?.alternateUrlUsed).toBe("https://example.com/docs/page.md");
+    expect(details?.smartNotes?.length).toBeGreaterThan(0);
+  });
+
+  it("smart strategy returns guidance when JS-shell page has no useful alternate", async () => {
+    const shellHtml = [
+      "<!doctype html>",
+      "<html><head>",
+      '<script src="/static/app.js"></script>',
+      "<script>window.__NEXT_DATA__={}</script>",
+      "</head><body>",
+      '<div id="root"></div>',
+      "<noscript>This app requires JavaScript.</noscript>",
+      "</body></html>",
+    ].join("");
+
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(shellHtml, {
+          status: 200,
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response("not found", {
+          status: 404,
+          statusText: "Not Found",
+          headers: { "Content-Type": "text/plain" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(shellHtml, {
+          status: 200,
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        }),
+      );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_smart_fallback",
+      { url: "https://example.com/spa", strategy: "smart" },
+      new AbortController().signal,
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(result.content[0]?.text).toContain("[Smart strategy note]");
+
+    const details = result.details as WebFetchTestDetails | undefined;
+    expect(details?.strategy).toBe("smart");
+    expect(details?.detectedJsShell).toBe(true);
+    expect(details?.alternateCandidates).toContain("https://example.com/wp-json");
+    expect(details?.smartNotes?.length).toBeGreaterThan(0);
   });
 
   it("blocks localhost/private IP targets by default", async () => {
@@ -298,6 +545,9 @@ describe("webfetch extension", () => {
 
     expect(result.isError).toBeUndefined();
     expect(details?.truncated).toBe(true);
+    expect(details?.truncatedByLines).toBe(true);
+    expect(details?.truncatedByBytes).toBe(false);
+    expect(details?.truncatedByMaxChars).toBe(false);
     expect(fullOutputPath).toBeTruthy();
     expect(result.content[0]?.text).toContain("Output truncated");
     expect(result.content[0]?.text).toContain("Full output saved to:");
