@@ -29,7 +29,10 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. Agent can call `rlm_extract` with a chunk ID or character range and receive the exact span with bounded output
   4. Agent can call `rlm_save` and `rlm_get` to persist and retrieve named intermediate artifacts
   5. After a Pi branch fork, previously loaded store state is correctly rehydrated from `result.details` and tools return consistent results
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 01-01-PLAN.md — Core data layer: types, content-aware chunker, DocumentStore with MiniSearch search, extraction, buffers, snapshot/restore
+- [ ] 01-02-PLAN.md — Pi tool integration: register 5 tools, lifecycle events for branch-safe state, truncation
 
 ### Phase 2: map_reduce Orchestration
 **Goal**: Agent can query stored documents using map_reduce mode — parallel sub-calls over all chunks, each cached by content+instruction hash, with concurrency bounded to prevent runaway resource use
@@ -69,7 +72,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation | 0/? | Not started | - |
+| 1. Foundation | 0/2 | Planned | - |
 | 2. map_reduce Orchestration | 0/? | Not started | - |
 | 3. selective and tree Modes | 0/? | Not started | - |
 | 4. Hooks | 0/? | Not started | - |
