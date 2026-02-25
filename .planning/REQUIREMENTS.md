@@ -7,15 +7,15 @@
 
 ### Document Management
 
-- [ ] **DOC-01**: User can load text/code documents into external store with configurable chunk size and overlap
-- [ ] **DOC-02**: Chunks use hash-based stable IDs for deduplication and caching
-- [ ] **DOC-03**: User can search across stored chunks via BM25 lexical search returning bounded excerpts with chunk IDs
-- [ ] **DOC-04**: User can extract specific spans by chunk ID or character range with bounded output
+- [x] **DOC-01**: User can load text/code documents into external store with configurable chunk size and overlap
+- [x] **DOC-02**: Chunks use hash-based stable IDs for deduplication and caching
+- [x] **DOC-03**: User can search across stored chunks via BM25 lexical search returning bounded excerpts with chunk IDs
+- [x] **DOC-04**: User can extract specific spans by chunk ID or character range with bounded output
 
 ### Intermediate State
 
-- [ ] **STATE-01**: User can save named intermediate artifacts to buffers
-- [ ] **STATE-02**: User can retrieve named artifacts from buffers
+- [x] **STATE-01**: User can save named intermediate artifacts to buffers
+- [x] **STATE-02**: User can retrieve named artifacts from buffers
 - [ ] **STATE-03**: Store state persists across branch forks via `result.details` snapshots
 - [ ] **STATE-04**: All tool outputs truncate gracefully with truncation signal when exceeding Pi limits
 
@@ -64,12 +64,12 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DOC-01 | Phase 1 | Pending |
-| DOC-02 | Phase 1 | Pending |
-| DOC-03 | Phase 1 | Pending |
-| DOC-04 | Phase 1 | Pending |
-| STATE-01 | Phase 1 | Pending |
-| STATE-02 | Phase 1 | Pending |
+| DOC-01 | Phase 1 | Complete |
+| DOC-02 | Phase 1 | Complete |
+| DOC-03 | Phase 1 | Complete |
+| DOC-04 | Phase 1 | Complete |
+| STATE-01 | Phase 1 | Complete |
+| STATE-02 | Phase 1 | Complete |
 | STATE-03 | Phase 1 | Pending |
 | STATE-04 | Phase 1 | Pending |
 | QUERY-01 | Phase 3 | Pending |
