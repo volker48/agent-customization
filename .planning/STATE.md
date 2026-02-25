@@ -9,28 +9,28 @@ See: .planning/PROJECT.md (updated 2026-02-23)
 
 ## Current Position
 
-Phase: 1 of 4 (Foundation)
-Plan: 1 of 2 in current phase
-Status: Executing
-Last activity: 2026-02-25 — Completed 01-01-PLAN.md
+Phase: 1 of 4 (Foundation) — COMPLETE
+Plan: 2 of 2 in current phase
+Status: Phase Complete
+Last activity: 2026-02-25 — Completed 01-02-PLAN.md
 
-Progress: [██░░░░░░░░] 12%
+Progress: [██████░░░░] 25%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 1
-- Average duration: 4 min
-- Total execution time: 4 min
+- Total plans completed: 2
+- Average duration: 3.5 min
+- Total execution time: 7 min
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 1. Foundation | 1 | 4 min | 4 min |
+| 1. Foundation | 2 | 7 min | 3.5 min |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (4 min)
+- Last 5 plans: 01-01 (4 min), 01-02 (3 min)
 - Trend: —
 
 *Updated after each plan completion*
@@ -48,6 +48,9 @@ Recent decisions affecting current work:
 - MiniSearch config as mutable object (not `as const`) to satisfy Options<T> type constraint (01-01)
 - Overlap applied by slicing back into previous chunk's character range (01-01)
 - extractByRange walks sorted chunks and reconstructs spans via offset arithmetic (01-01)
+- Only mutating tools (rlm_load, rlm_save) emit full snapshots in details — read-only tools emit minimal details (01-02)
+- File path detection uses prefix check (/, ~, ./) — all other source strings treated as raw content (01-02)
+- Type inference from file extension when type param not provided (01-02)
 
 ### Pending Todos
 
@@ -61,5 +64,5 @@ None yet.
 ## Session Continuity
 
 Last session: 2026-02-25
-Stopped at: Completed 01-01-PLAN.md
+Stopped at: Completed 01-02-PLAN.md (Phase 1 complete)
 Resume file: None

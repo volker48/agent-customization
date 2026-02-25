@@ -16,8 +16,8 @@
 
 - [x] **STATE-01**: User can save named intermediate artifacts to buffers
 - [x] **STATE-02**: User can retrieve named artifacts from buffers
-- [ ] **STATE-03**: Store state persists across branch forks via `result.details` snapshots
-- [ ] **STATE-04**: All tool outputs truncate gracefully with truncation signal when exceeding Pi limits
+- [x] **STATE-03**: Store state persists across branch forks via `result.details` snapshots
+- [x] **STATE-04**: All tool outputs truncate gracefully with truncation signal when exceeding Pi limits
 
 ### Query Orchestration
 
@@ -70,8 +70,8 @@
 | DOC-04 | Phase 1 | Complete |
 | STATE-01 | Phase 1 | Complete |
 | STATE-02 | Phase 1 | Complete |
-| STATE-03 | Phase 1 | Pending |
-| STATE-04 | Phase 1 | Pending |
+| STATE-03 | Phase 1 | Complete |
+| STATE-04 | Phase 1 | Complete |
 | QUERY-01 | Phase 3 | Pending |
 | QUERY-02 | Phase 2 | Pending |
 | QUERY-03 | Phase 3 | Pending |
