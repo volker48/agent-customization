@@ -1,9 +1,9 @@
 ---
-status: complete
+status: diagnosed
 phase: 01-foundation
 source: 01-01-SUMMARY.md, 01-02-SUMMARY.md
 started: 2026-02-25T01:10:00Z
-updated: 2026-02-25T01:25:00Z
+updated: 2026-02-25T01:30:00Z
 ---
 
 ## Current Test
@@ -69,7 +69,10 @@ skipped: 0
   reason: "User reported: rlm_search hard-caps limit at 100 and each excerpt at 200 chars, so output never exceeds the truncation threshold (~50KB). No truncation notice appeared. meta.truncated is not exposed in the response details, so it cannot be asserted from UAT output. The truncation path is currently not demonstrable with the existing tool contract/limits."
   severity: minor
   test: 8
-  root_cause: ""
-  artifacts: []
-  missing: []
-  debug_session: ""
+  root_cause: "rlm_search truncation path is unreachable by design — max output (~30KB) is below truncation threshold (50KB). meta.truncated is set on a local RlmResult variable never included in tool response details."
+  artifacts:
+    - path: "pi-extensions/pi-rlm/index.ts"
+      issue: "applyTruncation works correctly but is unreachable for search; meta.truncated set on discarded local variable"
+  missing:
+    - "No code fix needed — truncation is a defensive safety net that correctly protects rlm_extract and future tools. For search, parameter constraints make it unreachable by design."
+  debug_session: ".planning/debug/rlm-search-truncation-unreachable.md"
