@@ -1,17 +1,18 @@
 import { isToolCallEventType, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
+const BASH_TOOL = "bash";
 const DEFAULT_RTK_BIN = "rtk";
 const RTK_BIN_ENV = "PI_RTK_BIN";
 const RTK_DEBUG_ENV = "PI_RTK_DEBUG";
 const REWRITE_TIMEOUT_MS = 2_000;
 
-function isDebugEnabled(): boolean {
+const DEBUG_ENABLED = (() => {
   const raw = process.env[RTK_DEBUG_ENV]?.trim().toLowerCase();
   return raw === "1" || raw === "true" || raw === "yes";
-}
+})();
 
 function debugLog(message: string, extra?: unknown): void {
-  if (!isDebugEnabled()) {
+  if (!DEBUG_ENABLED) {
     return;
   }
 
@@ -23,21 +24,12 @@ function debugLog(message: string, extra?: unknown): void {
   console.warn(`[rtk] ${message}`, extra);
 }
 
-function normalizeConfiguredBinary(value: unknown): string | undefined {
+function normalizeString(value: unknown): string | undefined {
   if (typeof value !== "string") {
     return undefined;
   }
-
   const trimmed = value.trim();
   return trimmed || undefined;
-}
-
-function resolveRtkBinary(flagValue: unknown): string {
-  return (
-    normalizeConfiguredBinary(flagValue) ??
-    normalizeConfiguredBinary(process.env[RTK_BIN_ENV]) ??
-    DEFAULT_RTK_BIN
-  );
 }
 
 export default function rtkExtension(pi: ExtensionAPI) {
@@ -46,7 +38,6 @@ export default function rtkExtension(pi: ExtensionAPI) {
     type: "string",
   });
 
-  let rtkBinFlagValue: string | undefined;
   const rewrites = new Map<
     string,
     {
@@ -56,30 +47,26 @@ export default function rtkExtension(pi: ExtensionAPI) {
     }
   >();
 
-  const refreshConfiguredBinary = () => {
-    rtkBinFlagValue = normalizeConfiguredBinary(pi.getFlag("rtk-bin"));
-  };
-
-  const getRtkBinary = () => resolveRtkBinary(rtkBinFlagValue);
+  const getRtkBinary = () =>
+    normalizeString(pi.getFlag("rtk-bin")) ??
+    normalizeString(process.env[RTK_BIN_ENV]) ??
+    DEFAULT_RTK_BIN;
 
   pi.on("session_start", async () => {
-    refreshConfiguredBinary();
     rewrites.clear();
   });
 
   pi.on("tool_call", async (event, ctx) => {
-    if (!isToolCallEventType("bash", event)) {
+    if (!isToolCallEventType(BASH_TOOL, event)) {
       return;
     }
 
-    const originalCommand = event.input.command;
-    if (!originalCommand.trim()) {
+    const originalCommand = event.input.command.trim();
+    if (!originalCommand) {
       return;
     }
 
-    refreshConfiguredBinary();
     const rtkBin = getRtkBinary();
-
     const signal = (ctx as { signal?: AbortSignal }).signal;
 
     try {
@@ -114,7 +101,7 @@ export default function rtkExtension(pi: ExtensionAPI) {
   });
 
   pi.on("tool_result", async (event) => {
-    if (event.toolName !== "bash") {
+    if (event.toolName !== BASH_TOOL) {
       return;
     }
 

@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import { access, mkdtemp, readFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -111,6 +111,17 @@ function formatPreview(text, maxLength = 240) {
   return normalized.length <= maxLength ? normalized : `${normalized.slice(0, maxLength)}...`;
 }
 
+function printOutput(label, text, useStderr = false) {
+  const normalized = text?.trim();
+  if (!normalized) {
+    return;
+  }
+  const log = useStderr ? console.error : console.log;
+  log(`[rtk-verify] ${label}:`);
+  log(normalized);
+  log("");
+}
+
 async function main() {
   const piBin = await resolvePiBinary();
   const extensionPath = resolve("pi-extensions/rtk.ts");
@@ -118,9 +129,8 @@ async function main() {
   const requestedRtkBin = consumeFlag("--rtk-bin") ?? process.env.PI_RTK_BIN;
   const customPrompt = consumeFlag("--prompt");
 
-  if (consumeBooleanFlag("--keep-session")) {
-    // Sessions are already retained by default; accept the flag for convenience.
-  }
+  // Accept --keep-session for CLI ergonomics (sessions are retained by default)
+  consumeBooleanFlag("--keep-session");
 
   if (argv.length > 0) {
     throw new Error(`Unknown arguments: ${argv.join(" ")}`);
@@ -180,42 +190,19 @@ async function main() {
       maxBuffer: 10 * 1024 * 1024,
     });
   } catch (error) {
-    const stdout = error?.stdout ?? "";
-    const stderr = error?.stderr ?? "";
-
-    if (stdout) {
-      console.log("[rtk-verify] pi stdout:\n");
-      console.log(stdout);
-      console.log("");
-    }
-
-    if (stderr) {
-      console.error("[rtk-verify] pi stderr:\n");
-      console.error(stderr);
-      console.error("");
-    }
-
+    printOutput("pi stdout", error?.stdout);
+    printOutput("pi stderr", error?.stderr, true);
     throw error;
   }
 
-  if (result.stdout.trim()) {
-    console.log("[rtk-verify] pi stdout:\n");
-    console.log(result.stdout);
-    console.log("");
-  }
-
-  if (result.stderr.trim()) {
-    console.error("[rtk-verify] pi stderr:\n");
-    console.error(result.stderr);
-    console.error("");
-  }
+  printOutput("pi stdout", result.stdout);
+  printOutput("pi stderr", result.stderr, true);
 
   const sessionRaw = await readFile(sessionPath, "utf8");
   const entries = parseSessionEntries(sessionRaw);
   const summary = extractVerificationSummary(entries);
 
-  console.log(`[rtk-verify] Session file saved at: ${sessionPath}`);
-  console.log(`[rtk-verify] Session directory: ${dirname(sessionPath)}`);
+  console.log(`[rtk-verify] Session file: ${sessionPath}`);
   console.log("");
 
   if (summary.toolCalls.length === 0) {
@@ -246,11 +233,13 @@ async function main() {
   }
 
   const rewrite = bashToolResult.details?.rtkRewrite;
-  if (rewrite?.rewrittenCommand === "rtk git status") {
-    console.log("[rtk-verify] SUCCESS: tool result details recorded rewrite to `rtk git status`.");
+  const expectedRtkBin = requestedRtkBin ?? "rtk";
+  const expectedRewrite = `${expectedRtkBin} git status`;
+  if (rewrite?.rewrittenCommand === expectedRewrite) {
+    console.log(`[rtk-verify] SUCCESS: tool result details recorded rewrite to \`${expectedRewrite}\`.`);
   } else {
     throw new Error(
-      `[rtk-verify] Expected tool result details to contain rewritten command \`rtk git status\`, got: ${JSON.stringify(rewrite)}`,
+      `[rtk-verify] Expected tool result details to contain rewritten command \`${expectedRewrite}\`, got: ${JSON.stringify(rewrite)}`,
     );
   }
 
