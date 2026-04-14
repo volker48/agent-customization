@@ -7,7 +7,11 @@
     "format": "oxfmt --write pi-extensions opencode-plugins package.json tsconfig.json",
     "format:check": "oxfmt --check pi-extensions opencode-plugins package.json tsconfig.json",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:rtk": "vitest run tests/rtk.test.ts",
+    "test:rtk:e2e": "RTK_E2E=1 vitest run tests/rtk.e2e.test.ts",
+    "verify:rtk": "node scripts/verify-rtk-extension.mjs",
+    "validate:rtk": "node scripts/verify-rtk-extension.mjs"
   },
   "devDependencies": {
     "@mariozechner/pi-ai": "0.52.12",

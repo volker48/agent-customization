@@ -16,6 +16,7 @@ pi-extensions/         # Pi agent extensions (TypeScript)
   sound-notifications.ts
   exa-search.ts        # Exa web search tool
   webfetch.ts          # Generic web fetch tool
+  rtk.ts               # RTK bash rewrite hook
   handoff/             # Session handoff command (/handoff)
 
 pi-themes/             # Pi agent color themes
@@ -167,6 +168,10 @@ Registers an `exa_search` tool that queries the [Exa](https://exa.ai) search API
 
 Registers a `webfetch` tool for fetching web pages directly. Supports markdown conversion, probing, and smart fallback strategies.
 
+### Pi: RTK (`pi-extensions/rtk.ts`)
+
+Intercepts `bash` tool calls and delegates command rewriting to `rtk rewrite <command>`. Only rewrites when RTK returns a different non-empty command. Supports `PI_RTK_BIN` or Pi's `--rtk-bin` flag for binary overrides.
+
 ### Pi: Handoff (`pi-extensions/handoff/`)
 
 Adds a `/handoff <goal>` command that generates a session context summary, opens it in your editor for review, then creates a new Pi session pre-filled with the handoff document.
@@ -183,6 +188,9 @@ pnpm typecheck     # TypeScript type checking
 pnpm lint          # Linting with oxlint
 pnpm format        # Format with oxfmt
 pnpm test          # Run tests with vitest
+pnpm test:rtk      # Fast RTK extension regression tests
+pnpm test:rtk:e2e  # Opt-in real RTK integration tests
+pnpm verify:rtk    # Standalone Pi CLI verification using --session and --extension
 ```
 
 Requires Node.js ≥ 22.
