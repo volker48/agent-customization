@@ -4,7 +4,7 @@
  * Registers a `webfetch` tool used to access website URLs directly.
  *
  * Default Accept header behavior:
- *   "text/markdown, text/html" (markdown first)
+ *   Markdown media types get higher q-values than HTML.
  * Can be overridden with the `accept` parameter.
  */
 
@@ -21,7 +21,8 @@ import { mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const DEFAULT_ACCEPT_HEADER = "text/markdown, text/html";
+const DEFAULT_ACCEPT_HEADER =
+  "text/markdown;q=1.0, text/x-markdown;q=0.95, application/markdown;q=0.95, text/html;q=0.8";
 const DEFAULT_ACCEPT_ENCODING = "identity";
 const DEFAULT_MAX_CHARS = 12000;
 const MIN_MAX_CHARS = 1000;
@@ -293,6 +294,10 @@ function isTextContentType(contentTypeHeader: string): boolean {
     return true;
   }
 
+  if (isMarkdownMediaType(normalized)) {
+    return true;
+  }
+
   if (normalized.endsWith("+json") || normalized.endsWith("+xml")) {
     return true;
   }
@@ -304,7 +309,7 @@ function buildUnsupportedContentMessage(contentType: string): string {
   const normalized = contentType.trim() || "(missing)";
   const guidance =
     "If this endpoint should be text, try an explicit Accept header (for example: " +
-    '"text/plain, text/markdown, text/html").';
+    '"text/markdown;q=1.0, text/plain;q=0.9, text/html;q=0.8").';
 
   return (
     `Unsupported content-type: ${normalized}. ` +
@@ -1308,8 +1313,8 @@ export default function webfetchExtension(pi: ExtensionAPI) {
     name: "webfetch",
     label: "Web Fetch",
     description:
-      "Fetch HTTP(S) pages without JS rendering. Defaults to Accept: text/markdown, text/html " +
-      "(markdown first), supports optional header overrides, probe mode, and a smart strategy " +
+      "Fetch HTTP(S) pages without JS rendering. Defaults to an Accept header that prefers " +
+      "markdown over HTML, supports optional header overrides, probe mode, and a smart strategy " +
       "that probes first and can follow alternate markdown links. Returns only text-like content " +
       "types. Output is truncated to " +
       `${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)} (whichever is hit first), ` +

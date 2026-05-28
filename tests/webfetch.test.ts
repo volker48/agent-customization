@@ -181,9 +181,31 @@ describe("webfetch extension", () => {
 
     const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
     expect(init?.headers).toEqual({
-      Accept: "text/markdown, text/html",
+      Accept:
+        "text/markdown;q=1.0, text/x-markdown;q=0.95, application/markdown;q=0.95, text/html;q=0.8",
       "Accept-Encoding": "identity",
     });
+  });
+
+  it("accepts application/markdown responses as text", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("# Markdown", {
+        status: 200,
+        headers: { "Content-Type": "application/markdown" },
+      }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_application_markdown",
+      { url: "https://example.com/page" },
+      new AbortController().signal,
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0]?.text).toContain("# Markdown");
   });
 
   it("supports Accept override, custom headers, and redacts sensitive header diagnostics", async () => {
