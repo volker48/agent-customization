@@ -1,6 +1,9 @@
 {
   "name": "agent-customization",
   "private": true,
+  "keywords": [
+    "pi-package"
+  ],
   "type": "module",
   "scripts": {
     "lint": "oxlint pi-extensions opencode-plugins",
@@ -12,6 +15,12 @@
     "test:rtk:e2e": "RTK_E2E=1 vitest run tests/rtk.e2e.test.ts",
     "verify:rtk": "node scripts/verify-rtk-extension.mjs",
     "validate:rtk": "node scripts/verify-rtk-extension.mjs"
+  },
+  "dependencies": {
+    "@mozilla/readability": "0.6.0",
+    "linkedom": "0.18.12",
+    "turndown": "7.2.4",
+    "turndown-plugin-gfm": "1.0.2"
   },
   "devDependencies": {
     "@mariozechner/pi-ai": "0.52.12",
@@ -27,5 +36,10 @@
   "engines": {
     "node": ">=22"
   },
-  "packageManager": "pnpm@10.28.2"
+  "packageManager": "pnpm@10.28.2",
+  "pi": {
+    "extensions": [
+      "./pi-extensions"
+    ]
+  }
 }

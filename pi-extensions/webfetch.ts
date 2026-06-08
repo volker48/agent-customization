@@ -17,9 +17,12 @@ import {
   type TruncationResult,
 } from "@mariozechner/pi-coding-agent";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { realpathSync } from "node:fs";
 import { mkdtemp, open, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const DEFAULT_ACCEPT_HEADER =
   "text/markdown;q=1.0, text/x-markdown;q=0.95, application/markdown;q=0.95, text/html;q=0.8";
@@ -28,6 +31,8 @@ const DEFAULT_MAX_CHARS = 12000;
 const MIN_MAX_CHARS = 1000;
 const MAX_MAX_CHARS = 100000;
 const DEFAULT_PROBE_MAX_BYTES = 8192;
+const MAX_HTML_CONVERT_BYTES = 5 * 1024 * 1024;
+const MIN_READABILITY_LENGTH = 200;
 const MAX_REDIRECTS = 10;
 
 const FETCH_MODES = ["full", "probe"] as const;
@@ -114,6 +119,11 @@ const WebFetchParams = Type.Object({
         "Optional custom request headers. Hop-by-hop and restricted headers are ignored.",
     }),
   ),
+  raw: Type.Optional(
+    Type.Boolean({
+      description: "Return text/html responses as raw HTML instead of converted markdown.",
+    }),
+  ),
 });
 
 interface WebFetchDetails {
@@ -146,7 +156,12 @@ interface WebFetchDetails {
   smartNotes: string[];
   probeBytesRead?: number;
   probeByteLimit?: number;
+  converted: boolean;
+  conversionMethod: ConversionMethod;
+  originalHtmlBytes?: number;
 }
+
+type ConversionMethod = "readability" | "full-page" | "none";
 
 interface StreamedResponseText {
   text: string;
@@ -155,6 +170,10 @@ interface StreamedResponseText {
   totalCharacters: number;
   fullOutputPath?: string;
   truncation?: TruncationResult;
+  converted: boolean;
+  conversionMethod: ConversionMethod;
+  originalHtmlBytes?: number;
+  jsShellDetectionText?: string;
 }
 
 interface ProbeResponseText extends StreamedResponseText {
@@ -178,6 +197,34 @@ interface FetchWithRedirectsResult {
   response: Response;
   redirectChain: string[];
   finalUrl: string;
+}
+
+interface ReadabilityArticle {
+  title?: string;
+  byline?: string;
+  siteName?: string;
+  content?: string;
+  length: number;
+}
+
+interface ConverterDeps {
+  Readability: new (document: Document) => { parse(): ReadabilityArticle | null };
+  parseHTML: (html: string) => { document: Document };
+  TurndownService: new (options: Record<string, string>) => TurndownServiceLike;
+  gfm: unknown;
+}
+
+interface TurndownServiceLike {
+  use(plugin: unknown): void;
+  turndown(html: string): string;
+}
+
+interface HtmlMarkdownConversion {
+  markdown: string;
+  title?: string;
+  byline?: string;
+  siteName?: string;
+  conversionMethod: Exclude<ConversionMethod, "none">;
 }
 
 interface FetchAttemptSuccess {
@@ -884,6 +931,9 @@ function buildDetails(args: {
   smartNotes: string[];
   probeBytesRead?: number;
   probeByteLimit?: number;
+  converted: boolean;
+  conversionMethod: ConversionMethod;
+  originalHtmlBytes?: number;
 }): WebFetchDetails {
   return {
     requestedUrl: redactRawUrlCredentials(args.requestedUrl),
@@ -917,6 +967,9 @@ function buildDetails(args: {
     smartNotes: args.smartNotes,
     probeBytesRead: args.probeBytesRead,
     probeByteLimit: args.probeByteLimit,
+    converted: args.converted,
+    conversionMethod: args.conversionMethod,
+    originalHtmlBytes: args.originalHtmlBytes,
   };
 }
 
@@ -980,6 +1033,8 @@ function buildStreamedText(args: {
       truncated: false,
       charTruncated: false,
       totalCharacters: args.totalCharacters,
+      converted: false,
+      conversionMethod: "none",
     };
   }
 
@@ -998,7 +1053,243 @@ function buildStreamedText(args: {
     totalCharacters: args.totalCharacters,
     fullOutputPath: args.fullOutputPath,
     truncation: args.headTruncation,
+    converted: false,
+    conversionMethod: "none",
   };
+}
+
+let converterDeps: ConverterDeps | undefined;
+let turndownService: TurndownServiceLike | undefined;
+
+function loadConverterDeps(): ConverterDeps {
+  if (converterDeps) {
+    return converterDeps;
+  }
+
+  const extensionPath = realpathSync(fileURLToPath(import.meta.url));
+  const requireFromExtension = createRequire(extensionPath);
+  const readability = requireFromExtension("@mozilla/readability") as Pick<
+    ConverterDeps,
+    "Readability"
+  >;
+  const linkedom = requireFromExtension("linkedom") as Pick<ConverterDeps, "parseHTML">;
+  const TurndownService = requireFromExtension("turndown") as ConverterDeps["TurndownService"];
+  const turndownGfm = requireFromExtension("turndown-plugin-gfm") as Pick<ConverterDeps, "gfm">;
+
+  converterDeps = {
+    Readability: readability.Readability,
+    parseHTML: linkedom.parseHTML,
+    TurndownService,
+    gfm: turndownGfm.gfm,
+  };
+  return converterDeps;
+}
+
+function getTurndownService(): TurndownServiceLike {
+  if (!turndownService) {
+    const { TurndownService, gfm } = loadConverterDeps();
+    turndownService = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced" });
+    turndownService.use(gfm);
+  }
+
+  return turndownService;
+}
+
+function htmlToMarkdown(html: string): string {
+  return getTurndownService().turndown(html).trim();
+}
+
+function htmlWithBaseUrl(html: string, baseUrl: string): string {
+  const baseTag = `<base href="${baseUrl.replace(/"/g, "&quot;")}">`;
+  if (/<head\b[^>]*>/i.test(html)) {
+    return html.replace(/<head\b([^>]*)>/i, `<head$1>${baseTag}`);
+  }
+
+  return `${baseTag}${html}`;
+}
+
+function extractArticle(html: string, baseUrl: string): HtmlMarkdownConversion | undefined {
+  const { Readability, parseHTML } = loadConverterDeps();
+  const { document } = parseHTML(htmlWithBaseUrl(html, baseUrl));
+  const article = new Readability(document).parse();
+  if (!article?.content || article.length < MIN_READABILITY_LENGTH) {
+    return undefined;
+  }
+
+  const markdown = htmlToMarkdown(article.content);
+  if (!markdown) {
+    return undefined;
+  }
+
+  return {
+    markdown,
+    title: article.title?.trim(),
+    byline: article.byline?.trim(),
+    siteName: article.siteName?.trim(),
+    conversionMethod: "readability",
+  };
+}
+
+function buildMarkdownHeader(meta: HtmlMarkdownConversion, finalUrl: string): string {
+  const lines: string[] = [];
+  if (meta.title) lines.push(`# ${meta.title}`);
+  lines.push(`Source: ${redactUrlCredentials(finalUrl)}`);
+  if (meta.byline) lines.push(`Byline: ${meta.byline}`);
+  if (meta.siteName) lines.push(`Site: ${meta.siteName}`);
+  return `${lines.join("\n")}\n\n`;
+}
+
+function convertHtmlToMarkdown(args: {
+  html: string;
+  baseUrl: string;
+}): HtmlMarkdownConversion | undefined {
+  const article = extractArticle(args.html, args.baseUrl);
+  if (article) {
+    return article;
+  }
+
+  const { parseHTML } = loadConverterDeps();
+  const { document } = parseHTML(htmlWithBaseUrl(args.html, args.baseUrl));
+  const bodyHtml = document.body?.innerHTML || args.html;
+  const markdown = htmlToMarkdown(bodyHtml);
+  if (!markdown) {
+    return undefined;
+  }
+
+  return { markdown, conversionMethod: "full-page" };
+}
+
+async function readTextWithinLimit(
+  response: Response,
+  byteLimit: number,
+): Promise<{ text: string; bytes: number } | undefined> {
+  if (!response.body) {
+    return { text: "", bytes: 0 };
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+
+      bytes += value.byteLength;
+      if (bytes > byteLimit) {
+        return undefined;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {}
+  }
+
+  return { text: new TextDecoder().decode(Buffer.concat(chunks)), bytes };
+}
+
+async function buildFullTextResult(args: {
+  text: string;
+  maxChars: number;
+  converted: boolean;
+  conversionMethod: ConversionMethod;
+  originalHtmlBytes?: number;
+  jsShellDetectionText?: string;
+}): Promise<StreamedResponseText> {
+  const head = truncateHead(args.text, {
+    maxLines: DEFAULT_MAX_LINES,
+    maxBytes: DEFAULT_MAX_BYTES,
+  });
+  const tempDir = await mkdtemp(join(tmpdir(), "pi-webfetch-"));
+  const fullOutputPath = join(tempDir, "output.txt");
+  const outputFile = await open(fullOutputPath, "w");
+  try {
+    await outputFile.write(args.text);
+  } finally {
+    await outputFile.close();
+  }
+
+  const streamed = buildStreamedText({
+    headText: head.content,
+    totalCharacters: args.text.length,
+    maxChars: args.maxChars,
+    fullOutputPath,
+    headTruncation: head.truncated ? head : undefined,
+  });
+
+  if (!streamed.truncated) {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+
+  return {
+    ...streamed,
+    converted: args.converted,
+    conversionMethod: args.conversionMethod,
+    originalHtmlBytes: args.originalHtmlBytes,
+    jsShellDetectionText: args.jsShellDetectionText,
+  };
+}
+
+async function readFullResponseText(args: {
+  response: Response;
+  maxChars: number;
+  contentType: string;
+  contentLength?: number;
+  finalUrl: string;
+  raw: boolean;
+}): Promise<StreamedResponseText> {
+  const canConvert =
+    !args.raw &&
+    args.response.status >= 200 &&
+    args.response.status < 300 &&
+    normalizeContentType(args.contentType) === "text/html" &&
+    (args.contentLength === undefined || args.contentLength <= MAX_HTML_CONVERT_BYTES);
+
+  if (!canConvert) {
+    return streamResponseText(args.response, args.maxChars);
+  }
+
+  const rawResponse = args.response.clone();
+  const html = await readTextWithinLimit(args.response, MAX_HTML_CONVERT_BYTES);
+  if (!html) {
+    return streamResponseText(rawResponse, args.maxChars);
+  }
+
+  try {
+    const conversion = convertHtmlToMarkdown({ html: html.text, baseUrl: args.finalUrl });
+    if (!conversion) {
+      return buildFullTextResult({
+        text: html.text,
+        maxChars: args.maxChars,
+        converted: false,
+        conversionMethod: "none",
+        originalHtmlBytes: html.bytes,
+        jsShellDetectionText: html.text,
+      });
+    }
+
+    return buildFullTextResult({
+      text: `${buildMarkdownHeader(conversion, args.finalUrl)}${conversion.markdown}`,
+      maxChars: args.maxChars,
+      converted: true,
+      conversionMethod: conversion.conversionMethod,
+      originalHtmlBytes: html.bytes,
+      jsShellDetectionText: html.text,
+    });
+  } catch {
+    return buildFullTextResult({
+      text: html.text,
+      maxChars: args.maxChars,
+      converted: false,
+      conversionMethod: "none",
+      originalHtmlBytes: html.bytes,
+      jsShellDetectionText: html.text,
+    });
+  }
 }
 
 async function streamResponseText(
@@ -1006,7 +1297,14 @@ async function streamResponseText(
   maxChars: number,
 ): Promise<StreamedResponseText> {
   if (!response.body) {
-    return { text: "", truncated: false, charTruncated: false, totalCharacters: 0 };
+    return {
+      text: "",
+      truncated: false,
+      charTruncated: false,
+      totalCharacters: 0,
+      converted: false,
+      conversionMethod: "none",
+    };
   }
 
   const tempDir = await mkdtemp(join(tmpdir(), "pi-webfetch-"));
@@ -1072,6 +1370,8 @@ async function probeResponseText(
       totalCharacters: 0,
       probeBytesRead: 0,
       probeByteLimit,
+      converted: false,
+      conversionMethod: "none",
     };
   }
 
@@ -1136,6 +1436,8 @@ async function probeResponseText(
     totalCharacters: sampledText.length,
     probeBytesRead: bytesRead,
     probeByteLimit,
+    converted: false,
+    conversionMethod: "none",
   };
 }
 
@@ -1145,6 +1447,7 @@ async function fetchAttempt(args: {
   maxChars: number;
   requestHeaders: Record<string, string>;
   signal?: AbortSignal;
+  raw?: boolean;
 }): Promise<FetchAttemptResult> {
   const { response, finalUrl, redirectChain } = await fetchWithRedirects({
     url: args.url,
@@ -1179,7 +1482,14 @@ async function fetchAttempt(args: {
   const streamed =
     args.mode === "probe"
       ? await probeResponseText(response, args.maxChars)
-      : await streamResponseText(response, args.maxChars);
+      : await readFullResponseText({
+          response,
+          maxChars: args.maxChars,
+          contentType,
+          contentLength,
+          finalUrl,
+          raw: args.raw ?? false,
+        });
 
   return {
     kind: "success",
@@ -1192,7 +1502,7 @@ async function fetchAttempt(args: {
       finalUrl,
       redirectChain,
       streamed,
-      jsShellDetection: detectJsShell(contentType, streamed.text),
+      jsShellDetection: detectJsShell(contentType, streamed.jsShellDetectionText ?? streamed.text),
     },
   };
 }
@@ -1249,6 +1559,9 @@ function createToolResult(args: {
   smartNotes?: string[];
   probeBytesRead?: number;
   probeByteLimit?: number;
+  converted?: boolean;
+  conversionMethod?: ConversionMethod;
+  originalHtmlBytes?: number;
 }): WebFetchToolResult {
   const safeFinalUrl = redactUrlCredentials(args.finalUrl ?? args.resolvedUrl);
   const result: WebFetchToolResult = {
@@ -1298,6 +1611,9 @@ function createToolResult(args: {
       smartNotes: args.smartNotes ?? [],
       probeBytesRead: args.probeBytesRead,
       probeByteLimit: args.probeByteLimit,
+      converted: args.converted ?? false,
+      conversionMethod: args.conversionMethod ?? "none",
+      originalHtmlBytes: args.originalHtmlBytes,
     }),
   };
 
@@ -1399,6 +1715,9 @@ export default function webfetchExtension(pi: ExtensionAPI) {
           returnedCharacters: body.length,
           fullOutputPath: args.attempt.streamed.fullOutputPath,
           truncation: args.attempt.streamed.truncation,
+          converted: args.attempt.streamed.converted,
+          conversionMethod: args.attempt.streamed.conversionMethod,
+          originalHtmlBytes: args.attempt.streamed.originalHtmlBytes,
           detectedJsShell: args.attempt.jsShellDetection.detected,
           jsShellSignals: args.attempt.jsShellDetection.signals,
           alternateCandidates: (args.alternateCandidates ?? []).map((candidate) => candidate.url),
@@ -1484,6 +1803,7 @@ export default function webfetchExtension(pi: ExtensionAPI) {
             maxChars,
             requestHeaders: preparedHeaders.requestHeaders,
             signal,
+            raw: params.raw ?? false,
           });
 
           if (directAttempt.kind === "unsupported-content") {
@@ -1508,6 +1828,7 @@ export default function webfetchExtension(pi: ExtensionAPI) {
           maxChars,
           requestHeaders: preparedHeaders.requestHeaders,
           signal,
+          raw: params.raw ?? false,
         });
 
         if (probeAttemptResult.kind === "unsupported-content") {
@@ -1560,6 +1881,7 @@ export default function webfetchExtension(pi: ExtensionAPI) {
             maxChars,
             requestHeaders: preparedHeaders.requestHeaders,
             signal,
+            raw: params.raw ?? false,
           });
 
           if (alternateAttemptResult.kind === "unsupported-content") {
@@ -1604,6 +1926,7 @@ export default function webfetchExtension(pi: ExtensionAPI) {
           maxChars,
           requestHeaders: preparedHeaders.requestHeaders,
           signal,
+          raw: params.raw ?? false,
         });
 
         if (primaryAttemptResult.kind === "unsupported-content") {

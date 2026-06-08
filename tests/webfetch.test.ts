@@ -1,6 +1,7 @@
 import { access, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import TurndownService from "turndown";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import webfetchExtension from "../pi-extensions/webfetch.js";
@@ -12,6 +13,7 @@ type WebFetchParams = {
   strategy?: "direct" | "smart";
   accept?: string;
   headers?: Record<string, string>;
+  raw?: boolean;
 };
 
 type ToolResult = {
@@ -52,6 +54,9 @@ type WebFetchTestDetails = {
   probeBytesRead?: number;
   probeByteLimit?: number;
   fullOutputPath?: string;
+  converted?: boolean;
+  conversionMethod?: "readability" | "full-page" | "none";
+  originalHtmlBytes?: number;
 };
 
 function createMockPi() {
@@ -206,6 +211,181 @@ describe("webfetch extension", () => {
 
     expect(result.isError).toBeUndefined();
     expect(result.content[0]?.text).toContain("# Markdown");
+  });
+
+  it("converts HTML articles to markdown with source metadata", async () => {
+    const articleText = Array.from(
+      { length: 30 },
+      (_, index) => `Paragraph ${index} explains the release notes in useful detail.`,
+    ).join(" ");
+    const html = [
+      "<!doctype html><html><head><title>Release Notes</title></head><body>",
+      `<main><article><h1>Release Notes</h1><p>${articleText}</p></article>`,
+      `<nav>${"<a>noise</a>".repeat(100)}</nav></main></body></html>`,
+    ].join("");
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(html, {
+        status: 200,
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_html_article",
+      { url: "https://example.com/release" },
+      new AbortController().signal,
+    );
+
+    const body = result.content[0]?.text ?? "";
+    const details = result.details as WebFetchTestDetails | undefined;
+
+    expect(result.isError).toBeUndefined();
+    expect(body).toContain("# Release Notes");
+    expect(body).toContain("Source: https://example.com/release");
+    expect(body).not.toContain("<!doctype html>");
+    expect(details?.converted).toBe(true);
+    expect(details?.conversionMethod).toBe("readability");
+    expect(details?.originalHtmlBytes).toBeGreaterThan(0);
+  });
+
+  it("preserves HTML tables as GFM markdown tables", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        "<html><body><table><thead><tr><th>Name</th><th>Done</th></tr></thead>" +
+          "<tbody><tr><td>Docs</td><td>Yes</td></tr></tbody></table></body></html>",
+        { status: 200, headers: { "Content-Type": "text/html" } },
+      ),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_html_table",
+      { url: "https://example.com/table" },
+      new AbortController().signal,
+    );
+
+    expect(result.content[0]?.text).toContain("| Name | Done |");
+    expect(result.content[0]?.text).toContain("| Docs | Yes |");
+    expect((result.details as WebFetchTestDetails).conversionMethod).toBe("full-page");
+  });
+
+  it("falls back to full-page markdown for thin HTML", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("<html><body><h1>Thin</h1><p>Small page.</p></body></html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_thin_html",
+      { url: "https://example.com/thin" },
+      new AbortController().signal,
+    );
+
+    expect(result.content[0]?.text).toContain("# Thin");
+    expect((result.details as WebFetchTestDetails).conversionMethod).toBe("full-page");
+  });
+
+  it("degrades to raw HTML when conversion throws", async () => {
+    vi.spyOn(TurndownService.prototype, "turndown").mockImplementation(() => {
+      throw new Error("converter failed");
+    });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("<html><body><h1>Still returned</h1></body></html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_conversion_throw",
+      { url: "https://example.com/throws" },
+      new AbortController().signal,
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0]?.text).toContain("<h1>Still returned</h1>");
+    expect((result.details as WebFetchTestDetails).conversionMethod).toBe("none");
+  });
+
+  it("bypasses HTML conversion when raw is true", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("<html><body><h1>Raw</h1></body></html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_raw_html",
+      { url: "https://example.com/raw", raw: true },
+      new AbortController().signal,
+    );
+
+    expect(result.content[0]?.text).toContain("<html><body><h1>Raw</h1></body></html>");
+    expect((result.details as WebFetchTestDetails).converted).toBe(false);
+  });
+
+  it("skips conversion for oversized HTML", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("<html><body><h1>Large</h1></body></html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html", "Content-Length": "5242881" },
+      }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_large_html",
+      { url: "https://example.com/large" },
+      new AbortController().signal,
+    );
+
+    expect(result.content[0]?.text).toContain("<html><body><h1>Large</h1></body></html>");
+    expect((result.details as WebFetchTestDetails).converted).toBe(false);
+  });
+
+  it("applies maxChars truncation after HTML conversion", async () => {
+    const html = [
+      "<html><body><main><article><h1>Long</h1><p>",
+      "converted text ".repeat(500),
+      "</p></article></main></body></html>",
+    ].join("");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(html, { status: 200, headers: { "Content-Type": "text/html" } }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_converted_truncated",
+      { url: "https://example.com/long", maxChars: 1000 },
+      new AbortController().signal,
+    );
+
+    const details = result.details as WebFetchTestDetails;
+    expect(details.converted).toBe(true);
+    expect(details.truncatedByMaxChars).toBe(true);
+    expect(result.content[0]?.text).toContain("Output truncated");
   });
 
   it("supports Accept override, custom headers, and redacts sensitive header diagnostics", async () => {

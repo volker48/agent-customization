@@ -166,7 +166,12 @@ Registers an `exa_search` tool that queries the [Exa](https://exa.ai) search API
 
 ### Pi: Web Fetch (`pi-extensions/webfetch.ts`)
 
-Registers a `webfetch` tool for fetching web pages directly. Supports markdown conversion, probing, and smart fallback strategies.
+Registers a `webfetch` tool for fetching web pages directly. Supports markdown conversion,
+probing, and smart fallback strategies.
+
+HTML-to-markdown conversion depends on runtime packages in this repository. Use the
+extension from this checkout (or distribute it as a pi package); copying only
+`pi-extensions/webfetch.ts` elsewhere will not copy those dependencies.
 
 ### Pi: RTK (`pi-extensions/rtk.ts`)
 
