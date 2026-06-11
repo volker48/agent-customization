@@ -17,7 +17,6 @@ pi-extensions/         # Pi agent extensions (TypeScript)
   exa-search.ts        # Exa web search tool
   webfetch.ts          # Generic web fetch tool
   rtk.ts               # RTK bash rewrite hook
-  handoff/             # Session handoff command (/handoff)
 
 pi-themes/             # Pi agent color themes
   obsec-dark.json
@@ -176,10 +175,6 @@ extension from this checkout (or distribute it as a pi package); copying only
 ### Pi: RTK (`pi-extensions/rtk.ts`)
 
 Intercepts `bash` tool calls and delegates command rewriting to `rtk rewrite <command>`. Only rewrites when RTK returns a different non-empty command. Supports `PI_RTK_BIN` or Pi's `--rtk-bin` flag for binary overrides.
-
-### Pi: Handoff (`pi-extensions/handoff/`)
-
-Adds a `/handoff <goal>` command that generates a session context summary, opens it in your editor for review, then creates a new Pi session pre-filled with the handoff document.
 
 ### Pi: Themes (`pi-themes/`)
 
