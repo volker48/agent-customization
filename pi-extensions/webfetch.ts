@@ -8,15 +8,15 @@
  * Can be overridden with the `accept` parameter.
  */
 
-import { StringEnum, Type } from "@mariozechner/pi-ai";
+import { StringEnum, Type } from "@earendil-works/pi-ai";
 import {
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_LINES,
   formatSize,
   truncateHead,
   type TruncationResult,
-} from "@mariozechner/pi-coding-agent";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { realpathSync } from "node:fs";
 import { mkdtemp, open, rm } from "node:fs/promises";
 import { createRequire } from "node:module";

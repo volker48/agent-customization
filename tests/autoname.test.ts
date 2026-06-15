@@ -1,16 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { complete } from "@mariozechner/pi-ai";
+import { complete } from "@earendil-works/pi-ai";
 import autonameExtension, {
   buildAutonameTranscript,
   sanitizeSessionName,
 } from "../pi-extensions/autoname.js";
 
-vi.mock("@mariozechner/pi-ai", () => ({
+vi.mock("@earendil-works/pi-ai", () => ({
   complete: vi.fn(),
 }));
 
-vi.mock("@mariozechner/pi-coding-agent", () => ({
+vi.mock("@earendil-works/pi-coding-agent", () => ({
   BorderedLoader: class {
     signal = new AbortController().signal;
     onAbort?: () => void;

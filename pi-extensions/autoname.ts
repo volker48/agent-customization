@@ -1,9 +1,9 @@
-import { complete, type Message, type Model } from "@mariozechner/pi-ai";
+import { complete, type Message, type Model } from "@earendil-works/pi-ai";
 import {
   BorderedLoader,
   type ExtensionAPI,
   type ExtensionCommandContext,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 

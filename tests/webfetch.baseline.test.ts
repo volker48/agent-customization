@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
-import { estimateTokens } from "@mariozechner/pi-coding-agent";
+import { estimateTokens } from "@earendil-works/pi-coding-agent";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import webfetchExtension from "../pi-extensions/webfetch.js";
