@@ -38,7 +38,7 @@
  * Cooldown: Set SOUND_MIN_INTERVAL_MS (default: 250)
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { homedir } from "node:os";
@@ -137,10 +137,10 @@ function registerEventHandler(pi: ExtensionAPI, event: EventName, handler: () =>
       pi.on("session_shutdown", handler);
       break;
     case "session_switch":
-      pi.on("session_switch", handler);
+      pi.on("session_before_switch", handler);
       break;
     case "session_fork":
-      pi.on("session_fork", handler);
+      pi.on("session_before_fork", handler);
       break;
     case "session_compact":
       pi.on("session_compact", handler);
