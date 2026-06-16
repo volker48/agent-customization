@@ -16,17 +16,16 @@ import { runFusion } from "./orchestrator.js";
 import type { FusionConfig, FusionProgressEvent } from "./types.js";
 import {
   FUSION_MESSAGE_TYPE,
-  type FusionResultDetails,
-  renderFusionMarkdown,
-  toFusionMessage,
+  type FusionPanelDetails,
+  renderFusionPanelMarkdown,
+  toFusionPanelMessage,
 } from "./render.js";
 
 const LOADER_KEY = "fusion";
 
 export default function fusionExtension(pi: ExtensionAPI) {
-  pi.registerMessageRenderer<FusionResultDetails>(FUSION_MESSAGE_TYPE, (message, { expanded }) => {
-    const content = contentToString(message.content);
-    const markdown = renderFusionMarkdown(content, message.details, expanded);
+  pi.registerMessageRenderer<FusionPanelDetails>(FUSION_MESSAGE_TYPE, (message, { expanded }) => {
+    const markdown = renderFusionPanelMarkdown(message.details, expanded);
     return new Markdown(markdown, 1, 0, getMarkdownTheme());
   });
 
@@ -86,7 +85,9 @@ export default function fusionExtension(pi: ExtensionAPI) {
           return;
         }
 
-        pi.sendMessage(toFusionMessage(result));
+        debugLogger?.log("synthesis-triggered", { activeModel: ctx.model?.id });
+        await debugLogger?.flush();
+        pi.sendMessage(toFusionPanelMessage(result), { triggerTurn: true });
       } catch (error) {
         if (controller.signal.aborted) {
           debugLogger?.log("cancelled");
@@ -171,14 +172,4 @@ function statusIcon(status: "pending" | "running" | "ok" | "error"): string {
 
 function allPanelsDone(state: ProgressState): boolean {
   return [...state.panels.values()].every((status) => status === "ok" || status === "error");
-}
-
-function contentToString(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => (part && typeof part === "object" && "text" in part ? String(part.text) : ""))
-      .join("");
-  }
-  return String(content ?? "");
 }

@@ -62,6 +62,6 @@ export function resultLogDetails(result: FusionResult): Record<string, unknown> 
     responseCount: result.responses.length,
     successCount: result.responses.filter((response) => response.status === "ok").length,
     error: result.error,
-    finalAnswerChars: result.judgeOutput?.finalAnswer.length,
+    confidence: result.judgeOutput?.confidence,
   };
 }

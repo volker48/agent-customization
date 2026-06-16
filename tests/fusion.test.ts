@@ -5,9 +5,15 @@ import { join } from "node:path";
 import type { AssistantMessage, Api, Model } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { loadFusionConfig, validateFusionConfig } from "../pi-extensions/fusion/config.js";
+import {
+  loadFusionConfig,
+  validateFusionConfig,
+} from "../pi-extensions/fusion/config.js";
 import { createFusionDebugLogger } from "../pi-extensions/fusion/debug-log.js";
-import { parseModelRef, resolveModelRef } from "../pi-extensions/fusion/model-ref.js";
+import {
+  parseModelRef,
+  resolveModelRef,
+} from "../pi-extensions/fusion/model-ref.js";
 import { completeWithTools } from "../pi-extensions/fusion/model-runner.js";
 import { runFusion } from "../pi-extensions/fusion/orchestrator.js";
 import {
@@ -16,7 +22,10 @@ import {
   JUDGE_SYSTEM_PROMPT,
   PANEL_SYSTEM_PROMPT,
 } from "../pi-extensions/fusion/prompts.js";
-import { renderFusionMarkdown, toFusionMessage } from "../pi-extensions/fusion/render.js";
+import {
+  renderFusionPanelMarkdown,
+  toFusionPanelMessage,
+} from "../pi-extensions/fusion/render.js";
 import type {
   CompletionClient,
   FusionConfig,
@@ -26,7 +35,10 @@ import type {
   ResolvedModel,
 } from "../pi-extensions/fusion/types.js";
 
-const FAKE_MODEL = { id: "model", provider: "provider" } as unknown as Model<Api>;
+const FAKE_MODEL = {
+  id: "model",
+  provider: "provider",
+} as unknown as Model<Api>;
 
 function assistant(
   content: AssistantMessage["content"],
@@ -60,7 +72,10 @@ function toolCallMessage(
   name: string,
   args: Record<string, unknown>,
 ): AssistantMessage {
-  return assistant([{ type: "toolCall", id, name, arguments: args }], "toolUse");
+  return assistant(
+    [{ type: "toolCall", id, name, arguments: args }],
+    "toolUse",
+  );
 }
 
 function resolved(ref: string): ResolvedModel {
@@ -83,18 +98,22 @@ describe("config validation", () => {
   });
 
   it("rejects empty panel", () => {
-    expect(() => validateFusionConfig({ judge: "a/b", models: [] })).toThrow(/non-empty/);
+    expect(() => validateFusionConfig({ judge: "a/b", models: [] })).toThrow(
+      /non-empty/,
+    );
   });
 
   it("rejects too-large panel", () => {
     const models = Array.from({ length: 9 }, (_, i) => `p/m${i}`);
-    expect(() => validateFusionConfig({ judge: "a/b", models })).toThrow(/at most 8/);
+    expect(() => validateFusionConfig({ judge: "a/b", models })).toThrow(
+      /at most 8/,
+    );
   });
 
   it("rejects an invalid model ref", () => {
-    expect(() => validateFusionConfig({ judge: "noslash", models: ["a/b"] })).toThrow(
-      /provider\/model/,
-    );
+    expect(() =>
+      validateFusionConfig({ judge: "noslash", models: ["a/b"] }),
+    ).toThrow(/provider\/model/);
   });
 
   it("defaults maxToolCalls when omitted", () => {
@@ -104,7 +123,11 @@ describe("config validation", () => {
 
   it("rejects an unknown reasoning effort", () => {
     expect(() =>
-      validateFusionConfig({ judge: "a/b", models: ["c/d"], reasoning: { effort: "extreme" } }),
+      validateFusionConfig({
+        judge: "a/b",
+        models: ["c/d"],
+        reasoning: { effort: "extreme" },
+      }),
     ).toThrow(/reasoning.effort/);
   });
 
@@ -115,9 +138,9 @@ describe("config validation", () => {
       debugLogPath: "/tmp/fusion-debug.jsonl",
     });
     expect(config.debugLogPath).toBe("/tmp/fusion-debug.jsonl");
-    expect(() => validateFusionConfig({ judge: "a/b", models: ["c/d"], debugLogPath: 42 })).toThrow(
-      /debugLogPath/,
-    );
+    expect(() =>
+      validateFusionConfig({ judge: "a/b", models: ["c/d"], debugLogPath: 42 }),
+    ).toThrow(/debugLogPath/);
   });
 
   it("loads and validates from a file", async () => {
@@ -133,7 +156,9 @@ describe("config validation", () => {
   });
 
   it("throws a clear error for a missing config file", async () => {
-    await expect(loadFusionConfig("/no/such/fusion.json")).rejects.toThrow(/Could not read/);
+    await expect(loadFusionConfig("/no/such/fusion.json")).rejects.toThrow(
+      /Could not read/,
+    );
   });
 
   it("throws a clear error for invalid JSON", async () => {
@@ -141,7 +166,9 @@ describe("config validation", () => {
     const path = join(dir, "fusion.json");
     await writeFile(path, "{ not json");
     try {
-      await expect(loadFusionConfig(path)).rejects.toThrow(/Invalid Fusion config JSON/);
+      await expect(loadFusionConfig(path)).rejects.toThrow(
+        /Invalid Fusion config JSON/,
+      );
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -155,7 +182,7 @@ describe("debug logging", () => {
     try {
       const logger = createFusionDebugLogger(path, "run-1");
       logger.log("command-started", { promptChars: 12, model: "a/b" });
-      logger.log("result", { finalAnswerChars: 20, status: "ok" });
+      logger.log("result", { confidence: "high", status: "ok" });
       await logger.flush();
 
       const lines = (await readFile(path, "utf8")).trim().split("\n");
@@ -198,9 +225,9 @@ describe("model resolution", () => {
   }
 
   it("throws when the model is not found", async () => {
-    await expect(resolveModelRef(registry({ find: () => undefined }), "a/b")).rejects.toThrow(
-      /not found/,
-    );
+    await expect(
+      resolveModelRef(registry({ find: () => undefined }), "a/b"),
+    ).rejects.toThrow(/not found/);
   });
 
   it("resolves an API-key-backed model", async () => {
@@ -211,7 +238,10 @@ describe("model resolution", () => {
   it("resolves an OAuth/subscription token returned as the api key", async () => {
     const result = await resolveModelRef(
       registry({
-        getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "sk-ant-oat-token" }),
+        getApiKeyAndHeaders: async () => ({
+          ok: true,
+          apiKey: "sk-ant-oat-token",
+        }),
         isUsingOAuth: () => true,
       }),
       "anthropic/claude-opus-4-8",
@@ -278,7 +308,10 @@ describe("bounded tool loop", () => {
       tools: [echoTool()],
       maxToolCalls: 4,
       signal: new AbortController().signal,
-      client: client([toolCallMessage("c1", "web_search", { query: "x" }), textMessage("done")]),
+      client: client([
+        toolCallMessage("c1", "web_search", { query: "x" }),
+        textMessage("done"),
+      ]),
     });
     expect(result.content).toBe("done");
     expect(result.toolCalls).toEqual([{ name: "web_search", ok: true }]);
@@ -374,7 +407,9 @@ describe("bounded tool loop", () => {
 describe("prompt builders", () => {
   it("panel prompt contains only the command args, no session context", () => {
     expect(buildPanelPrompt("compare X and Y")).toBe("compare X and Y");
-    expect(PANEL_SYSTEM_PROMPT).toMatch(/do not assume access to previous conversation/i);
+    expect(PANEL_SYSTEM_PROMPT).toMatch(
+      /Do not assume access to prior conversation/i,
+    );
   });
 
   it("judge prompt includes the task, panel responses, and failed models", () => {
@@ -401,7 +436,8 @@ describe("prompt builders", () => {
     expect(prompt).toContain("the task");
     expect(prompt).toContain("panel says hello");
     expect(prompt).toContain("anthropic/claude-opus-4-8: rate limited");
-    expect(JUDGE_SYSTEM_PROMPT).toContain("finalAnswer");
+    expect(JUDGE_SYSTEM_PROMPT).not.toContain("finalAnswer");
+    expect(JUDGE_SYSTEM_PROMPT).toContain("calling model");
   });
 });
 
@@ -417,7 +453,6 @@ describe("orchestrator", () => {
       risks: [],
     },
     confidence: "high",
-    finalAnswer: "the fused answer",
   });
 
   function registry(): ModelRegistryLike {
@@ -427,7 +462,9 @@ describe("orchestrator", () => {
     };
   }
 
-  function scriptedClient(handler: (systemPrompt: string, userPrompt: string) => string) {
+  function scriptedClient(
+    handler: (systemPrompt: string, userPrompt: string) => string,
+  ) {
     const judgeInputs: string[] = [];
     const client: CompletionClient = {
       complete: async (args) => {
@@ -437,7 +474,9 @@ describe("orchestrator", () => {
             .join("");
           judgeInputs.push(userText);
         }
-        return textMessage(handler(args.systemPrompt, args.messages[0]?.content as string));
+        return textMessage(
+          handler(args.systemPrompt, args.messages[0]?.content as string),
+        );
       },
     };
     return { client, judgeInputs };
@@ -457,7 +496,8 @@ describe("orchestrator", () => {
     });
 
     expect(result.status).toBe("ok");
-    expect(result.judgeOutput?.finalAnswer).toBe("the fused answer");
+    expect(result.judgeOutput?.confidence).toBe("high");
+    expect(result.judgeOutput?.analysis.consensus).toContain("both agree");
     expect(result.responses).toHaveLength(2);
     expect(judgeInputs[0]).toContain("panel response");
   });
@@ -466,7 +506,8 @@ describe("orchestrator", () => {
     let panelCalls = 0;
     const client: CompletionClient = {
       complete: async (args) => {
-        if (args.systemPrompt === JUDGE_SYSTEM_PROMPT) return textMessage(judgeJson);
+        if (args.systemPrompt === JUDGE_SYSTEM_PROMPT)
+          return textMessage(judgeJson);
         panelCalls += 1;
         if (panelCalls === 1) throw new Error("provider down");
         return textMessage("survivor response");
@@ -482,7 +523,7 @@ describe("orchestrator", () => {
     });
 
     expect(result.status).toBe("degraded");
-    expect(result.judgeOutput?.finalAnswer).toBe("the fused answer");
+    expect(result.judgeOutput?.confidence).toBe("high");
     expect(result.responses.some((r) => r.status === "error")).toBe(true);
   });
 
@@ -529,21 +570,33 @@ describe("orchestrator", () => {
     expect(events[0]).toMatchObject({ phase: "resolving-models" });
     expect(events).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ phase: "panel-started", model: "openai/gpt-5" }),
-        expect.objectContaining({ phase: "panel-started", model: "anthropic/claude-opus-4-8" }),
+        expect.objectContaining({
+          phase: "panel-started",
+          model: "openai/gpt-5",
+        }),
+        expect.objectContaining({
+          phase: "panel-started",
+          model: "anthropic/claude-opus-4-8",
+        }),
         expect.objectContaining({
           phase: "panel-finished",
           model: "openai/gpt-5",
           status: "ok",
         }),
-        expect.objectContaining({ phase: "judge-started", model: baseConfig.judge }),
-        expect.objectContaining({ phase: "judge-finished", model: baseConfig.judge }),
+        expect.objectContaining({
+          phase: "judge-started",
+          model: baseConfig.judge,
+        }),
+        expect.objectContaining({
+          phase: "judge-finished",
+          model: baseConfig.judge,
+        }),
       ]),
     );
   });
 });
 
-describe("result rendering", () => {
+describe("panel message rendering", () => {
   const result = {
     status: "ok" as const,
     prompt: "task",
@@ -561,7 +614,7 @@ describe("result rendering", () => {
     ],
     judgeOutput: {
       analysis: {
-        consensus: [],
+        consensus: ["both agree"],
         contradictions: [],
         partialCoverage: [],
         uniqueInsights: [],
@@ -570,26 +623,31 @@ describe("result rendering", () => {
         risks: [],
       },
       confidence: "high" as const,
-      finalAnswer: "the final answer",
     },
   };
 
-  it("builds a custom message that looks like an assistant answer", () => {
-    const message = toFusionMessage(result);
-    expect(message.customType).toBe("fusion-result");
+  it("carries the synthesis prompt as content for the calling model", () => {
+    const message = toFusionPanelMessage(result);
+    expect(message.customType).toBe("fusion-panel");
     expect(message.display).toBe(true);
-    expect(message.content).toBe("the final answer");
+    expect(message.content).toContain("You are the calling model");
+    expect(message.content).toContain("task");
+    expect(message.content).toContain("panel content");
     expect(message.details.judge).toBe("anthropic/claude-opus-4-8");
     expect(message.details.models).toEqual(["openai/gpt-5"]);
   });
 
-  it("shows only the final answer collapsed and metadata when expanded", () => {
-    const message = toFusionMessage(result);
-    expect(renderFusionMarkdown(message.content, message.details, false)).toBe("the final answer");
+  it("renders a compact panel card collapsed and details when expanded", () => {
+    const message = toFusionPanelMessage(result);
 
-    const expanded = renderFusionMarkdown(message.content, message.details, true);
-    expect(expanded).toContain("the final answer");
-    expect(expanded).toContain("Judge: anthropic/claude-opus-4-8");
+    const collapsed = renderFusionPanelMarkdown(message.details, false);
+    expect(collapsed).toContain("Fusion panel");
+    expect(collapsed).toContain("confidence high");
+    expect(collapsed).not.toContain("You are the calling model");
+
+    const expanded = renderFusionPanelMarkdown(message.details, true);
+    expect(expanded).toContain("anthropic/claude-opus-4-8");
     expect(expanded).toContain("openai/gpt-5");
+    expect(expanded).toContain("both agree");
   });
 });

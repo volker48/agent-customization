@@ -80,7 +80,6 @@ export interface FusionAnalysis {
 
 export interface FusionJudgeOutput {
   analysis: FusionAnalysis;
-  finalAnswer: string;
   confidence: Confidence;
 }
 
@@ -109,7 +108,7 @@ export type FusionProgressEvent =
       errorDetails?: Record<string, unknown>;
     }
   | { phase: "judge-started"; model: ModelRef }
-  | { phase: "judge-finished"; model: ModelRef; elapsedMs: number; finalAnswerChars: number };
+  | { phase: "judge-finished"; model: ModelRef; elapsedMs: number; confidence: Confidence };
 
 export interface ResolvedModel {
   ref: ModelRef;

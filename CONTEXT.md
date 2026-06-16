@@ -40,7 +40,7 @@ The per-harness glue that intercepts bash commands and routes them through RTK �
 ## Fusion
 
 **Fusion**:
-The panel-and-judge synthesis workflow: send one prompt to several models in parallel, then have a separate model synthesize their answers. Modeled on OpenRouter Fusion. The canonical sense is the workflow; the Pi implementation is "the Fusion extension," and one `/fusion` invocation is "a fusion run."
+The panel–judge–synthesis workflow: send one prompt to several models in parallel, have a judge produce a structured analysis of their responses, then have the calling model write the final answer grounded in that analysis. Modeled on OpenRouter Fusion. The canonical sense is the workflow; the Pi implementation is "the Fusion extension," and one `/fusion` invocation is "a fusion run."
 _Avoid_: ensemble, mixture-of-experts
 
 **Panel**:
@@ -54,15 +54,19 @@ One member of the panel.
 One panel model's typed outcome. A successful one carries its content; a "failed panel response" carries a typed error. A fusion run proceeds to the judge as long as at least one panel response succeeds.
 
 **Judge**:
-The single model that compares the panel responses and authors the final answer. It synthesizes — it does not vote on or average them.
-_Avoid_: synthesizer (as a separate role), writer, aggregator
+The single model that compares the panel responses and produces a structured analysis (consensus, contradictions, partial coverage, unique insights, blind spots, source quality, risks) plus a confidence rating. It does **not** author the final answer — the calling model does. It analyzes; it does not vote on or average the panel.
+_Avoid_: synthesizer (the judge no longer synthesizes), writer, aggregator
+
+**Calling model**:
+The active Pi model at the time of a `/fusion` invocation — whatever model `/model` currently selects, which may differ from the judge. It writes the final answer grounded in the judge's analysis and the panel responses, running inside Pi's agent loop with full session context and tools. It is *not* an inner model.
+_Avoid_: active model (when the Fusion role is the point), host model
 
 **Synthesize**:
-The canonical verb for what the judge does: compare panel responses and produce one final answer that preserves unique insights and surfaces contradictions.
+The canonical verb for what the calling model does: read the judge's analysis and the panel responses and write one final answer that preserves unique insights and resolves contradictions. The judge *analyzes*; the calling model *synthesizes*.
 _Avoid_: vote, average, merge, aggregate, fuse
 
 **Inner model**:
-A panel model or the judge — any model a fusion run drives directly through the AI completion API, outside Pi's agent loop, with no access to coding tools.
+A panel model or the judge — any model a fusion run drives directly through the AI completion API, outside Pi's agent loop, with no access to coding tools. The calling model is not an inner model: it runs inside Pi's loop with full tools.
 _Avoid_: sub-model, child agent, nested session
 
 **Inner tools**:
@@ -79,12 +83,16 @@ _Avoid_: model name, model string
 **Model registry**:
 Pi's registry that resolves a model ref to a runnable model plus its credentials (API keys, headers, auto-refreshed OAuth/subscription tokens). Fusion resolves models only through it, never through provider-specific code.
 
+**Fusion panel message**:
+The custom `fusion-panel` message a fusion run injects once the judge finishes. Its `content` is the synthesis prompt (task + judge analysis + panel responses) that the calling model reads; in the LLM context it is a user-role message. The TUI renders it as a compact card (panel size, judge, confidence) that exposes panel and analysis metadata when expanded. Injected with `triggerTurn`, so the calling model immediately produces the final answer.
+_Avoid_: fusion result, fusion-result (renamed)
+
 **Fusion result**:
-The output of a fusion run — the judge's final answer plus structured metadata (panel models, analysis, raw responses, elapsed time). Persisted as a custom `fusion-result` message that renders like a normal assistant answer collapsed, exposes metadata when expanded, and labels itself as Fusion-generated for future model context.
+The calling model's synthesized final answer — a normal assistant message, so `/copy` works on it. It follows the fusion panel message in the transcript and is grounded in the judge's analysis and the panel responses.
 _Avoid_: fusion output, answer (unqualified)
 
 **Degraded**:
-The fusion run status when the judge synthesized an answer but at least one panel model failed. Distinct from `ok` (all panels succeeded) and `error` (all panels failed, no judge run).
+The fusion run status when the judge analyzed the panel but at least one panel model failed. Distinct from `ok` (all panels succeeded) and `error` (all panels failed, no judge run).
 _Avoid_: partial, warning
 
 **DRACO**:

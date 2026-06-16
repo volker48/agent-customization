@@ -76,7 +76,7 @@ export async function runFusion(args: {
     phase: "judge-finished",
     model: args.config.judge,
     elapsedMs: Date.now() - judgeStarted,
-    finalAnswerChars: judgeOutput.finalAnswer.length,
+    confidence: judgeOutput.confidence,
   });
 
   return {
@@ -158,16 +158,15 @@ async function runPanelModel(args: {
 export function parseJudgeOutput(content: string): FusionJudgeOutput {
   try {
     const parsed = JSON.parse(stripCodeFence(content)) as Partial<FusionJudgeOutput>;
-    if (typeof parsed.finalAnswer === "string" && isConfidence(parsed.confidence)) {
+    if (isConfidence(parsed.confidence)) {
       return {
         analysis: { ...emptyAnalysis(), ...parsed.analysis },
         confidence: parsed.confidence,
-        finalAnswer: parsed.finalAnswer,
       };
     }
   } catch {}
 
-  return { analysis: emptyAnalysis(), confidence: "low", finalAnswer: content };
+  return { analysis: emptyAnalysis(), confidence: "low" };
 }
 
 function stripCodeFence(content: string): string {
