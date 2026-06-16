@@ -17,6 +17,11 @@ import {
 import { completeWithTools } from "../pi-extensions/fusion/model-runner.js";
 import { runFusion } from "../pi-extensions/fusion/orchestrator.js";
 import {
+  createProgressState,
+  formatProgress,
+  reduceProgress,
+} from "../pi-extensions/fusion/progress.js";
+import {
   buildJudgePrompt,
   buildPanelPrompt,
   JUDGE_SYSTEM_PROMPT,
@@ -649,5 +654,101 @@ describe("panel message rendering", () => {
     expect(expanded).toContain("anthropic/claude-opus-4-8");
     expect(expanded).toContain("openai/gpt-5");
     expect(expanded).toContain("both agree");
+  });
+});
+
+describe("progress reducer", () => {
+  it("starts in loading-config and seeds panels on resolving-models", () => {
+    const empty = createProgressState();
+    expect(empty.phase).toBe("loading config");
+    expect(empty.panels.size).toBe(0);
+
+    const seeded = reduceProgress(empty, {
+      phase: "resolving-models",
+      models: baseConfig.models,
+      judge: baseConfig.judge,
+    });
+    expect(seeded.phase).toBe("resolving models");
+    expect([...seeded.panels.keys()]).toEqual(baseConfig.models);
+    expect(seeded.judge).toBe(baseConfig.judge);
+  });
+
+  it("holds at running-panel until the last panel finishes, then runs the judge", () => {
+    let state = createProgressState(baseConfig);
+    state = reduceProgress(state, {
+      phase: "panel-started",
+      model: "openai/gpt-5",
+      panelRunId: "a",
+    });
+    expect(state.phase).toBe("running panel");
+
+    state = reduceProgress(state, {
+      phase: "panel-finished",
+      model: "openai/gpt-5",
+      panelRunId: "a",
+      status: "ok",
+      elapsedMs: 1,
+    });
+    expect(state.phase).toBe("running panel");
+
+    state = reduceProgress(state, {
+      phase: "panel-finished",
+      model: "anthropic/claude-opus-4-8",
+      panelRunId: "b",
+      status: "error",
+      elapsedMs: 1,
+    });
+    expect(state.phase).toBe("running judge");
+  });
+
+  it("marks the judge running then complete", () => {
+    let state = createProgressState(baseConfig);
+    state = reduceProgress(state, { phase: "judge-started", model: baseConfig.judge });
+    expect(state.judgeStatus).toBe("running");
+
+    state = reduceProgress(state, {
+      phase: "judge-finished",
+      model: baseConfig.judge,
+      elapsedMs: 1,
+      confidence: "high",
+    });
+    expect(state.phase).toBe("complete");
+    expect(state.judgeStatus).toBe("ok");
+  });
+
+  it("does not mutate the input state", () => {
+    const state = createProgressState(baseConfig);
+    const next = reduceProgress(state, {
+      phase: "panel-started",
+      model: "openai/gpt-5",
+      panelRunId: "a",
+    });
+    expect(state.panels.get("openai/gpt-5")).toBe("pending");
+    expect(next.panels.get("openai/gpt-5")).toBe("running");
+    expect(next).not.toBe(state);
+  });
+
+  it("renders panel icons, completion count, and the judge line", () => {
+    let state = createProgressState(baseConfig);
+    state = reduceProgress(state, {
+      phase: "panel-finished",
+      model: "openai/gpt-5",
+      panelRunId: "a",
+      status: "ok",
+      elapsedMs: 1,
+    });
+    state = reduceProgress(state, {
+      phase: "panel-finished",
+      model: "anthropic/claude-opus-4-8",
+      panelRunId: "b",
+      status: "error",
+      elapsedMs: 1,
+    });
+
+    const text = formatProgress(state);
+    expect(text).toContain("Panel: 2/2 complete");
+    expect(text).toContain("✓ openai/gpt-5");
+    expect(text).toContain("✗ anthropic/claude-opus-4-8");
+    expect(text).toContain(`Judge: • ${baseConfig.judge}`);
   });
 });

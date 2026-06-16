@@ -13,7 +13,7 @@ import {
 } from "./debug-log.js";
 import { loadFusionConfig } from "./config.js";
 import { runFusion } from "./orchestrator.js";
-import type { FusionConfig, FusionProgressEvent } from "./types.js";
+import { createProgressState, formatProgress, reduceProgress } from "./progress.js";
 import {
   FUSION_MESSAGE_TYPE,
   type FusionPanelDetails,
@@ -73,7 +73,7 @@ export default function fusionExtension(pi: ExtensionAPI) {
           signal: controller.signal,
           onProgress: (event) => {
             debugLogger?.log("progress", progressLogDetails(event));
-            applyProgressEvent(progressState, event);
+            progressState = reduceProgress(progressState, event);
             updateProgress(formatProgress(progressState));
           },
         });
@@ -105,71 +105,4 @@ export default function fusionExtension(pi: ExtensionAPI) {
       }
     },
   });
-}
-
-interface ProgressState {
-  phase: string;
-  judge: string;
-  judgeStatus: "pending" | "running" | "ok";
-  panels: Map<string, "pending" | "running" | "ok" | "error">;
-}
-
-function createProgressState(config?: FusionConfig): ProgressState {
-  return {
-    phase: config ? "resolving models" : "loading config",
-    judge: config?.judge ?? "pending",
-    judgeStatus: "pending",
-    panels: new Map(config?.models.map((model) => [model, "pending"])),
-  };
-}
-
-function applyProgressEvent(state: ProgressState, event: FusionProgressEvent): void {
-  if (event.phase === "resolving-models") {
-    state.phase = "resolving models";
-    state.judge = event.judge;
-    state.panels = new Map(event.models.map((model) => [model, "pending"]));
-    return;
-  }
-  if (event.phase === "panel-started") {
-    state.phase = "running panel";
-    state.panels.set(event.model, "running");
-    return;
-  }
-  if (event.phase === "panel-finished") {
-    state.panels.set(event.model, event.status);
-    state.phase = allPanelsDone(state) ? "running judge" : "running panel";
-    return;
-  }
-  if (event.phase === "judge-started") {
-    state.phase = "running judge";
-    state.judge = event.model;
-    state.judgeStatus = "running";
-    return;
-  }
-  if (event.phase === "judge-finished") {
-    state.phase = "complete";
-    state.judgeStatus = "ok";
-  }
-}
-
-function formatProgress(state: ProgressState): string {
-  const entries = [...state.panels.entries()];
-  const done = entries.filter(([, status]) => status === "ok" || status === "error").length;
-  const lines = [`Fusion: ${state.phase}`, `Panel: ${done}/${entries.length} complete`];
-  for (const [model, status] of entries) {
-    lines.push(`- ${statusIcon(status)} ${model}`);
-  }
-  lines.push(`Judge: ${statusIcon(state.judgeStatus)} ${state.judge}`);
-  return lines.join("\n");
-}
-
-function statusIcon(status: "pending" | "running" | "ok" | "error"): string {
-  if (status === "ok") return "✓";
-  if (status === "error") return "✗";
-  if (status === "running") return "…";
-  return "•";
-}
-
-function allPanelsDone(state: ProgressState): boolean {
-  return [...state.panels.values()].every((status) => status === "ok" || status === "error");
 }
