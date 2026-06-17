@@ -7,6 +7,7 @@ import {
   bindEndpoint,
   closeEndpoint,
   connectEndpoint,
+  endpointTicket,
   finishSending,
   openStream,
   receiveEnvelopes,
@@ -14,6 +15,16 @@ import {
 } from "../pi-extensions/remote/iroh-transport.js";
 
 describe("remote iroh transport", () => {
+  it("publishes an endpoint ticket for the bound daemon endpoint", async () => {
+    const server = await bindEndpoint();
+
+    try {
+      expect(endpointTicket(server)).toMatch(/^endpoint/u);
+    } finally {
+      await closeEndpoint(server);
+    }
+  }, 30_000);
+
   it("round-trips an envelope over pi/remote/1 between two endpoints", async () => {
     const server = await bindEndpoint();
     const client = await bindEndpoint();

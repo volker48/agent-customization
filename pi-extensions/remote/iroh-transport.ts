@@ -1,5 +1,6 @@
 import {
   Endpoint,
+  EndpointTicket,
   RelayMode,
   type BiStream,
   type Connection,
@@ -15,6 +16,10 @@ export type RemoteEndpoint = Endpoint;
 export type RemoteConnection = Connection;
 export type RemoteBiStream = BiStream;
 export type RemoteEndpointAddr = EndpointAddr;
+
+export function endpointTicket(endpoint: RemoteEndpoint): string {
+  return EndpointTicket.fromAddr(endpoint.addr()).toString();
+}
 
 export async function bindEndpoint(): Promise<RemoteEndpoint> {
   const builder = Endpoint.builder();
