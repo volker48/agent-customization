@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@mozilla/readability": "0.6.0",
+    "@number0/iroh": "1.0.0",
     "linkedom": "0.18.12",
     "turndown": "7.2.4",
     "turndown-plugin-gfm": "1.0.2"
