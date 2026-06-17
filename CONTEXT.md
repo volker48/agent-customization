@@ -126,3 +126,53 @@ _Avoid_: rename, session title (as a verb)
 
 **Theme**:
 A Pi TUI color scheme (`obsec-dark`, `obsec-light`) in `pi-themes/`.
+
+## Remote control
+
+**Remote control**:
+The capability to view and steer a running Pi session from a second device (the phone) while the session keeps executing on the laptop. Delivered as a Pi extension exposing `/remote`. The phone never executes tools — it is a control surface, not a relocated session.
+_Avoid_: remote session (the session does not move), mirror (the phone can also steer, not just watch), handoff/takeover (control is not transferred away from the laptop)
+
+**Execution host**:
+The laptop running the Pi process and its agent loop. It owns the working directory, runs all tools, and remains the sole place the session executes — regardless of how many remote clients attach.
+_Avoid_: server, host (unqualified)
+
+**Remote client**:
+A view-and-steer surface attached over the wire (initially the phone). It streams the transcript out and sends prompts/steering messages in; it holds no working directory and runs no tools.
+_Avoid_: thin client (acceptable informally), viewer (it can steer, not only view)
+
+**Remote daemon**:
+The single long-lived process on the execution host that owns the one persistent iroh endpoint (and thus the stable node identity the phone pairs with once) and the session registry. It is a multiplexing relay between remote clients and Pi sessions — it does not run the agent loop itself. Extensions connect to it over a local Unix-domain socket.
+_Avoid_: server (reserved sense; the daemon is local and p2p), backend (too vague — name the daemon)
+
+**Session registry**:
+The daemon's table of Pi sessions currently exposed for remote control — each entry keyed by session id with its display name and working directory. A session enters the registry when its extension runs `/remote`. Lets one paired phone attach to any one of several sessions.
+_Avoid_: session list, session pool
+
+**Pairing**:
+The one-time exchange that authorizes a remote client. The daemon shows a ticket (as a terminal QR code) and a short pairing code; the client connects, presents the code, and on success the daemon records the client's iroh node id in the allowlist. Done once per device — afterward the device reconnects with no code.
+_Avoid_: login, auth (unqualified), handshake (reserved for the per-connection protocol handshake)
+
+**Pairing code**:
+The short, human-transcribable secret shown on the execution host during pairing. It guards only the pairing window; it is not a long-lived credential and is not reused for later connections.
+_Avoid_: token, password, PIN (acceptable informally)
+
+**Allowlist**:
+The persisted set of iroh node ids permitted to drive sessions, written under `~/.pi/agent/remote/`. Authorization after pairing is by node id — cryptographic and unforgeable. Revocation in the POC is "delete the entry by hand."
+_Avoid_: whitelist, keyring, trust store
+
+**Ticket**:
+The iroh `EndpointTicket` (node id + addressing/relay info) the daemon publishes so a client can reach it. Possession of the ticket grants reachability, not authorization — an unpaired node that dials is rejected before any session data flows.
+_Avoid_: invite, link
+
+**Attach**:
+The act of a paired remote client binding to one session in the registry to view and steer it. A client attaches to at most one session at a time; attaching is idempotent — each attach triggers a fresh backfill. Detaching leaves the session running untouched.
+_Avoid_: connect (reserved for the iroh-level connection), open, join
+
+**Backfill**:
+The full current transcript the daemon replays to a client on attach, so the phone shows real history before live deltas resume. Re-sent in full on every (re)attach; there is no missed-event replay buffer.
+_Avoid_: history sync, catch-up, replay (replay implies a delta buffer, which there is none)
+
+**Transcript projection**:
+The compact form each transcript entry is reduced to before it crosses the wire — role, text, tool name, status, and *truncated* tool output — so the remote client stays a chat surface rather than a log viewer. Applies identically to backfill and live event frames.
+_Avoid_: serialization, transform
