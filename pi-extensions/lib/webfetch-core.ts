@@ -97,7 +97,8 @@ export interface WebFetchInput {
 export const WebFetchParams = Type.Object({
   url: Type.String({
     description:
-      "Website URL to access (http:// or https://). If scheme is omitted, https:// is assumed.",
+      "Website URL to access (http:// or https://). GitHub repo roots and blob file URLs " +
+      "can be passed directly. If scheme is omitted, https:// is assumed.",
     minLength: 1,
   }),
   maxChars: Type.Optional(
@@ -715,20 +716,35 @@ function buildGithubRawCandidate(url: string): SmartCandidate | undefined {
     return undefined;
   }
 
+  return buildGithubDirectCandidate(parsed);
+}
+
+function buildGithubDirectCandidate(parsed: URL): SmartCandidate | undefined {
   if (parsed.hostname.toLowerCase() !== "github.com") {
     return undefined;
   }
 
   const segments = parsed.pathname.split("/").filter(Boolean);
+  const owner = segments[0];
+  const repo = segments[1];
+  if (!owner || !repo) {
+    return undefined;
+  }
+
+  if (segments.length === 2) {
+    return {
+      url: `https://raw.githubusercontent.com/${owner}/${repo}/HEAD/README.md`,
+      source: "github-raw",
+    };
+  }
+
   if (segments.length < 5 || segments[2] !== "blob") {
     return undefined;
   }
 
-  const owner = segments[0];
-  const repo = segments[1];
   const branch = segments[3];
   const filePath = segments.slice(4).join("/");
-  if (!owner || !repo || !branch || !filePath) {
+  if (!branch || !filePath) {
     return undefined;
   }
 
@@ -1807,6 +1823,36 @@ export async function executeWebfetch(
 
   try {
     const targetUrlString = targetUrl.toString();
+    const githubCandidate = buildGithubDirectCandidate(targetUrl);
+
+    if (githubCandidate) {
+      try {
+        const githubAttemptResult = await fetchAttempt({
+          url: githubCandidate.url,
+          mode,
+          maxChars,
+          requestHeaders: preparedHeaders.requestHeaders,
+          signal,
+          raw: params.raw ?? false,
+        });
+
+        if (
+          githubAttemptResult.kind === "success" &&
+          isUsefulSmartAlternate(githubAttemptResult.value)
+        ) {
+          return buildResultFromAttempt({
+            attempt: githubAttemptResult.value,
+            isError: false,
+            alternateCandidates: [githubCandidate],
+            alternateUrlUsed: githubCandidate.url,
+          });
+        }
+      } catch (error) {
+        if (isAbortError(error, signal)) {
+          throw error;
+        }
+      }
+    }
 
     if (strategy === "direct") {
       const directAttempt = await fetchAttempt({

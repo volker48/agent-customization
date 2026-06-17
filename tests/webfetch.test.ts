@@ -507,6 +507,129 @@ describe("webfetch extension", () => {
     expect(details?.probeBytesRead).toBeGreaterThan(0);
   });
 
+  it("fetches README source markdown for GitHub repository root URLs", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("# Project README\n\nLoaded from README source.", {
+        status: 200,
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
+      }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_github_repo",
+      { url: "https://github.com/acme/widgets" },
+      new AbortController().signal,
+    );
+
+    const details = result.details as WebFetchTestDetails | undefined;
+
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0]?.text).toContain("# Project README");
+    expect(details?.finalUrl).toBe(
+      "https://raw.githubusercontent.com/acme/widgets/HEAD/README.md",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "https://raw.githubusercontent.com/acme/widgets/HEAD/README.md",
+    );
+  });
+
+  it("falls back to GitHub HTML when README source lookup is unavailable", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response("not found", {
+          status: 404,
+          statusText: "Not Found",
+          headers: { "Content-Type": "text/plain; charset=utf-8" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response("<html><body><article><h1>Rendered fallback</h1></article></body></html>", {
+          status: 200,
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        }),
+      );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_github_repo_fallback",
+      { url: "https://github.com/acme/widgets" },
+      new AbortController().signal,
+    );
+
+    const details = result.details as WebFetchTestDetails | undefined;
+
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0]?.text).toContain("Rendered fallback");
+    expect(details?.finalUrl).toBe("https://github.com/acme/widgets");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "https://raw.githubusercontent.com/acme/widgets/HEAD/README.md",
+    );
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("https://github.com/acme/widgets");
+  });
+
+  it("falls back to GitHub HTML when README source lookup throws", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new Error("raw lookup failed"))
+      .mockResolvedValueOnce(
+        new Response("<html><body><article><h1>Rendered after throw</h1></article></body></html>", {
+          status: 200,
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        }),
+      );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_github_repo_throw_fallback",
+      { url: "https://github.com/acme/widgets" },
+      new AbortController().signal,
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0]?.text).toContain("Rendered after throw");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("fetches raw content for GitHub blob URLs", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("# Raw file\n\nLoaded from GitHub raw.", {
+        status: 200,
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
+      }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_github_blob",
+      { url: "https://github.com/acme/widgets/blob/main/docs/README.md" },
+      new AbortController().signal,
+    );
+
+    const details = result.details as WebFetchTestDetails | undefined;
+
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0]?.text).toContain("# Raw file");
+    expect(details?.finalUrl).toBe(
+      "https://raw.githubusercontent.com/acme/widgets/main/docs/README.md",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "https://raw.githubusercontent.com/acme/widgets/main/docs/README.md",
+    );
+  });
+
   it("smart strategy auto-follows markdown alternates from Link headers", async () => {
     const shellHtml = [
       "<!doctype html>",
