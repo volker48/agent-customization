@@ -55,12 +55,13 @@ export async function startRemoteDaemon(options: RemoteDaemonOptions): Promise<R
   await prepareSocketPath(socketPath);
 
   const allowlist = new FileNodeAllowlist(remoteRoot);
-  const ipc = await startIpcDaemonServer(socketPath);
+  let daemon: RemoteDaemon;
+  const ipc = await startIpcDaemonServer(socketPath, { onStop: () => void daemon.close() });
   const endpoint = await bindEndpoint(await loadSecretKey(remoteRoot));
   let closed = false;
   void acceptConnections(endpoint, ipc, allowlist, options.pairingCode, () => closed);
 
-  return {
+  daemon = {
     endpoint,
     ipc,
     ticket: endpointTicket(endpoint),
@@ -73,6 +74,7 @@ export async function startRemoteDaemon(options: RemoteDaemonOptions): Promise<R
       await unlink(socketPath).catch(ignoreMissingFile);
     },
   };
+  return daemon;
 }
 
 async function acceptConnections(

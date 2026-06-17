@@ -2,7 +2,7 @@ import { createServer, createConnection, type Server, type Socket } from "node:n
 
 import { decodeFrames, type MessageType } from "./protocol.js";
 
-export type IpcMessageType = MessageType | "register" | "session_shutdown";
+export type IpcMessageType = MessageType | "register" | "session_shutdown" | "daemon_stop";
 
 export type IpcEnvelope = {
   sessionId: string | null;
@@ -39,6 +39,8 @@ export type IpcExtensionClient = {
 
 export type IpcDaemonOptions = {
   onControlFrame?: (envelope: IpcEnvelope) => void;
+  onFrame?: (envelope: IpcEnvelope) => void;
+  onStop?: () => void | Promise<void>;
 };
 
 type Waiter<T> = {
@@ -124,9 +126,7 @@ function acceptDaemonSocket(socket: Socket, state: DaemonState, options: IpcDaem
     const parsed = parseBufferedFrames(buffered + chunk.toString("utf8"));
     buffered = parsed.remaining;
     for (const envelope of parsed.envelopes) {
-      handleDaemonFrame(envelope, socket, state.registry, options);
-      resolveSessionWaiters(envelope, state.registry, state.sessionWaiters);
-      resolveEndWaiters(envelope, state.endWaiters);
+      void handleReceivedEnvelope(envelope, socket, state, options);
     }
   });
   socket.on("error", () => socket.destroy());
@@ -164,17 +164,41 @@ function createDaemonFacade(server: Server, state: DaemonState): IpcDaemonServer
   };
 }
 
-function handleDaemonFrame(
+async function handleReceivedEnvelope(
+  envelope: IpcEnvelope,
+  socket: Socket,
+  state: DaemonState,
+  options: IpcDaemonOptions,
+): Promise<void> {
+  options.onFrame?.(envelope);
+  await handleDaemonFrame(envelope, socket, state.registry, options);
+  resolveSessionWaiters(envelope, state.registry, state.sessionWaiters);
+  resolveEndWaiters(envelope, state.endWaiters);
+}
+
+async function handleDaemonFrame(
   envelope: IpcEnvelope,
   socket: Socket,
   registry: Map<string, SessionRegistryEntry>,
   options: IpcDaemonOptions,
-): void {
+): Promise<void> {
   if (isRegisterEnvelope(envelope)) {
     registry.set(envelope.payload.sessionId, {
       name: envelope.payload.name,
       cwd: envelope.payload.cwd,
       socket,
+    });
+  }
+
+  if (envelope.type === "list" && envelope.sessionId === null) {
+    await writeEnvelope(socket, {
+      sessionId: null,
+      type: "list",
+      payload: [...registry.entries()].map(([sessionId, entry]) => ({
+        sessionId,
+        name: entry.name,
+        cwd: entry.cwd,
+      })),
     });
   }
 
@@ -185,6 +209,15 @@ function handleDaemonFrame(
       type: "session_ended",
       payload: { sessionId: envelope.sessionId },
     });
+  }
+
+  if (envelope.type === "daemon_stop" && envelope.sessionId === null) {
+    await writeEnvelope(socket, {
+      sessionId: null,
+      type: "daemon_stop",
+      payload: { stopping: true },
+    });
+    await options.onStop?.();
   }
 }
 
