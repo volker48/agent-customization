@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -67,7 +67,10 @@ export class FileNodeAllowlist implements NodeAllowlist {
     const nodeIds = new Set(await this.#read());
     nodeIds.add(nodeId);
     await mkdir(dirname(this.#filePath), { recursive: true });
-    await writeFile(this.#filePath, `${JSON.stringify([...nodeIds].sort(), null, 2)}\n`);
+    await writeFile(this.#filePath, `${JSON.stringify([...nodeIds].sort(), null, 2)}\n`, {
+      mode: 0o600,
+    });
+    await chmod(this.#filePath, 0o600);
   }
 
   async #read(): Promise<string[]> {
@@ -81,6 +84,30 @@ export class FileNodeAllowlist implements NodeAllowlist {
       }
       throw error;
     }
+  }
+}
+
+export class CachedNodeAllowlist implements NodeAllowlist {
+  readonly #delegate: NodeAllowlist;
+  readonly #cache = new Map<string, boolean>();
+
+  constructor(delegate: NodeAllowlist) {
+    this.#delegate = delegate;
+  }
+
+  async has(nodeId: string): Promise<boolean> {
+    const cached = this.#cache.get(nodeId);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const result = await this.#delegate.has(nodeId);
+    this.#cache.set(nodeId, result);
+    return result;
+  }
+
+  async add(nodeId: string): Promise<void> {
+    await this.#delegate.add(nodeId);
+    this.#cache.set(nodeId, true);
   }
 }
 

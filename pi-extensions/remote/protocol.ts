@@ -13,14 +13,16 @@ export type Envelope = {
   payload: unknown;
 };
 
-export type ControlEnvelope = Envelope & {
+export type ControlEnvelope = {
   sessionId: null;
   type: ControlMessageType;
+  payload: unknown;
 };
 
-export type PerSessionEnvelope = Envelope & {
+export type PerSessionEnvelope = {
   sessionId: string;
   type: PerSessionMessageType;
+  payload: unknown;
 };
 
 export type RoutedEnvelope =

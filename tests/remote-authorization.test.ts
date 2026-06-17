@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 
 import {
+  CachedNodeAllowlist,
   FileNodeAllowlist,
   authorizeRemoteEnvelope,
   createPairingCode,
@@ -12,6 +13,7 @@ import {
   renderPairingTicket,
   verifyPairingCode,
 } from "../pi-extensions/remote/authorization.js";
+import type { NodeAllowlist } from "../pi-extensions/remote/authorization.js";
 import type { Envelope } from "../pi-extensions/remote/protocol.js";
 
 describe("remote authorization", () => {
@@ -133,5 +135,42 @@ describe("remote authorization", () => {
 
   it("uses ~/.pi/agent/remote as the default remote root", () => {
     expect(defaultRemoteRoot()).toMatch(/\.pi\/agent\/remote$/u);
+  });
+});
+
+describe("CachedNodeAllowlist", () => {
+  function countingAllowlist(present: Set<string>): NodeAllowlist & { reads: number } {
+    return {
+      reads: 0,
+      async has(nodeId: string) {
+        this.reads += 1;
+        return present.has(nodeId);
+      },
+      async add(nodeId: string) {
+        present.add(nodeId);
+      },
+    };
+  }
+
+  it("reads the delegate once per node id across repeated checks", async () => {
+    const delegate = countingAllowlist(new Set(["node-a"]));
+    const cached = new CachedNodeAllowlist(delegate);
+
+    await expect(cached.has("node-a")).resolves.toBe(true);
+    await expect(cached.has("node-a")).resolves.toBe(true);
+    await expect(cached.has("node-a")).resolves.toBe(true);
+
+    expect(delegate.reads).toBe(1);
+  });
+
+  it("makes a paired node visible without re-reading the delegate", async () => {
+    const delegate = countingAllowlist(new Set());
+    const cached = new CachedNodeAllowlist(delegate);
+
+    await expect(cached.has("node-a")).resolves.toBe(false);
+    await cached.add("node-a");
+    await expect(cached.has("node-a")).resolves.toBe(true);
+
+    expect(delegate.reads).toBe(1);
   });
 });

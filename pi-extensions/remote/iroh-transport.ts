@@ -21,9 +21,12 @@ export function endpointTicket(endpoint: RemoteEndpoint): string {
   return EndpointTicket.fromAddr(endpoint.addr()).toString();
 }
 
-export async function bindEndpoint(): Promise<RemoteEndpoint> {
+export async function bindEndpoint(secretKey?: number[]): Promise<RemoteEndpoint> {
   const builder = Endpoint.builder();
   builder.applyN0();
+  if (secretKey) {
+    builder.secretKey(secretKey);
+  }
   builder.alpns([ALPN_BYTES]);
   builder.relayMode(RelayMode.defaultMode());
   const endpoint = await builder.bind();
