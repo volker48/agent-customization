@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { createConnection, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -80,6 +80,29 @@ describe("remote daemon", () => {
       await extension.close();
       await daemon.close();
     }
+  }, 30_000);
+
+  it("creates the daemon socket in an owner-only directory with owner-only access", async () => {
+    const root = join(await tempRoot(), "remote");
+    const daemon = await startRemoteDaemon({ remoteRoot: root, pairingCode: "123-456" });
+
+    try {
+      expect((await stat(root)).mode & 0o777).toBe(0o700);
+      expect((await stat(daemon.socketPath)).mode & 0o777).toBe(0o600);
+    } finally {
+      await daemon.close();
+    }
+  }, 30_000);
+
+  it("refuses a pre-existing socket directory that other users can access", async () => {
+    const root = await tempRoot();
+    await chmod(root, 0o755);
+
+    await expect(
+      startRemoteDaemon({ remoteRoot: root, pairingCode: "123-456" }),
+    ).rejects.toThrow("grants access to other users");
+
+    expect((await stat(root)).mode & 0o777).toBe(0o755);
   }, 30_000);
 
   it("persists a stable iroh node id across restarts", async () => {

@@ -1,5 +1,5 @@
 import { SecretKey } from "@number0/iroh/index.js";
-import { chmod, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 
@@ -33,6 +33,8 @@ import {
 
 const SECRET_KEY_FILE = "iroh-secret-key.json";
 const DAEMON_SOCKET_FILE = "daemon.sock";
+const OWNER_ONLY_DIRECTORY_MODE = 0o700;
+const OWNER_ONLY_FILE_MODE = 0o600;
 
 export type RemoteDaemon = {
   endpoint: RemoteEndpoint;
@@ -57,6 +59,7 @@ export async function startRemoteDaemon(options: RemoteDaemonOptions): Promise<R
   const allowlist = new FileNodeAllowlist(remoteRoot);
   let daemon: RemoteDaemon;
   const ipc = await startIpcDaemonServer(socketPath, { onStop: () => daemon.close() });
+  await chmod(socketPath, OWNER_ONLY_FILE_MODE);
   const endpoint = await bindEndpoint(await loadSecretKey(remoteRoot));
   let closed = false;
   void acceptConnections(endpoint, ipc, allowlist, options.pairingCode, () => closed);
@@ -391,12 +394,27 @@ async function loadSecretKey(remoteRoot: string): Promise<number[]> {
 }
 
 async function prepareSocketPath(socketPath: string): Promise<void> {
-  await mkdir(dirname(socketPath), { recursive: true });
+  const socketDirectory = dirname(socketPath);
+  const created = await mkdir(socketDirectory, { recursive: true, mode: OWNER_ONLY_DIRECTORY_MODE });
+  if (created === undefined) {
+    await assertOwnerOnlyDirectory(socketDirectory);
+  } else {
+    await chmod(socketDirectory, OWNER_ONLY_DIRECTORY_MODE);
+  }
   const active = await canConnect(socketPath);
   if (active) {
     throw new Error("remote daemon is already running");
   }
   await unlink(socketPath).catch(ignoreMissingFile);
+}
+
+async function assertOwnerOnlyDirectory(directory: string): Promise<void> {
+  const mode = (await stat(directory)).mode & 0o777;
+  if (mode & 0o077) {
+    throw new Error(
+      `remote daemon directory grants access to other users (mode ${mode.toString(8)}): ${directory}`,
+    );
+  }
 }
 
 function canConnect(socketPath: string): Promise<boolean> {
