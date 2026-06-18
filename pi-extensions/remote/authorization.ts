@@ -73,6 +73,10 @@ export class FileNodeAllowlist implements NodeAllowlist {
     await chmod(this.#filePath, 0o600);
   }
 
+  async count(): Promise<number> {
+    return (await this.#read()).length;
+  }
+
   async #read(): Promise<string[]> {
     try {
       const raw = await readFile(this.#filePath, "utf8");

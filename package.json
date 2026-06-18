@@ -4,6 +4,9 @@
   "keywords": [
     "pi-package"
   ],
+  "bin": {
+    "pi-remote": "./pi-extensions/remote/cli.ts"
+  },
   "type": "module",
   "scripts": {
     "lint": "oxlint pi-extensions opencode-plugins",
@@ -35,6 +38,7 @@
     "@types/node": "25.2.3",
     "oxfmt": "0.32.0",
     "oxlint": "1.47.0",
+    "tsx": "4.22.4",
     "typescript": "5.9.3",
     "vitest": "4.0.18"
   },

@@ -56,7 +56,7 @@ export async function startRemoteDaemon(options: RemoteDaemonOptions): Promise<R
 
   const allowlist = new FileNodeAllowlist(remoteRoot);
   let daemon: RemoteDaemon;
-  const ipc = await startIpcDaemonServer(socketPath, { onStop: () => void daemon.close() });
+  const ipc = await startIpcDaemonServer(socketPath, { onStop: () => daemon.close() });
   const endpoint = await bindEndpoint(await loadSecretKey(remoteRoot));
   let closed = false;
   void acceptConnections(endpoint, ipc, allowlist, options.pairingCode, () => closed);
