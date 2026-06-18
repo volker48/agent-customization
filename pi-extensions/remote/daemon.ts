@@ -103,25 +103,52 @@ async function handleConnection(
   pairingCode: string,
 ): Promise<void> {
   const stream = await acceptStream(connection);
-  const connectionAllowlist = new CachedNodeAllowlist(allowlist);
-  const responses: Envelope[] = [];
-  for (const envelope of await receiveEnvelopes(stream)) {
-    const response = await handleRemoteEnvelope({
-      envelope,
-      ipc,
-      allowlist: connectionAllowlist,
-      pairingCode,
-      nodeId: connection.remoteId().toString(),
-    });
-    if (response) {
-      responses.push(response);
-    }
-  }
+  const writer = new StreamWriter(stream);
+  const attached = new Set<string>();
+  const attaching = new Set<string>();
+  const pending: IpcEnvelope[] = [];
+  const unsubscribe = ipc.subscribe((frame) =>
+    routeAttachedFrame(frame, { writer, attached, attaching, pending }),
+  );
 
-  for (const response of responses) {
-    await sendEnvelope(stream, response);
+  try {
+    let keepOpen = false;
+    const connectionAllowlist = new CachedNodeAllowlist(allowlist);
+    for (const envelope of await receiveEnvelopes(stream)) {
+      const streamingAttachSessionId = streamingAttachSessionIdFrom(envelope);
+      if (streamingAttachSessionId) attaching.add(streamingAttachSessionId);
+
+      const response = await handleRemoteEnvelope({
+        envelope,
+        ipc,
+        allowlist: connectionAllowlist,
+        pairingCode,
+        nodeId: connection.remoteId().toString(),
+      });
+      if (response) await writer.send(response);
+      if (streamingAttachSessionId) {
+        if (response) {
+          keepOpen = true;
+          await promoteAttachedSession(streamingAttachSessionId, {
+            writer,
+            attached,
+            attaching,
+            pending,
+          });
+        } else {
+          dropAttachingSession(streamingAttachSessionId, { attaching, pending });
+        }
+      }
+    }
+
+    if (keepOpen) {
+      await waitForStreamingConnection(connection, writer);
+    } else {
+      await writer.close();
+    }
+  } finally {
+    unsubscribe();
   }
-  await finishSending(stream);
 }
 
 type RemoteEnvelopeContext = {
@@ -226,6 +253,119 @@ function sessionIdFromPayload(payload: unknown): string | null {
     typeof payload.sessionId === "string"
     ? payload.sessionId
     : null;
+}
+
+type AttachedFrameContext = {
+  writer: StreamWriter;
+  attached: Set<string>;
+  attaching: Set<string>;
+  pending: IpcEnvelope[];
+};
+
+function routeAttachedFrame(frame: IpcEnvelope, context: AttachedFrameContext): void {
+  if (frame.sessionId === null) return;
+  if (frame.type === "session_shutdown" && isKnownSession(frame.sessionId, context)) {
+    void context.writer.close();
+    return;
+  }
+  if (frame.type !== "event") return;
+  if (context.attaching.has(frame.sessionId)) {
+    context.pending.push(frame);
+    return;
+  }
+  if (context.attached.has(frame.sessionId)) void context.writer.send(frame as Envelope);
+}
+
+async function promoteAttachedSession(
+  sessionId: string,
+  context: AttachedFrameContext,
+): Promise<void> {
+  context.attaching.delete(sessionId);
+  context.attached.add(sessionId);
+  for (const frame of drainPendingForSession(context.pending, sessionId)) {
+    await context.writer.send(frame as Envelope);
+  }
+}
+
+function drainPendingForSession(pending: IpcEnvelope[], sessionId: string): IpcEnvelope[] {
+  const ready: IpcEnvelope[] = [];
+  for (let index = pending.length - 1; index >= 0; index -= 1) {
+    const frame = pending[index];
+    if (frame.sessionId === sessionId) ready.unshift(...pending.splice(index, 1));
+  }
+  return ready;
+}
+
+function dropAttachingSession(
+  sessionId: string,
+  context: Pick<AttachedFrameContext, "attaching" | "pending">,
+): void {
+  context.attaching.delete(sessionId);
+  drainPendingForSession(context.pending, sessionId);
+}
+
+function streamingAttachSessionIdFrom(envelope: Envelope): string | null {
+  if (!isStreamingAttach(envelope)) return null;
+  return sessionIdFromPayload(envelope.payload);
+}
+
+function isStreamingAttach(envelope: Envelope): boolean {
+  return (
+    typeof envelope.payload === "object" &&
+    envelope.payload !== null &&
+    "stream" in envelope.payload &&
+    envelope.payload.stream === true
+  );
+}
+
+function isKnownSession(sessionId: string, context: AttachedFrameContext): boolean {
+  return context.attached.has(sessionId) || context.attaching.has(sessionId);
+}
+
+async function waitForStreamingConnection(
+  connection: Awaited<ReturnType<typeof acceptConnection>>,
+  writer: StreamWriter,
+): Promise<void> {
+  await Promise.race([writer.waitClosed(), connection.closed().then(() => writer.close())]);
+}
+
+class StreamWriter {
+  #chain = Promise.resolve();
+  #closed = false;
+  #closedResolved = false;
+  #resolveClosed!: () => void;
+  #closedPromise = new Promise<void>((resolve) => {
+    this.#resolveClosed = resolve;
+  });
+
+  constructor(readonly stream: Awaited<ReturnType<typeof acceptStream>>) {}
+
+  send(envelope: Envelope): Promise<void> {
+    if (this.#closed) return this.#chain;
+    this.#chain = this.#chain
+      .then(() => (this.#closed ? undefined : sendEnvelope(this.stream, envelope)))
+      .catch(() => this.markClosed());
+    return this.#chain;
+  }
+
+  close(): Promise<void> {
+    if (this.#closed) return this.#chain;
+    this.#closed = true;
+    this.#chain = this.#chain.then(() => finishSending(this.stream)).catch(() => undefined);
+    this.#chain = this.#chain.finally(() => this.markClosed());
+    return this.#chain;
+  }
+
+  waitClosed(): Promise<void> {
+    return this.#closedPromise;
+  }
+
+  private markClosed(): void {
+    this.#closed = true;
+    if (this.#closedResolved) return;
+    this.#closedResolved = true;
+    this.#resolveClosed();
+  }
 }
 
 async function loadSecretKey(remoteRoot: string): Promise<number[]> {

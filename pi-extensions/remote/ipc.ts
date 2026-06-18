@@ -25,6 +25,7 @@ export type SessionRegistryEntry = {
 export type IpcDaemonServer = {
   registry: Map<string, SessionRegistryEntry>;
   sendToSession(envelope: IpcEnvelope): Promise<void>;
+  subscribe(listener: (envelope: IpcEnvelope) => void): () => void;
   waitForSession(sessionId: string): Promise<SessionRegistryEntry>;
   waitForSessionEnd(sessionId: string): Promise<void>;
   close(): Promise<void>;
@@ -53,6 +54,7 @@ type DaemonState = {
   sessionWaiters: Map<string, Waiter<SessionRegistryEntry>[]>;
   endWaiters: Map<string, Waiter<void>[]>;
   sockets: Set<Socket>;
+  listeners: Set<(envelope: IpcEnvelope) => void>;
 };
 
 export async function startIpcDaemonServer(
@@ -64,6 +66,7 @@ export async function startIpcDaemonServer(
     sessionWaiters: new Map(),
     endWaiters: new Map(),
     sockets: new Set(),
+    listeners: new Set(),
   };
   const server = createServer((socket) => acceptDaemonSocket(socket, state, options));
 
@@ -143,6 +146,10 @@ function createDaemonFacade(server: Server, state: DaemonState): IpcDaemonServer
       }
       return writeEnvelope(entry.socket, envelope);
     },
+    subscribe(listener) {
+      state.listeners.add(listener);
+      return () => state.listeners.delete(listener);
+    },
     waitForSession(sessionId) {
       const entry = state.registry.get(sessionId);
       return entry ? Promise.resolve(entry) : addWaiter(state.sessionWaiters, sessionId);
@@ -172,6 +179,7 @@ async function handleReceivedEnvelope(
 ): Promise<void> {
   options.onFrame?.(envelope);
   await handleDaemonFrame(envelope, socket, state.registry, options);
+  state.listeners.forEach((listener) => listener(envelope));
   resolveSessionWaiters(envelope, state.registry, state.sessionWaiters);
   resolveEndWaiters(envelope, state.endWaiters);
 }
