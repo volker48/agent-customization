@@ -1,5 +1,6 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
-import { createConnection } from "node:net";
+import { createConnection, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -96,7 +97,22 @@ describe("remote daemon", () => {
     }
   }, 30_000);
 
-  it("cleans stale daemon sockets and rejects a second live instance", async () => {
+  it("reclaims a stale daemon socket from a crashed prior process", async () => {
+    const root = await tempRoot();
+    const socketPath = join(root, "daemon.sock");
+    await leaveStaleSocket(socketPath);
+
+    const daemon = await startRemoteDaemon({ remoteRoot: root, pairingCode: "123-456" });
+
+    try {
+      const socket = await connectSocket(socketPath);
+      socket.destroy();
+    } finally {
+      await daemon.close();
+    }
+  }, 30_000);
+
+  it("reclaims a regular file at the daemon socket path", async () => {
     const root = await tempRoot();
     const socketPath = join(root, "daemon.sock");
     await writeFile(socketPath, "");
@@ -104,10 +120,24 @@ describe("remote daemon", () => {
     const daemon = await startRemoteDaemon({ remoteRoot: root, pairingCode: "123-456" });
 
     try {
+      const socket = await connectSocket(socketPath);
+      socket.destroy();
+    } finally {
+      await daemon.close();
+    }
+  }, 30_000);
+
+  it("rejects a second live instance without disrupting the running daemon", async () => {
+    const root = await tempRoot();
+    const socketPath = join(root, "daemon.sock");
+    const daemon = await startRemoteDaemon({ remoteRoot: root, pairingCode: "123-456" });
+
+    try {
       await expect(startRemoteDaemon({ remoteRoot: root, pairingCode: "123-456" })).rejects.toThrow(
         "remote daemon is already running",
       );
-      await expect(connectSocket(socketPath)).resolves.toBeDefined();
+      const socket = await connectSocket(socketPath);
+      socket.destroy();
     } finally {
       await daemon.close();
     }
@@ -261,10 +291,55 @@ async function exchange(
   return receiveEnvelopes(stream);
 }
 
-function connectSocket(socketPath: string): Promise<ReturnType<typeof createConnection>> {
+async function leaveStaleSocket(socketPath: string): Promise<void> {
+  const child = spawn(process.execPath, ["-e", STALE_SOCKET_PROCESS, socketPath], {
+    stdio: "ignore",
+  });
+  try {
+    const socket = await waitForSocket(socketPath);
+    socket.destroy();
+  } catch (error) {
+    child.kill("SIGKILL");
+    throw error;
+  }
+
+  child.kill("SIGKILL");
+  await waitForExit(child);
+  await stat(socketPath);
+}
+
+async function waitForSocket(socketPath: string): Promise<Socket> {
+  const deadline = Date.now() + 10_000;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      return await connectSocket(socketPath);
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw lastError;
+}
+
+function connectSocket(socketPath: string): Promise<Socket> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(socketPath);
     socket.once("connect", () => resolve(socket));
     socket.once("error", reject);
   });
 }
+
+function waitForExit(child: ChildProcess): Promise<void> {
+  return new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", () => resolve());
+  });
+}
+
+const STALE_SOCKET_PROCESS = `
+const net = require("node:net");
+const server = net.createServer();
+server.listen(process.argv[1]);
+setInterval(() => undefined, 1000);
+`;
