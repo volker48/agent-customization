@@ -2,7 +2,12 @@ import { createServer, createConnection, type Server, type Socket } from "node:n
 
 import { decodeFrames, type MessageType } from "./protocol.js";
 
-export type IpcMessageType = MessageType | "register" | "session_shutdown" | "daemon_stop";
+export type IpcMessageType =
+  | MessageType
+  | "register"
+  | "session_shutdown"
+  | "daemon_stop"
+  | "sync";
 
 export type IpcEnvelope = {
   sessionId: string | null;
@@ -217,6 +222,10 @@ async function handleDaemonFrame(
       type: "session_ended",
       payload: { sessionId: envelope.sessionId },
     });
+  }
+
+  if (envelope.type === "sync") {
+    await writeEnvelope(socket, envelope);
   }
 
   if (envelope.type === "daemon_stop" && envelope.sessionId === null) {

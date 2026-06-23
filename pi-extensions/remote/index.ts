@@ -31,6 +31,8 @@ type RemoteState = {
   desiredAttached: boolean;
   backfilling: boolean;
   pendingLiveEvents: unknown[];
+  syncWaiters: Map<number, () => void>;
+  nextSyncId: number;
   closed: boolean;
 };
 
@@ -68,6 +70,8 @@ export default function remoteExtension(pi: ExtensionAPI): void {
         desiredAttached: false,
         backfilling: false,
         pendingLiveEvents: [],
+        syncWaiters: new Map(),
+        nextSyncId: 0,
         closed: false,
       };
       void readInbound(pi, state);
@@ -153,7 +157,7 @@ async function applyInbound(
     state.backfilling = true;
     state.pendingLiveEvents = [];
     await sendBackfill(state);
-    await allowInboundFrames();
+    await drainInbound(state);
     if (!state.desiredAttached) {
       state.pendingLiveEvents = [];
       state.backfilling = false;
@@ -168,6 +172,10 @@ async function applyInbound(
     state.desiredAttached = false;
     state.attached = false;
     state.pendingLiveEvents = [];
+    return;
+  }
+  if (envelope.type === "sync") {
+    resolveSync(state, envelope.payload);
     return;
   }
   if (envelope.type === "prompt") {
@@ -192,8 +200,32 @@ async function sendBackfill(state: RemoteState): Promise<void> {
   }
 }
 
-async function allowInboundFrames(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 0));
+async function drainInbound(state: RemoteState): Promise<void> {
+  const syncId = state.nextSyncId++;
+  const acknowledged = new Promise<void>((resolve) => {
+    state.syncWaiters.set(syncId, resolve);
+  });
+  await state.client.send({ sessionId: state.sessionId, type: "sync", payload: { syncId } });
+  await acknowledged;
+}
+
+function resolveSync(state: RemoteState, payload: unknown): void {
+  const syncId = syncIdFrom(payload);
+  if (syncId === null) {
+    return;
+  }
+  const resolve = state.syncWaiters.get(syncId);
+  if (resolve) {
+    state.syncWaiters.delete(syncId);
+    resolve();
+  }
+}
+
+function syncIdFrom(payload: unknown): number | null {
+  if (typeof payload === "object" && payload !== null && "syncId" in payload) {
+    return typeof payload.syncId === "number" ? payload.syncId : null;
+  }
+  return null;
 }
 
 async function flushPendingLiveEvents(state: RemoteState): Promise<void> {
@@ -207,6 +239,7 @@ async function flushPendingLiveEvents(state: RemoteState): Promise<void> {
 
 async function shutdownState(state: RemoteState): Promise<void> {
   state.closed = true;
+  releaseSyncWaiters(state);
   await state.client.send({ sessionId: state.sessionId, type: "session_shutdown", payload: {} });
   await state.client.close();
 }
@@ -214,8 +247,16 @@ async function shutdownState(state: RemoteState): Promise<void> {
 function handleInboundError(state: RemoteState, error: unknown): void {
   if (!state.closed) {
     state.closed = true;
+    releaseSyncWaiters(state);
     state.ctx.ui.notify(`Remote inbound failed: ${errorMessage(error)}`, "error");
   }
+}
+
+function releaseSyncWaiters(state: RemoteState): void {
+  for (const resolve of state.syncWaiters.values()) {
+    resolve();
+  }
+  state.syncWaiters.clear();
 }
 
 async function showStatus(ctx: ExtensionContext, path: string): Promise<void> {
