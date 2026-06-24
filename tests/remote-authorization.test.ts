@@ -114,8 +114,12 @@ describe("remote authorization", () => {
     ).resolves.toEqual({ accepted: true, mode: "paired" });
   });
 
-  it("renders the endpoint ticket as a terminal QR with a hand-transcribed pairing code", () => {
-    const rendered = renderPairingTicket({ ticket: "ticket-abc", pairingCode: "123-456" });
+  it("renders the endpoint ticket with generated QR output and a pairing code", () => {
+    const rendered = renderPairingTicket({
+      ticket: "ticket-abc",
+      pairingCode: "123-456",
+      generateQr: (_ticket, onOutput) => onOutput("█ mocked QR"),
+    });
 
     expect(rendered).toContain("Pi remote endpoint ticket QR");
     expect(rendered).toContain("ticket-abc");

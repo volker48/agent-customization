@@ -1,14 +1,16 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-
-import qrcode from "qrcode-terminal";
 
 import type { Envelope } from "./protocol.js";
 
 type RandomBytes = (size: number) => Uint8Array;
 type QrGenerator = (ticket: string, onOutput: (output: string) => void) => void;
+type QrCodeTerminal = {
+  generate(ticket: string, options: { small: true }, onOutput: (output: string) => void): void;
+};
 
 export type NodeAllowlist = {
   has(nodeId: string): Promise<boolean>;
@@ -31,6 +33,7 @@ const PAIRING_CODE_SAMPLE_SPACE = 0x1_00_00_00;
 const PAIRING_CODE_UNBIASED_LIMIT =
   Math.floor(PAIRING_CODE_SAMPLE_SPACE / PAIRING_CODE_MODULUS) * PAIRING_CODE_MODULUS;
 const ALLOWLIST_FILE = "allowed-node-ids.json";
+const require = createRequire(import.meta.url);
 
 export function defaultRemoteRoot(): string {
   return join(homedir(), ".pi", "agent", "remote");
@@ -169,7 +172,26 @@ function drawPairingCodeValue(randomBytes: RandomBytes): number {
 }
 
 function generateTerminalQr(ticket: string, onOutput: (output: string) => void): void {
+  const qrcode = requireQrCodeTerminal();
   qrcode.generate(ticket, { small: true }, onOutput);
+}
+
+function requireQrCodeTerminal(): QrCodeTerminal {
+  try {
+    return require("qrcode-terminal") as QrCodeTerminal;
+  } catch (error) {
+    if (isMissingQrCodeTerminal(error)) {
+      throw new Error(
+        'Missing runtime dependency "qrcode-terminal". Run `pnpm install` for this package.',
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+}
+
+function isMissingQrCodeTerminal(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "MODULE_NOT_FOUND";
 }
 
 function cryptoRandomBytes(size: number): Uint8Array {
