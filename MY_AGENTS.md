@@ -70,6 +70,21 @@ Use comments for non-obvious intent, tradeoffs, or constraints.
 - Never swallow exceptions silently.
 - Include context: operation, input, and failure cause.
 
+## Error-handling philosophy
+
+Make bad states unrepresentable; don't defensively handle them.
+
+- Enforce invariants in types and schemas, not scattered runtime checks. If a value can't be
+  null, don't type it as nullable—then stop null-checking it.
+- Don't add fallbacks, defensive guards, or broad error handling for states that correct types
+  already make impossible.
+- Prefer precise types, discriminated unions, required fields, branded/newtypes, and narrow
+  constructors over runtime guards.
+- Parse, don't validate: convert untrusted input into a precise type once at the boundary, then
+  rely on it everywhere downstream.
+- The right fix is never "handle every malformed case." It's to make the malformed case impossible
+  to construct.
+
 ## Workflow
 
 Before finishing or committing:
