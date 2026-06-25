@@ -50,6 +50,9 @@
   "pi": {
     "extensions": [
       "./pi-extensions"
+    ],
+    "prompts": [
+    "./prompts"
     ]
   }
 }
