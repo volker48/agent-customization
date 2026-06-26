@@ -7,7 +7,10 @@ export type IpcMessageType =
   | "register"
   | "session_shutdown"
   | "daemon_stop"
-  | "sync";
+  | "sync"
+  | "pairing_info";
+
+export type PairingInfo = { ticket: string; code: string };
 
 export type IpcEnvelope = {
   sessionId: string | null;
@@ -47,6 +50,7 @@ export type IpcDaemonOptions = {
   onControlFrame?: (envelope: IpcEnvelope) => void;
   onFrame?: (envelope: IpcEnvelope) => void;
   onStop?: () => void | Promise<void>;
+  getPairingInfo?: () => PairingInfo | undefined;
 };
 
 type Waiter<T> = {
@@ -235,6 +239,14 @@ async function handleDaemonFrame(
       payload: { stopping: true },
     });
     await options.onStop?.();
+  }
+
+  if (envelope.type === "pairing_info" && envelope.sessionId === null) {
+    await writeEnvelope(socket, {
+      sessionId: null,
+      type: "pairing_info",
+      payload: options.getPairingInfo?.() ?? null,
+    });
   }
 }
 

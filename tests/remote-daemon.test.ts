@@ -98,9 +98,9 @@ describe("remote daemon", () => {
     const root = await tempRoot();
     await chmod(root, 0o755);
 
-    await expect(
-      startRemoteDaemon({ remoteRoot: root, pairingCode: "123-456" }),
-    ).rejects.toThrow("grants access to other users");
+    await expect(startRemoteDaemon({ remoteRoot: root, pairingCode: "123-456" })).rejects.toThrow(
+      "grants access to other users",
+    );
 
     expect((await stat(root)).mode & 0o777).toBe(0o755);
   }, 30_000);
@@ -246,6 +246,31 @@ describe("remote daemon", () => {
     } finally {
       await closeEndpoint(client);
       await extension.close();
+      await daemon.close();
+    }
+  }, 30_000);
+
+  it("returns the daemon's real ticket and pairing code over pairing_info", async () => {
+    const root = await tempRoot();
+    const daemon = await startRemoteDaemon({ remoteRoot: root, pairingCode: "123-456" });
+
+    try {
+      const extension = await connectIpcExtension(daemon.socketPath, {
+        sessionId: "session-1",
+        name: "Work session",
+        cwd: "/repo",
+      });
+      await daemon.ipc.waitForSession("session-1");
+
+      await extension.send({ sessionId: null, type: "pairing_info", payload: {} });
+
+      await expect(extension.readNext()).resolves.toEqual({
+        sessionId: null,
+        type: "pairing_info",
+        payload: { ticket: daemon.ticket, code: "123-456" },
+      });
+      await extension.close();
+    } finally {
       await daemon.close();
     }
   }, 30_000);

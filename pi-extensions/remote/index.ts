@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-import { defaultRemoteRoot } from "./authorization.js";
+import { FileNodeAllowlist, defaultRemoteRoot, renderPairingTicket } from "./authorization.js";
 import { connectIpcExtension, type IpcEnvelope, type IpcExtensionClient } from "./ipc.js";
 import { projectTranscriptEvent, projectTranscriptMessage } from "./transcript-projection.js";
 
@@ -51,6 +51,10 @@ export default function remoteExtension(pi: ExtensionAPI): void {
         await stopDaemon(ctx, socketPath());
         return;
       }
+      if (action === "pair") {
+        await showPairingInfo(ctx, socketPath());
+        return;
+      }
 
       if (state && !state.closed) {
         await shutdownState(state);
@@ -76,6 +80,9 @@ export default function remoteExtension(pi: ExtensionAPI): void {
       };
       void readInbound(pi, state);
       ctx.ui.notify("Remote session registered", "info");
+      if ((await new FileNodeAllowlist(remoteRoot()).count()) === 0) {
+        await showPairingInfo(ctx, socketPath());
+      }
     },
   });
 
@@ -284,6 +291,55 @@ async function stopDaemon(ctx: ExtensionContext, path: string): Promise<void> {
   }
 }
 
+async function showPairingInfo(ctx: ExtensionContext, path: string): Promise<void> {
+  try {
+    const info = await waitForPairingInfo(path);
+    if (!info) {
+      ctx.ui.notify("Remote daemon did not return pairing info", "error");
+      return;
+    }
+    ctx.ui.notify(renderPairingTicket({ ticket: info.ticket, pairingCode: info.code }), "info");
+  } catch (error) {
+    if (!isMissingSocket(error)) {
+      throw error;
+    }
+    ctx.ui.notify("Remote daemon is not running", "info");
+  }
+}
+
+async function waitForPairingInfo(path: string): Promise<{ ticket: string; code: string } | null> {
+  const deadline = Date.now() + 2_000;
+  while (true) {
+    const response = await requestDaemon(path, {
+      sessionId: null,
+      type: "pairing_info",
+      payload: {},
+    });
+    const info = pairingInfoFromPayload(response.payload);
+    if (info) {
+      return info;
+    }
+    if (Date.now() >= deadline) {
+      return null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+function pairingInfoFromPayload(payload: unknown): { ticket: string; code: string } | null {
+  if (
+    typeof payload === "object" &&
+    payload !== null &&
+    "ticket" in payload &&
+    "code" in payload &&
+    typeof payload.ticket === "string" &&
+    typeof payload.code === "string"
+  ) {
+    return { ticket: payload.ticket, code: payload.code };
+  }
+  return null;
+}
+
 function requestDaemon(path: string, envelope: IpcEnvelope): Promise<IpcEnvelope> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(path);
@@ -361,7 +417,11 @@ function spawnDaemon(): void {
 }
 
 function socketPath(): string {
-  return join(process.env.PI_REMOTE_ROOT ?? defaultRemoteRoot(), DAEMON_SOCKET_FILE);
+  return join(remoteRoot(), DAEMON_SOCKET_FILE);
+}
+
+function remoteRoot(): string {
+  return process.env.PI_REMOTE_ROOT ?? defaultRemoteRoot();
 }
 
 function sessionName(pi: ExtensionAPI, ctx: ExtensionContext): string {

@@ -102,6 +102,7 @@ describe("remote extension", () => {
     const frames: IpcEnvelope[] = [];
     const daemon = await startIpcDaemonServer(join(root, "daemon.sock"), {
       onFrame: (frame) => frames.push(frame),
+      getPairingInfo: () => ({ ticket: "ticket-stub", code: "123-456" }),
     });
     const { pi, command } = createPi();
     const ctx = createContext();
@@ -149,6 +150,7 @@ describe("remote extension", () => {
     const frames: IpcEnvelope[] = [];
     const daemon = await startIpcDaemonServer(join(root, "daemon.sock"), {
       onFrame: (frame) => frames.push(frame),
+      getPairingInfo: () => ({ ticket: "ticket-stub", code: "123-456" }),
     });
     const { pi, command } = createPi();
     const ctx = createContext();
@@ -184,6 +186,7 @@ describe("remote extension", () => {
           );
         }
       },
+      getPairingInfo: () => ({ ticket: "ticket-stub", code: "123-456" }),
     });
 
     try {
@@ -231,6 +234,7 @@ describe("remote extension", () => {
           );
         }
       },
+      getPairingInfo: () => ({ ticket: "ticket-stub", code: "123-456" }),
     });
 
     try {
@@ -269,6 +273,7 @@ describe("remote extension", () => {
           })();
         }
       },
+      getPairingInfo: () => ({ ticket: "ticket-stub", code: "123-456" }),
     });
 
     try {
