@@ -10,7 +10,12 @@ import {
   defaultRemoteRoot,
   type NodeAllowlist,
 } from "./authorization.js";
-import { startIpcDaemonServer, type IpcDaemonServer, type IpcEnvelope } from "./ipc.js";
+import {
+  startIpcDaemonServer,
+  type IpcDaemonServer,
+  type IpcEnvelope,
+  type PairingInfo,
+} from "./ipc.js";
 import {
   acceptConnection,
   acceptStream,
@@ -58,16 +63,22 @@ export async function startRemoteDaemon(options: RemoteDaemonOptions): Promise<R
 
   const allowlist = new FileNodeAllowlist(remoteRoot);
   let daemon: RemoteDaemon;
-  const ipc = await startIpcDaemonServer(socketPath, { onStop: () => daemon.close() });
+  let pairingInfo: PairingInfo | undefined;
+  const ipc = await startIpcDaemonServer(socketPath, {
+    onStop: () => daemon.close(),
+    getPairingInfo: () => pairingInfo,
+  });
   await chmod(socketPath, OWNER_ONLY_FILE_MODE);
   const endpoint = await bindEndpoint(await loadSecretKey(remoteRoot));
+  const ticket = endpointTicket(endpoint);
+  pairingInfo = { ticket, code: options.pairingCode };
   let closed = false;
   void acceptConnections(endpoint, ipc, allowlist, options.pairingCode, () => closed);
 
   daemon = {
     endpoint,
     ipc,
-    ticket: endpointTicket(endpoint),
+    ticket,
     nodeId: endpoint.id().toString(),
     socketPath,
     async close() {
@@ -395,7 +406,10 @@ async function loadSecretKey(remoteRoot: string): Promise<number[]> {
 
 async function prepareSocketPath(socketPath: string): Promise<void> {
   const socketDirectory = dirname(socketPath);
-  const created = await mkdir(socketDirectory, { recursive: true, mode: OWNER_ONLY_DIRECTORY_MODE });
+  const created = await mkdir(socketDirectory, {
+    recursive: true,
+    mode: OWNER_ONLY_DIRECTORY_MODE,
+  });
   if (created === undefined) {
     await assertOwnerOnlyDirectory(socketDirectory);
   } else {

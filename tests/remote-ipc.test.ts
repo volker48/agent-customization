@@ -194,6 +194,58 @@ describe("remote Unix-socket IPC", () => {
     }
   });
 
+  it("returns pairing info over a pairing_info request", async () => {
+    const socketPath = await tempSocketPath();
+    const daemon = await startIpcDaemonServer(socketPath, {
+      getPairingInfo: () => ({ ticket: "ticket-abc", code: "654-321" }),
+    });
+
+    try {
+      const extension = await connectIpcExtension(socketPath, {
+        sessionId: "session-1",
+        name: "Work session",
+        cwd: "/repo",
+      });
+      await daemon.waitForSession("session-1");
+
+      await extension.send({ sessionId: null, type: "pairing_info", payload: {} });
+
+      await expect(extension.readNext()).resolves.toEqual({
+        sessionId: null,
+        type: "pairing_info",
+        payload: { ticket: "ticket-abc", code: "654-321" },
+      });
+      await extension.close();
+    } finally {
+      await daemon.close();
+    }
+  });
+
+  it("returns null pairing info when the daemon has none yet", async () => {
+    const socketPath = await tempSocketPath();
+    const daemon = await startIpcDaemonServer(socketPath);
+
+    try {
+      const extension = await connectIpcExtension(socketPath, {
+        sessionId: "session-1",
+        name: "Work session",
+        cwd: "/repo",
+      });
+      await daemon.waitForSession("session-1");
+
+      await extension.send({ sessionId: null, type: "pairing_info", payload: {} });
+
+      await expect(extension.readNext()).resolves.toEqual({
+        sessionId: null,
+        type: "pairing_info",
+        payload: null,
+      });
+      await extension.close();
+    } finally {
+      await daemon.close();
+    }
+  });
+
   it("keeps multiple concurrent sessions in the registry", async () => {
     const socketPath = await tempSocketPath();
     const daemon = await startIpcDaemonServer(socketPath);
