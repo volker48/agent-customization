@@ -19,6 +19,10 @@ public enum JSONValue: Equatable, Sendable {
   case object([JSONObjectMember])
   case rawJSON(String)
 
+  public func jsonData() throws -> Data {
+    Data(try jsonString().utf8)
+  }
+
   public func jsonString() throws -> String {
     switch self {
     case .null:

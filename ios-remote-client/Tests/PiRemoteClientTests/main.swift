@@ -5,6 +5,7 @@ import PiRemoteClient
 do {
   try runProtocolTests()
   try runProjectionTests()
+  try await runRemoteClientTests()
   print("PiRemoteClient tests passed")
 } catch {
   writeStandardError("PiRemoteClient tests failed: \(error)\n")
@@ -21,6 +22,12 @@ private func runProjectionTests() throws {
   try liveAssistantDeltasCoalesceIntoOneGrowingItem()
   try backfillCompletedEntriesAppendDirectly()
   try toolActivityAndTruncationFieldsRemainRenderable()
+}
+
+private func runRemoteClientTests() async throws {
+  try await pairAndListSendControlFrames()
+  try await wrongPairResponseIsRejected()
+  try await listSendsNoPairingCodeForAlreadyPairedIdentity()
 }
 
 private func envelopeRoundTripsTSGeneratedFixturesByteForByte() throws {
@@ -101,6 +108,82 @@ private func toolActivityAndTruncationFieldsRemainRenderable() throws {
   try expect(ChatItem(entry).truncatedOutput)
 }
 
+private func pairAndListSendControlFrames() async throws {
+  let transport = RecordingTransport(responses: [
+    [.control(.init(type: .pair, payload: ["paired": true]))],
+    [
+      .control(
+        .init(
+          type: .list,
+          payload: [
+            ["sessionId": "session-1", "name": "Work session", "cwd": "/repo"],
+          ]
+        )
+      ),
+    ],
+  ])
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+
+  let paired = try await client.pair(code: "123456")
+  try expect(paired)
+  let sessions = try await client.list()
+
+  try expect(sessions == [.init(sessionID: "session-1", name: "Work session", cwd: "/repo")])
+  let requests = await transport.recordedRequests()
+  try expect(requests.map(\.ticket) == ["ticket", "ticket"])
+  try expect(try encodeFrameString(requests[0].envelopes[0]) == pairFrame(code: "123-456"))
+  try expect(try encodeFrameString(requests[1].envelopes[0]) == listFrame())
+}
+
+private func wrongPairResponseIsRejected() async throws {
+  let transport = RecordingTransport(responses: [[]])
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+
+  try await expectThrows(RemoteClientError.pairingRejected) {
+    try await client.pair(code: "123-456")
+  }
+}
+
+private func listSendsNoPairingCodeForAlreadyPairedIdentity() async throws {
+  let transport = RecordingTransport(responses: [
+    [.control(.init(type: .list, payload: []))],
+  ])
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+
+  let sessions = try await client.list()
+  try expect(sessions.isEmpty)
+
+  let requests = await transport.recordedRequests()
+  try expect(requests.count == 1)
+  try expect(try encodeFrameString(requests[0].envelopes[0]) == listFrame())
+}
+
+private struct RecordedRequest: Sendable {
+  let ticket: String
+  let envelopes: [Envelope]
+}
+
+private actor RecordingTransport: RemoteTransport {
+  nonisolated let localNodeID = "node-a"
+
+  private var responses: [[Envelope]]
+  private var requests: [RecordedRequest]
+
+  init(responses: [[Envelope]]) {
+    self.responses = responses
+    self.requests = []
+  }
+
+  func request(ticket: String, envelopes: [Envelope]) async throws -> [Envelope] {
+    requests.append(.init(ticket: ticket, envelopes: envelopes))
+    return responses.removeFirst()
+  }
+
+  func recordedRequests() -> [RecordedRequest] {
+    requests
+  }
+}
+
 private struct ProtocolFixture: Decodable {
   let name: String
   let channel: String
@@ -117,6 +200,14 @@ private func loadProtocolFixtures() throws -> [ProtocolFixture] {
 
 private func encodeFrameString(_ envelope: Envelope) throws -> String {
   String(decoding: try encodeFrame(envelope), as: UTF8.self)
+}
+
+private func pairFrame(code: String) -> String {
+  "{\"sessionId\":null,\"type\":\"pair\",\"payload\":{\"code\":\"\(code)\"}}\n"
+}
+
+private func listFrame() -> String {
+  "{\"sessionId\":null,\"type\":\"list\",\"payload\":{}}\n"
 }
 
 private extension Envelope {
@@ -166,6 +257,22 @@ private func require<T>(
     throw TestFailure.missingRequiredValue(String(describing: file), line)
   }
   return value
+}
+
+private func expectThrows<T: Error & Equatable>(
+  _ expected: T,
+  operation: () async throws -> Void,
+  file: StaticString = #filePath,
+  line: UInt = #line
+) async throws {
+  do {
+    try await operation()
+  } catch let error as T where error == expected {
+    return
+  } catch {
+    throw TestFailure.message("Expected \(expected), got \(error)")
+  }
+  throw TestFailure.failed(String(describing: file), line)
 }
 
 private func writeStandardError(_ message: String) {
