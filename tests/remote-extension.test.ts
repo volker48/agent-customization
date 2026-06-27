@@ -316,6 +316,31 @@ describe("remote extension", () => {
     }
   });
 
+  it("renders the daemon pairing ticket and code through /remote pair", async () => {
+    const daemon = await startIpcDaemonServer(join(root, "daemon.sock"), {
+      getPairingInfo: () => ({ ticket: "ticket-stub", code: "654-321" }),
+    });
+    const { pi, command } = createPi();
+    const ctx = createContext();
+
+    try {
+      remoteExtension(pi as never);
+
+      await command("remote").handler("pair", ctx);
+
+      expect(ctx.ui.notify).toHaveBeenCalledWith(
+        expect.stringContaining("Ticket: ticket-stub"),
+        "info",
+      );
+      expect(ctx.ui.notify).toHaveBeenCalledWith(
+        expect.stringContaining("Enter pairing code: 654-321"),
+        "info",
+      );
+    } finally {
+      await daemon.close();
+    }
+  });
+
   it("receives the stop response before the daemon closes", async () => {
     const { pi, command } = createPi();
     const ctx = createContext();
