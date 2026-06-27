@@ -11,8 +11,14 @@ let package = Package(
     .library(name: "PiRemoteClient", targets: ["PiRemoteClient"]),
     .executable(name: "pi-remote-client-tests", targets: ["PiRemoteClientTests"]),
   ],
+  dependencies: [
+    .package(url: "https://github.com/n0-computer/iroh-ffi.git", exact: "1.0.0"),
+  ],
   targets: [
-    .target(name: "PiRemoteClient"),
+    .target(
+      name: "PiRemoteClient",
+      dependencies: [.product(name: "IrohLib", package: "iroh-ffi")]
+    ),
     .executableTarget(
       name: "PiRemoteClientTests",
       dependencies: ["PiRemoteClient"],

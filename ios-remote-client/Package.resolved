@@ -1,0 +1,14 @@
+{
+  "pins" : [
+    {
+      "identity" : "iroh-ffi",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/n0-computer/iroh-ffi.git",
+      "state" : {
+        "revision" : "afcb46d9f583eca81a592eddeae531efe91f3bd1",
+        "version" : "1.0.0"
+      }
+    }
+  ],
+  "version" : 2
+}
