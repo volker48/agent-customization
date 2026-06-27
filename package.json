@@ -28,6 +28,7 @@
     "@number0/iroh": "1.0.0",
     "linkedom": "0.18.12",
     "qrcode-terminal": "0.12.0",
+    "tsx": "4.22.4",
     "turndown": "7.2.4",
     "turndown-plugin-gfm": "1.0.2"
   },
@@ -39,7 +40,6 @@
     "@types/node": "25.2.3",
     "oxfmt": "0.32.0",
     "oxlint": "1.47.0",
-    "tsx": "4.22.4",
     "typescript": "5.9.3",
     "vitest": "4.0.18"
   },
@@ -52,7 +52,7 @@
       "./pi-extensions"
     ],
     "prompts": [
-    "./prompts"
+      "./prompts"
     ]
   }
 }

@@ -409,7 +409,8 @@ function canConnect(path: string): Promise<boolean> {
 
 function spawnDaemon(): void {
   const entry = join(dirname(fileURLToPath(import.meta.url)), "daemon-entry.ts");
-  spawn("tsx", [entry], { detached: true, stdio: "ignore" })
+  const tsxLoader = import.meta.resolve("tsx");
+  spawn(process.execPath, ["--import", tsxLoader, entry], { detached: true, stdio: "ignore" })
     .on("error", (error) => {
       console.error(`[remote] failed to spawn daemon: ${error.message}`);
     })
