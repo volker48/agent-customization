@@ -1,0 +1,22 @@
+[
+  {
+    "name": "control list request",
+    "channel": "control",
+    "frame": "{\"sessionId\":null,\"type\":\"list\",\"payload\":{}}\n"
+  },
+  {
+    "name": "control pair response",
+    "channel": "control",
+    "frame": "{\"sessionId\":null,\"type\":\"pair\",\"payload\":{\"paired\":true}}\n"
+  },
+  {
+    "name": "session event with escaped lf and unicode separators",
+    "channel": "session",
+    "frame": "{\"sessionId\":\"session-1\",\"type\":\"event\",\"payload\":{\"entry\":{\"role\":\"assistant\",\"text\":\"line one\\nline two line three line four 😀\",\"toolName\":null,\"status\":\"streaming\",\"truncatedOutput\":false}}}\n"
+  },
+  {
+    "name": "session prompt request",
+    "channel": "session",
+    "frame": "{\"sessionId\":\"session-1\",\"type\":\"prompt\",\"payload\":{\"text\":\"continue from the phone\"}}\n"
+  }
+]
