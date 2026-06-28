@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { encodeFrame, type Envelope } from "../pi-extensions/remote/protocol.js";
+import { projectTranscriptEvent } from "../pi-extensions/remote/transcript-projection.js";
 
 export type ProtocolFixture = {
   name: string;
@@ -35,15 +36,13 @@ export const fixtureEnvelopes: FixtureEnvelope[] = [
     envelope: {
       sessionId: "session-1",
       type: "event",
-      payload: {
-        entry: {
+      payload: projectTranscriptEvent({
+        type: "message_update",
+        message: {
           role: "assistant",
-          text: "line one\nline two\u2028line three\u2029line four 😀",
-          toolName: null,
-          status: "streaming",
-          truncatedOutput: false,
+          content: "line one\nline two\u2028line three\u2029line four 😀",
         },
-      },
+      }),
     },
   },
   {

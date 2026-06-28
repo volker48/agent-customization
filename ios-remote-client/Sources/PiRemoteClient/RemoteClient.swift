@@ -55,6 +55,7 @@ public protocol SecretKeyStore: Sendable {
 public protocol RemoteTransport: Sendable {
   var localNodeID: String { get }
   func request(ticket: String, envelopes: [Envelope]) async throws -> [Envelope]
+  func stream(ticket: String, envelopes: [Envelope]) -> AsyncThrowingStream<Envelope, Error>
 }
 
 public actor RemoteClient {
@@ -101,6 +102,17 @@ public actor RemoteClient {
     let responses = try await requestControl(.list, payload: .object([]))
     let payload = try requireControlPayload(responses.first, type: .list)
     return try decodePayload([RemoteSession].self, from: payload)
+  }
+
+  public func attachStream(sessionID: String) throws -> AsyncThrowingStream<Envelope, Error> {
+    guard let ticket else {
+      throw RemoteClientError.missingTicket
+    }
+
+    let envelope = Envelope.control(
+      .init(type: .attach, payload: ["sessionId": .string(sessionID), "stream": true])
+    )
+    return transport.stream(ticket: ticket, envelopes: [envelope])
   }
 }
 
@@ -154,6 +166,59 @@ public final class IrohRemoteTransport: RemoteTransport, @unchecked Sendable {
 
     let response = try await stream.recv().readToEnd(sizeLimit: maxResponseBytes)
     return try decodeFrames(response)
+  }
+
+  public func stream(
+    ticket: String,
+    envelopes: [Envelope]
+  ) -> AsyncThrowingStream<Envelope, Error> {
+    AsyncThrowingStream { continuation in
+      let task = Task {
+        do {
+          try await streamEnvelopes(
+            ticket: ticket,
+            envelopes: envelopes,
+            continuation: continuation
+          )
+          continuation.finish()
+        } catch {
+          continuation.finish(throwing: error)
+        }
+      }
+      continuation.onTermination = { _ in task.cancel() }
+    }
+  }
+
+  private func streamEnvelopes(
+    ticket: String,
+    envelopes: [Envelope],
+    continuation: AsyncThrowingStream<Envelope, Error>.Continuation
+  ) async throws {
+    let daemonAddress = try EndpointTicket.fromString(str: ticket).endpointAddr()
+    let connection = try await endpoint.connect(addr: daemonAddress, alpn: alpn)
+    let stream = try await connection.openBi()
+
+    let send = stream.send()
+    for envelope in envelopes {
+      try await send.writeAll(buf: encodeFrame(envelope))
+    }
+    try await send.finish()
+
+    let recv = stream.recv()
+    var decoder = StreamingFrameDecoder()
+    while !Task.isCancelled {
+      let chunk = try await recv.read(sizeLimit: 64 * 1024)
+      if chunk.isEmpty {
+        break
+      }
+      for envelope in try decoder.append(chunk) {
+        continuation.yield(envelope)
+      }
+    }
+    for envelope in try decoder.finish() {
+      continuation.yield(envelope)
+    }
+    _ = connection
   }
 }
 

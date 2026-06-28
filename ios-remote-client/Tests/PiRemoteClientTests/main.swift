@@ -28,6 +28,9 @@ private func runRemoteClientTests() async throws {
   try await pairAndListSendControlFrames()
   try await wrongPairResponseIsRejected()
   try await listSendsNoPairingCodeForAlreadyPairedIdentity()
+  try await attachStreamSendsStreamingAttachAndSurfacesFrames()
+  try await sessionStoreAttachesAndRendersBackfillThenLiveDeltas()
+  try await sessionStoreStopsFeedOnSessionEndedControlFrame()
 }
 
 private func envelopeRoundTripsTSGeneratedFixturesByteForByte() throws {
@@ -158,6 +161,89 @@ private func listSendsNoPairingCodeForAlreadyPairedIdentity() async throws {
   try expect(try encodeFrameString(requests[0].envelopes[0]) == listFrame())
 }
 
+private func attachStreamSendsStreamingAttachAndSurfacesFrames() async throws {
+  let expectedFrames: [Envelope] = [
+    .control(.init(type: .attach, payload: ["attached": true, "sessionId": "session-1"])),
+    .session(.init(sessionID: "session-1", type: .event, payload: eventPayload(text: "hello"))),
+  ]
+  let transport = RecordingTransport(responses: [], streams: [expectedFrames])
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+
+  var received: [Envelope] = []
+  for try await envelope in try await client.attachStream(sessionID: "session-1") {
+    received.append(envelope)
+  }
+
+  try expect(received == expectedFrames)
+  let streams = await transport.recordedStreams()
+  try expect(streams.map(\.ticket) == ["ticket"])
+  try expect(try encodeFrameString(streams[0].envelopes[0]) == streamingAttachFrame())
+}
+
+private func sessionStoreAttachesAndRendersBackfillThenLiveDeltas() async throws {
+  let frames: [Envelope] = [
+    .control(.init(type: .attach, payload: ["attached": true, "sessionId": "session-1"])),
+    .session(
+      .init(
+        sessionID: "session-1",
+        type: .event,
+        payload: eventPayload(role: "user", text: "Question")
+      )
+    ),
+    .session(.init(sessionID: "session-1", type: .event, payload: eventPayload(text: "Answer"))),
+    .session(
+      .init(
+        sessionID: "session-1",
+        type: .event,
+        payload: eventPayload(text: "Li", status: "started")
+      )
+    ),
+    .session(
+      .init(
+        sessionID: "session-1",
+        type: .event,
+        payload: eventPayload(text: "Live", status: "streaming")
+      )
+    ),
+    .session(
+      .init(sessionID: "session-1", type: .event, payload: eventPayload(text: "Live answer"))
+    ),
+  ]
+  let store = await storeAttachedWith(frames)
+
+  let texts = await store.transcript(for: "session-1").map(\.text)
+  let attachedSessionID = await store.attachedSessionID
+  let errorMessage = await store.errorMessage
+
+  try expect(texts == ["Question", "Answer", "Live answer"])
+  try expect(attachedSessionID == nil)
+  try expect(errorMessage == nil)
+}
+
+private func sessionStoreStopsFeedOnSessionEndedControlFrame() async throws {
+  let frames: [Envelope] = [
+    .control(.init(type: .attach, payload: ["attached": true, "sessionId": "session-1"])),
+    .session(.init(sessionID: "session-1", type: .event, payload: eventPayload(text: "before"))),
+    .control(.init(type: .sessionEnded, payload: ["sessionId": "session-1"])),
+    .session(.init(sessionID: "session-1", type: .event, payload: eventPayload(text: "after"))),
+  ]
+  let store = await storeAttachedWith(frames)
+
+  let texts = await store.transcript(for: "session-1").map(\.text)
+  let attachedSessionID = await store.attachedSessionID
+
+  try expect(texts == ["before"])
+  try expect(attachedSessionID == nil)
+}
+
+private func storeAttachedWith(_ frames: [Envelope]) async -> SessionStore {
+  let transport = RecordingTransport(responses: [], streams: [frames])
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+  let store = await SessionStore(client: client)
+  await store.attach(to: .init(sessionID: "session-1", name: "Work", cwd: "/repo"))
+  return store
+}
+
 private struct RecordedRequest: Sendable {
   let ticket: String
   let envelopes: [Envelope]
@@ -167,11 +253,15 @@ private actor RecordingTransport: RemoteTransport {
   nonisolated let localNodeID = "node-a"
 
   private var responses: [[Envelope]]
+  private var streams: [[Envelope]]
   private var requests: [RecordedRequest]
+  private var streamRequests: [RecordedRequest]
 
-  init(responses: [[Envelope]]) {
+  init(responses: [[Envelope]], streams: [[Envelope]] = []) {
     self.responses = responses
+    self.streams = streams
     self.requests = []
+    self.streamRequests = []
   }
 
   func request(ticket: String, envelopes: [Envelope]) async throws -> [Envelope] {
@@ -179,8 +269,32 @@ private actor RecordingTransport: RemoteTransport {
     return responses.removeFirst()
   }
 
+  nonisolated func stream(
+    ticket: String,
+    envelopes: [Envelope]
+  ) -> AsyncThrowingStream<Envelope, Error> {
+    AsyncThrowingStream { continuation in
+      Task {
+        let frames = await recordStream(ticket: ticket, envelopes: envelopes)
+        for frame in frames {
+          continuation.yield(frame)
+        }
+        continuation.finish()
+      }
+    }
+  }
+
   func recordedRequests() -> [RecordedRequest] {
     requests
+  }
+
+  func recordedStreams() -> [RecordedRequest] {
+    streamRequests
+  }
+
+  private func recordStream(ticket: String, envelopes: [Envelope]) -> [Envelope] {
+    streamRequests.append(.init(ticket: ticket, envelopes: envelopes))
+    return streams.removeFirst()
   }
 }
 
@@ -208,6 +322,27 @@ private func pairFrame(code: String) -> String {
 
 private func listFrame() -> String {
   "{\"sessionId\":null,\"type\":\"list\",\"payload\":{}}\n"
+}
+
+private func streamingAttachFrame() -> String {
+  "{\"sessionId\":null,\"type\":\"attach\",\"payload\":{\"sessionId\":\"session-1\"," +
+    "\"stream\":true}}\n"
+}
+
+private func eventPayload(
+  role: String = "assistant",
+  text: String,
+  status: String = "completed",
+  toolName: JSONValue = .null,
+  truncatedOutput: Bool = false
+) -> JSONValue {
+  [
+    "role": .string(role),
+    "text": .string(text),
+    "toolName": toolName,
+    "status": .string(status),
+    "truncatedOutput": .bool(truncatedOutput),
+  ]
 }
 
 private extension Envelope {

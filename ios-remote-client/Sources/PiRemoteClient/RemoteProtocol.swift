@@ -104,24 +104,40 @@ public func decodeFrames(_ input: String) throws -> [Envelope] {
 
 public func decodeFrames(_ input: Data) throws -> [Envelope] {
   var frames: [Envelope] = []
-  var start = input.startIndex
-  var index = input.startIndex
-
-  while index < input.endIndex {
-    if input[index] == 0x0A {
-      if start < index {
-        try frames.append(decodeFrame(input[start..<index]))
-      }
-      start = input.index(after: index)
-    }
-    index = input.index(after: index)
-  }
-
-  if start < input.endIndex {
-    try frames.append(decodeFrame(input[start..<input.endIndex]))
-  }
-
+  var decoder = StreamingFrameDecoder()
+  frames.append(contentsOf: try decoder.append(input))
+  frames.append(contentsOf: try decoder.finish())
   return frames
+}
+
+public struct StreamingFrameDecoder: Sendable {
+  private var buffered = Data()
+
+  public init() {}
+
+  public mutating func append(_ chunk: Data) throws -> [Envelope] {
+    buffered.append(chunk)
+    return try drainCompleteFrames()
+  }
+
+  public mutating func finish() throws -> [Envelope] {
+    defer { buffered.removeAll() }
+    guard !buffered.isEmpty else {
+      return []
+    }
+    return [try decodeFrame(buffered)]
+  }
+
+  private mutating func drainCompleteFrames() throws -> [Envelope] {
+    var frames: [Envelope] = []
+    while let newline = buffered.firstIndex(of: 0x0A) {
+      if buffered.startIndex < newline {
+        try frames.append(decodeFrame(buffered[buffered.startIndex..<newline]))
+      }
+      buffered.removeSubrange(buffered.startIndex...newline)
+    }
+    return frames
+  }
 }
 
 private struct WireEnvelope: Decodable {

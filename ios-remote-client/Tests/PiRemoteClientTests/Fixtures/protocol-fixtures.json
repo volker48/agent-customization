@@ -12,7 +12,7 @@
   {
     "name": "session event with escaped lf and unicode separators",
     "channel": "session",
-    "frame": "{\"sessionId\":\"session-1\",\"type\":\"event\",\"payload\":{\"entry\":{\"role\":\"assistant\",\"text\":\"line one\\nline two line three line four 😀\",\"toolName\":null,\"status\":\"streaming\",\"truncatedOutput\":false}}}\n"
+    "frame": "{\"sessionId\":\"session-1\",\"type\":\"event\",\"payload\":{\"role\":\"assistant\",\"text\":\"line one\\nline two line three line four 😀\",\"toolName\":null,\"status\":\"streaming\",\"truncatedOutput\":false}}\n"
   },
   {
     "name": "session prompt request",
