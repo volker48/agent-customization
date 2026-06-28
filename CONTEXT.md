@@ -37,6 +37,52 @@ _Avoid_: rewrite (as a verb for the integration), hook, proxy
 **RTK integration**:
 The per-harness glue that intercepts bash commands and routes them through RTK — a Pi extension (`pi-extensions/rtk.ts`) and a parallel Claude Code hook.
 
+## Claude review
+
+**Claude review**:
+A Pi-initiated review workflow that delegates current-diff review to Claude Code, returns
+Claude Code's findings to the Pi session, and normally asks the Pi implementer to fix
+actionable issues. The review agent is Claude Code; the implementer remains the current Pi
+session.
+_Avoid_: code review (ambiguous), reviewer agent (when the harness boundary matters)
+
+**Review level**:
+The Claude Code review effort selected for a Claude review run. Supported scripted levels are
+`low`, `medium`, `high`, and `max`; `medium` is the default.
+_Avoid_: effort (unless quoting Claude Code), depth
+
+**Review context message**:
+Optional free-form text appended after the review level in Claude Code's `/code-review`
+invocation. It tells Claude Code what task or issue the diff is meant to implement, but a
+Claude review run may omit it and let Claude Code review the branch or unstaged changes
+without extra task context.
+_Avoid_: implementer message (confuses who consumes it)
+
+**Auto-fix**:
+The default Claude review outcome where Pi receives Claude Code's review and immediately acts
+on actionable findings. The opposite is review-only mode, where Pi surfaces the findings
+without starting implementation.
+_Avoid_: --fix (that means Claude Code mutates the tree itself)
+
+**Review subprocess**:
+The `claude` CLI process Pi starts for a Claude review run. It is read-only by policy: it may
+inspect the repository and produce findings, but it must not modify files, create tasks, spawn
+agents, or trigger remote/cloud work.
+_Avoid_: nested agent (too broad), Claude fixer
+
+**Review tool allowlist**:
+The Claude Code tools permitted in the review subprocess: `Bash`, `Read`, `Glob`, `Grep`,
+`LSP`, `WebFetch`, `WebSearch`, and `Skill`. The allowlist deliberately excludes mutating
+tools such as `Edit`, `Write`, `NotebookEdit`, and `TodoWrite`, and orchestration/remote
+tools such as `Agent`, `Task*`, `Cron*`, `RemoteTrigger`, and `Workflow`.
+_Avoid_: read-only tools (because `Bash` and web tools are broad; the policy is the explicit
+allowlist)
+
+**Review-only mode**:
+The Claude review outcome selected by `--no-fix`: Pi records Claude Code's findings in the
+transcript but does not trigger the implementer to act on them.
+_Avoid_: dry run (the review still runs), no-op
+
 ## Fusion
 
 **Fusion**:
