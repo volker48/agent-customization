@@ -20,6 +20,8 @@ private func runProtocolTests() throws {
 
 private func runProjectionTests() throws {
   try liveAssistantDeltasCoalesceIntoOneGrowingItem()
+  try liveUserDeltasCoalesceIntoOneItem()
+  try emptyLifecycleEntriesAreNotRendered()
   try backfillCompletedEntriesAppendDirectly()
   try toolActivityAndTruncationFieldsRemainRenderable()
 }
@@ -29,6 +31,12 @@ private func runRemoteClientTests() async throws {
   try await wrongPairResponseIsRejected()
   try await listSendsNoPairingCodeForAlreadyPairedIdentity()
   try await attachStreamSendsStreamingAttachAndSurfacesFrames()
+  try await promptSendsPerSessionRequest()
+  try await abortSendsPerSessionRequest()
+  try await sendingPromptDoesNotDisturbLiveAttachFeed()
+  try await sessionStoreReportsPromptFailureAsSteeringError()
+  try await successfulPromptDoesNotClearFeedError()
+  try await sessionStoreAbortSendsPerSessionRequest()
   try await sessionStoreAttachesAndRendersBackfillThenLiveDeltas()
   try await sessionStoreStopsFeedOnSessionEndedControlFrame()
 }
@@ -83,6 +91,29 @@ private func liveAssistantDeltasCoalesceIntoOneGrowingItem() throws {
   projection.applyLive(.assistant(text: "Hello there", status: "completed"))
 
   try expect(projection.items == [.assistant(text: "Hello there", status: "completed")])
+}
+
+private func liveUserDeltasCoalesceIntoOneItem() throws {
+  var projection = ConversationProjection()
+
+  projection.applyLive(.init(role: "user", text: "Woot", status: "started"))
+  projection.applyLive(.init(role: "user", text: "Woot", status: "completed"))
+
+  try expect(projection.items == [.init(.init(role: "user", text: "Woot", status: "completed"))])
+}
+
+private func emptyLifecycleEntriesAreNotRendered() throws {
+  var projection = ConversationProjection()
+
+  projection.applyLive(.init(role: "system", text: "", status: "turn_started"))
+  projection.applyLive(.init(role: "toolResult", text: "", toolName: "bash", status: "running"))
+  projection.appendBackfill([
+    .init(role: "system", text: "", status: "turn_completed"),
+  ])
+
+  try expect(projection.items == [
+    .init(.init(role: "toolResult", text: "", toolName: "bash", status: "running")),
+  ])
 }
 
 private func backfillCompletedEntriesAppendDirectly() throws {
@@ -180,6 +211,99 @@ private func attachStreamSendsStreamingAttachAndSurfacesFrames() async throws {
   try expect(try encodeFrameString(streams[0].envelopes[0]) == streamingAttachFrame())
 }
 
+private func promptSendsPerSessionRequest() async throws {
+  let transport = RecordingTransport(responses: [[]])
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+
+  try await client.sendPrompt(sessionID: "session-1", text: "Continue please")
+
+  let requests = await transport.recordedRequests()
+  try expect(requests.map(\.ticket) == ["ticket"])
+  try expect(try encodeFrameString(requests[0].envelopes[0]) == promptFrame())
+}
+
+private func abortSendsPerSessionRequest() async throws {
+  let transport = RecordingTransport(responses: [[]])
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+
+  try await client.abort(sessionID: "session-1")
+
+  let requests = await transport.recordedRequests()
+  try expect(requests.map(\.ticket) == ["ticket"])
+  try expect(try encodeFrameString(requests[0].envelopes[0]) == abortFrame())
+}
+
+private func sendingPromptDoesNotDisturbLiveAttachFeed() async throws {
+  let transport = LiveAttachTransport()
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+  let session = RemoteSession(sessionID: "session-1", name: "Work", cwd: "/repo")
+  let store = await SessionStore(client: client)
+
+  let attachTask = Task { await store.attach(to: session) }
+  try await waitUntil {
+    await store.transcript(for: "session-1").map(\.text) == ["before"]
+  }
+
+  let sent = await store.sendPrompt("continue", to: "session-1")
+  await attachTask.value
+
+  let texts = await store.transcript(for: "session-1").map(\.text)
+  let streamCount = await transport.recordedStreams().count
+  let requestCount = await transport.recordedRequests().count
+
+  try expect(sent)
+  try expect(texts == ["before", "after"])
+  try expect(streamCount == 1)
+  try expect(requestCount == 1)
+}
+
+private func sessionStoreReportsPromptFailureAsSteeringError() async throws {
+  let transport = FailingRequestTransport(error: RemoteClientError.unexpectedResponse("boom"))
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+  let store = await SessionStore(client: client)
+
+  let sent = await store.sendPrompt("continue", to: "session-1")
+  let steeringErrorMessage = await store.steeringErrorMessage
+  let feedErrorMessage = await store.feedErrorMessage
+
+  try expect(!sent)
+  try expect(steeringErrorMessage != nil)
+  try expect(feedErrorMessage == nil)
+}
+
+private func successfulPromptDoesNotClearFeedError() async throws {
+  let badFeedFrames: [Envelope] = [
+    .session(.init(sessionID: "session-1", type: .event, payload: ["role": "assistant"])),
+  ]
+  let transport = RecordingTransport(responses: [[]], streams: [badFeedFrames])
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+  let store = await SessionStore(client: client)
+
+  await store.attach(to: .init(sessionID: "session-1", name: "Work", cwd: "/repo"))
+  let feedError = await store.feedErrorMessage
+  let sent = await store.sendPrompt("continue", to: "session-1")
+  let feedErrorAfterPrompt = await store.feedErrorMessage
+  let steeringErrorAfterPrompt = await store.steeringErrorMessage
+
+  try expect(feedError != nil)
+  try expect(sent)
+  try expect(feedErrorAfterPrompt == feedError)
+  try expect(steeringErrorAfterPrompt == nil)
+}
+
+private func sessionStoreAbortSendsPerSessionRequest() async throws {
+  let transport = RecordingTransport(responses: [[]])
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+  let store = await SessionStore(client: client)
+
+  let aborted = await store.abort(sessionID: "session-1")
+
+  let requests = await transport.recordedRequests()
+  try expect(aborted)
+  try expect(requests.count == 1)
+  try expect(try encodeFrameString(requests[0].envelopes[0]) == abortFrame())
+}
+
 private func sessionStoreAttachesAndRendersBackfillThenLiveDeltas() async throws {
   let frames: [Envelope] = [
     .control(.init(type: .attach, payload: ["attached": true, "sessionId": "session-1"])),
@@ -213,11 +337,11 @@ private func sessionStoreAttachesAndRendersBackfillThenLiveDeltas() async throws
 
   let texts = await store.transcript(for: "session-1").map(\.text)
   let attachedSessionID = await store.attachedSessionID
-  let errorMessage = await store.errorMessage
+  let feedErrorMessage = await store.feedErrorMessage
 
   try expect(texts == ["Question", "Answer", "Live answer"])
   try expect(attachedSessionID == nil)
-  try expect(errorMessage == nil)
+  try expect(feedErrorMessage == nil)
 }
 
 private func sessionStoreStopsFeedOnSessionEndedControlFrame() async throws {
@@ -247,6 +371,84 @@ private func storeAttachedWith(_ frames: [Envelope]) async -> SessionStore {
 private struct RecordedRequest: Sendable {
   let ticket: String
   let envelopes: [Envelope]
+}
+
+private actor LiveAttachTransport: RemoteTransport {
+  nonisolated let localNodeID = "node-a"
+
+  private var requests: [RecordedRequest] = []
+  private var streamRequests: [RecordedRequest] = []
+  private var promptContinuation: CheckedContinuation<Void, Never>?
+
+  func request(ticket: String, envelopes: [Envelope]) async throws -> [Envelope] {
+    requests.append(.init(ticket: ticket, envelopes: envelopes))
+    if envelopes.contains(where: { $0.type == "prompt" }) {
+      promptContinuation?.resume()
+      promptContinuation = nil
+    }
+    return []
+  }
+
+  nonisolated func stream(
+    ticket: String,
+    envelopes: [Envelope]
+  ) -> AsyncThrowingStream<Envelope, Error> {
+    AsyncThrowingStream { continuation in
+      Task {
+        await recordStream(ticket: ticket, envelopes: envelopes)
+        continuation.yield(liveEvent(text: "before"))
+        await waitForPrompt()
+        continuation.yield(liveEvent(text: "after"))
+        continuation.finish()
+      }
+    }
+  }
+
+  func recordedRequests() -> [RecordedRequest] {
+    requests
+  }
+
+  func recordedStreams() -> [RecordedRequest] {
+    streamRequests
+  }
+
+  private func recordStream(ticket: String, envelopes: [Envelope]) {
+    streamRequests.append(.init(ticket: ticket, envelopes: envelopes))
+  }
+
+  nonisolated private func liveEvent(text: String) -> Envelope {
+    .session(.init(sessionID: "session-1", type: .event, payload: eventPayload(text: text)))
+  }
+
+  private func waitForPrompt() async {
+    if requests.contains(where: { $0.envelopes.contains(where: { $0.type == "prompt" }) }) {
+      return
+    }
+    await withCheckedContinuation { continuation in
+      promptContinuation = continuation
+    }
+  }
+}
+
+private actor FailingRequestTransport: RemoteTransport {
+  nonisolated let localNodeID = "node-a"
+
+  private let error: Error
+
+  init(error: Error) {
+    self.error = error
+  }
+
+  func request(ticket: String, envelopes: [Envelope]) async throws -> [Envelope] {
+    throw error
+  }
+
+  nonisolated func stream(
+    ticket: String,
+    envelopes: [Envelope]
+  ) -> AsyncThrowingStream<Envelope, Error> {
+    AsyncThrowingStream { continuation in continuation.finish() }
+  }
 }
 
 private actor RecordingTransport: RemoteTransport {
@@ -329,6 +531,14 @@ private func streamingAttachFrame() -> String {
     "\"stream\":true}}\n"
 }
 
+private func promptFrame() -> String {
+  "{\"sessionId\":\"session-1\",\"type\":\"prompt\",\"payload\":{\"text\":\"Continue please\"}}\n"
+}
+
+private func abortFrame() -> String {
+  "{\"sessionId\":\"session-1\",\"type\":\"abort\",\"payload\":{}}\n"
+}
+
 private func eventPayload(
   role: String = "assistant",
   text: String,
@@ -392,6 +602,20 @@ private func require<T>(
     throw TestFailure.missingRequiredValue(String(describing: file), line)
   }
   return value
+}
+
+private func waitUntil(
+  timeoutNanoseconds: UInt64 = 2_000_000_000,
+  condition: () async -> Bool
+) async throws {
+  let deadline = DispatchTime.now().uptimeNanoseconds + timeoutNanoseconds
+  while DispatchTime.now().uptimeNanoseconds < deadline {
+    if await condition() {
+      return
+    }
+    try await Task.sleep(nanoseconds: 10_000_000)
+  }
+  throw TestFailure.message("Timed out waiting for async condition")
 }
 
 private func expectThrows<T: Error & Equatable>(

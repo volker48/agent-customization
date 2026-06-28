@@ -114,6 +114,14 @@ public actor RemoteClient {
     )
     return transport.stream(ticket: ticket, envelopes: [envelope])
   }
+
+  public func sendPrompt(sessionID: String, text: String) async throws {
+    _ = try await requestSession(.prompt, sessionID: sessionID, payload: ["text": .string(text)])
+  }
+
+  public func abort(sessionID: String) async throws {
+    _ = try await requestSession(.abort, sessionID: sessionID, payload: .object([]))
+  }
 }
 
 public struct PairingCode: Equatable, Sendable {
@@ -233,6 +241,19 @@ private extension RemoteClient {
     }
 
     let envelope = Envelope.control(.init(type: type, payload: payload))
+    return try await transport.request(ticket: ticket, envelopes: [envelope])
+  }
+
+  func requestSession(
+    _ type: PerSessionMessageType,
+    sessionID: String,
+    payload: JSONValue
+  ) async throws -> [Envelope] {
+    guard let ticket else {
+      throw RemoteClientError.missingTicket
+    }
+
+    let envelope = Envelope.session(.init(sessionID: sessionID, type: type, payload: payload))
     return try await transport.request(ticket: ticket, envelopes: [envelope])
   }
 }

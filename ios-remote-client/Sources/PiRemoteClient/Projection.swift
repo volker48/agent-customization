@@ -48,45 +48,52 @@ public struct ChatItem: Codable, Equatable, Sendable {
 
 public struct ConversationProjection: Equatable, Sendable {
   public private(set) var items: [ChatItem]
-  private var streamingAssistantIndex: Array<ChatItem>.Index?
+  private var streamingMessageIndex: Array<ChatItem>.Index?
 
   public init(items: [ChatItem] = []) {
     self.items = items
-    self.streamingAssistantIndex = nil
+    self.streamingMessageIndex = nil
   }
 
   public mutating func appendBackfill(_ entries: [TranscriptEntry]) {
-    items.append(contentsOf: entries.map(ChatItem.init))
-    streamingAssistantIndex = nil
+    items.append(contentsOf: entries.filter(\.isRenderable).map(ChatItem.init))
+    streamingMessageIndex = nil
   }
 
   public mutating func applyLive(_ entry: TranscriptEntry) {
-    guard entry.isAssistantDelta else {
+    guard entry.isRenderable else {
+      return
+    }
+    guard entry.isMessageDelta else {
       items.append(ChatItem(entry))
       return
     }
 
-    upsertStreamingAssistant(ChatItem(entry))
+    upsertStreamingMessage(ChatItem(entry))
     if entry.status == "completed" {
-      streamingAssistantIndex = nil
+      streamingMessageIndex = nil
     }
   }
 }
 
 private extension ConversationProjection {
-  mutating func upsertStreamingAssistant(_ item: ChatItem) {
-    if let streamingAssistantIndex {
-      items[streamingAssistantIndex] = item
+  mutating func upsertStreamingMessage(_ item: ChatItem) {
+    if let streamingMessageIndex {
+      items[streamingMessageIndex] = item
       return
     }
 
     items.append(item)
-    streamingAssistantIndex = items.index(before: items.endIndex)
+    streamingMessageIndex = items.index(before: items.endIndex)
   }
 }
 
 private extension TranscriptEntry {
-  var isAssistantDelta: Bool {
-    role == "assistant" && ["started", "streaming", "completed"].contains(status)
+  var isRenderable: Bool {
+    !text.isEmpty || toolName != nil || truncatedOutput
+  }
+
+  var isMessageDelta: Bool {
+    ["user", "assistant"].contains(role) && ["started", "streaming", "completed"].contains(status)
   }
 }

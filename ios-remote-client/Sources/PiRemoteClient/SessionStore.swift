@@ -8,7 +8,8 @@ public final class SessionStore {
   public private(set) var sessions: [RemoteSession]
   public private(set) var transcripts: [String: ConversationProjection]
   public private(set) var attachedSessionID: String?
-  public private(set) var errorMessage: String?
+  public private(set) var feedErrorMessage: String?
+  public private(set) var steeringErrorMessage: String?
 
   private let client: RemoteClient
 
@@ -17,15 +18,16 @@ public final class SessionStore {
     self.sessions = sessions
     self.transcripts = [:]
     self.attachedSessionID = nil
-    self.errorMessage = nil
+    self.feedErrorMessage = nil
+    self.steeringErrorMessage = nil
   }
 
   public func refresh() async {
     do {
       sessions = try await client.list()
-      errorMessage = nil
+      feedErrorMessage = nil
     } catch {
-      errorMessage = String(describing: error)
+      feedErrorMessage = String(describing: error)
     }
   }
 
@@ -42,17 +44,39 @@ public final class SessionStore {
         }
       }
       closeFeed(session.sessionID)
-      errorMessage = nil
+      feedErrorMessage = nil
     } catch is CancellationError {
       closeFeed(session.sessionID)
     } catch {
       closeFeed(session.sessionID)
-      errorMessage = String(describing: error)
+      feedErrorMessage = String(describing: error)
     }
   }
 
   public func transcript(for sessionID: String) -> [ChatItem] {
     transcripts[sessionID]?.items ?? []
+  }
+
+  public func sendPrompt(_ text: String, to sessionID: String) async -> Bool {
+    do {
+      try await client.sendPrompt(sessionID: sessionID, text: text)
+      steeringErrorMessage = nil
+      return true
+    } catch {
+      steeringErrorMessage = String(describing: error)
+      return false
+    }
+  }
+
+  public func abort(sessionID: String) async -> Bool {
+    do {
+      try await client.abort(sessionID: sessionID)
+      steeringErrorMessage = nil
+      return true
+    } catch {
+      steeringErrorMessage = String(describing: error)
+      return false
+    }
   }
 }
 
@@ -93,6 +117,7 @@ public struct SessionListView: View {
 public struct ConversationView: View {
   private let store: SessionStore
   private let session: RemoteSession
+  @State private var draft = ""
 
   public init(store: SessionStore, session: RemoteSession) {
     self.store = store
@@ -100,6 +125,25 @@ public struct ConversationView: View {
   }
 
   public var body: some View {
+    VStack(spacing: 0) {
+      transcriptView
+      if store.attachedSessionID != session.sessionID {
+        disconnectedBanner
+      }
+      Composer(
+        text: $draft,
+        canSend: store.attachedSessionID == session.sessionID,
+        onSend: sendPrompt,
+        onStop: stopTurn
+      )
+    }
+    .navigationTitle(session.name)
+    .task(id: session.sessionID) {
+      await store.attach(to: session)
+    }
+  }
+
+  private var transcriptView: some View {
     ScrollView {
       LazyVStack(alignment: .leading, spacing: 10) {
         ForEach(Array(store.transcript(for: session.sessionID).enumerated()), id: \.offset) {
@@ -109,20 +153,23 @@ public struct ConversationView: View {
       }
       .padding()
     }
-    .navigationTitle(session.name)
-    .overlay(alignment: .bottom) {
-      if store.attachedSessionID != session.sessionID {
-        Text("Feed disconnected")
-          .font(.caption)
-          .foregroundStyle(.secondary)
-          .padding(8)
-          .background(.thinMaterial, in: Capsule())
-          .padding(.bottom, 8)
-      }
-    }
-    .task(id: session.sessionID) {
-      await store.attach(to: session)
-    }
+  }
+
+  private var disconnectedBanner: some View {
+    Text("Feed disconnected")
+      .font(.caption)
+      .foregroundStyle(.secondary)
+      .padding(8)
+      .background(.thinMaterial, in: Capsule())
+      .padding(.vertical, 8)
+  }
+
+  private func sendPrompt(_ text: String) async -> Bool {
+    await store.sendPrompt(text, to: session.sessionID)
+  }
+
+  private func stopTurn() async {
+    _ = await store.abort(sessionID: session.sessionID)
   }
 }
 
@@ -199,6 +246,57 @@ private struct SessionRow: View {
         .foregroundStyle(.secondary)
     }
     .accessibilityElement(children: .combine)
+  }
+}
+
+@available(iOS 17.5, macOS 14.5, *)
+private struct Composer: View {
+  @Binding var text: String
+  let canSend: Bool
+  let onSend: (String) async -> Bool
+  let onStop: () async -> Void
+  @State private var isSending = false
+  @State private var isStopping = false
+
+  private var trimmedText: String {
+    text.trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+
+  var body: some View {
+    HStack(spacing: 8) {
+      TextField("Steer the agent", text: $text, axis: .vertical)
+        .textFieldStyle(.roundedBorder)
+        .lineLimit(1...4)
+      Button("Send") {
+        send()
+      }
+      .disabled(trimmedText.isEmpty || !canSend || isSending)
+      Button("Stop", role: .destructive) {
+        stop()
+      }
+      .disabled(isStopping)
+    }
+    .padding()
+    .background(.regularMaterial)
+  }
+
+  private func send() {
+    let message = trimmedText
+    isSending = true
+    Task {
+      if await onSend(message) {
+        text = ""
+      }
+      isSending = false
+    }
+  }
+
+  private func stop() {
+    isStopping = true
+    Task {
+      await onStop()
+      isStopping = false
+    }
   }
 }
 
