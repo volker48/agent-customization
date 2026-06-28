@@ -2,24 +2,41 @@ import Foundation
 import Observation
 import SwiftUI
 
+public enum ConnectionState: Equatable, Sendable {
+  case connected
+  case reconnecting
+  case disconnected
+}
+
 @MainActor
 @Observable
 public final class SessionStore {
   public private(set) var sessions: [RemoteSession]
   public private(set) var transcripts: [String: ConversationProjection]
   public private(set) var attachedSessionID: String?
+  public private(set) var connectionState: ConnectionState
   public private(set) var feedErrorMessage: String?
   public private(set) var steeringErrorMessage: String?
 
   private let client: RemoteClient
+  private let reconnectDelayNanoseconds: UInt64
+  private let registryRefreshIntervalNanoseconds: UInt64
 
-  public init(client: RemoteClient, sessions: [RemoteSession] = []) {
+  public init(
+    client: RemoteClient,
+    sessions: [RemoteSession] = [],
+    reconnectDelayNanoseconds: UInt64 = 1_000_000_000,
+    registryRefreshIntervalNanoseconds: UInt64 = 2_000_000_000
+  ) {
     self.client = client
     self.sessions = sessions
     self.transcripts = [:]
     self.attachedSessionID = nil
+    self.connectionState = .disconnected
     self.feedErrorMessage = nil
     self.steeringErrorMessage = nil
+    self.reconnectDelayNanoseconds = reconnectDelayNanoseconds
+    self.registryRefreshIntervalNanoseconds = registryRefreshIntervalNanoseconds
   }
 
   public func refresh() async {
@@ -31,26 +48,44 @@ public final class SessionStore {
     }
   }
 
+  public func refreshSessionListUntilCancelled() async {
+    while !Task.isCancelled {
+      await refresh()
+      await sleepBeforeRegistryRefresh()
+    }
+  }
+
   public func attach(to session: RemoteSession) async {
     attachedSessionID = session.sessionID
-    transcripts[session.sessionID] = ConversationProjection()
+    connectionState = .reconnecting
 
-    do {
-      let stream = try await client.attachStream(sessionID: session.sessionID)
-      for try await envelope in stream {
-        try Task.checkCancellation()
-        if try apply(envelope, to: session.sessionID) == .closed {
-          break
+    while attachedSessionID == session.sessionID && !Task.isCancelled {
+      transcripts[session.sessionID] = ConversationProjection()
+
+      do {
+        let action = try await runAttachStream(for: session.sessionID)
+        if action == .closed {
+          closeFeed(session.sessionID)
+          feedErrorMessage = nil
+          return
         }
+        feedErrorMessage = nil
+        connectionState = .reconnecting
+        await sleepBeforeReconnect()
+      } catch is CancellationError {
+        closeFeed(session.sessionID)
+        return
+      } catch {
+        feedErrorMessage = String(describing: error)
+        if error is RemoteClientError || error is RemoteProtocolError {
+          closeFeed(session.sessionID)
+          return
+        }
+        connectionState = .reconnecting
+        await sleepBeforeReconnect()
       }
-      closeFeed(session.sessionID)
-      feedErrorMessage = nil
-    } catch is CancellationError {
-      closeFeed(session.sessionID)
-    } catch {
-      closeFeed(session.sessionID)
-      feedErrorMessage = String(describing: error)
     }
+    closeFeed(session.sessionID)
   }
 
   public func transcript(for sessionID: String) -> [ChatItem] {
@@ -83,6 +118,7 @@ public final class SessionStore {
 @available(iOS 17.5, macOS 14.5, *)
 public struct SessionListView: View {
   private let store: SessionStore
+  @Environment(\.scenePhase) private var scenePhase
 
   public init(store: SessionStore) {
     self.store = store
@@ -107,7 +143,13 @@ public struct SessionListView: View {
         await store.refresh()
       }
       .task {
-        await store.refresh()
+        await store.refreshSessionListUntilCancelled()
+      }
+      .onChange(of: scenePhase) { _, phase in
+        guard phase == .active else {
+          return
+        }
+        Task { await store.refresh() }
       }
     }
   }
@@ -117,7 +159,9 @@ public struct SessionListView: View {
 public struct ConversationView: View {
   private let store: SessionStore
   private let session: RemoteSession
+  @Environment(\.scenePhase) private var scenePhase
   @State private var draft = ""
+  @State private var attachAttempt = 0
 
   public init(store: SessionStore, session: RemoteSession) {
     self.store = store
@@ -127,20 +171,28 @@ public struct ConversationView: View {
   public var body: some View {
     VStack(spacing: 0) {
       transcriptView
-      if store.attachedSessionID != session.sessionID {
-        disconnectedBanner
-      }
+      connectionStatusBanner
       Composer(
         text: $draft,
-        canSend: store.attachedSessionID == session.sessionID,
+        canSend: canSendPrompt,
         onSend: sendPrompt,
         onStop: stopTurn
       )
     }
     .navigationTitle(session.name)
-    .task(id: session.sessionID) {
+    .task(id: attachTaskID) {
       await store.attach(to: session)
     }
+    .onChange(of: scenePhase) { _, phase in
+      guard phase == .active && store.attachedSessionID != session.sessionID else {
+        return
+      }
+      attachAttempt += 1
+    }
+  }
+
+  private var attachTaskID: String {
+    "\(session.sessionID):\(attachAttempt)"
   }
 
   private var transcriptView: some View {
@@ -155,12 +207,12 @@ public struct ConversationView: View {
     }
   }
 
-  private var disconnectedBanner: some View {
-    Text("Feed disconnected")
-      .font(.caption)
-      .foregroundStyle(.secondary)
-      .padding(8)
-      .background(.thinMaterial, in: Capsule())
+  private var canSendPrompt: Bool {
+    store.attachedSessionID == session.sessionID && store.connectionState == .connected
+  }
+
+  private var connectionStatusBanner: some View {
+    ConnectionStatusBanner(state: store.connectionState)
       .padding(.vertical, 8)
   }
 
@@ -179,6 +231,41 @@ private enum FeedAction {
 }
 
 private extension SessionStore {
+  func runAttachStream(for sessionID: String) async throws -> FeedAction {
+    let stream = try await client.attachStream(sessionID: sessionID)
+    var receivedFrame = false
+
+    for try await envelope in stream {
+      try Task.checkCancellation()
+      guard attachedSessionID == sessionID else {
+        return .keepOpen
+      }
+      if !receivedFrame {
+        connectionState = .connected
+        receivedFrame = true
+      }
+      if try apply(envelope, to: sessionID) == .closed {
+        return .closed
+      }
+    }
+    return .keepOpen
+  }
+
+  func sleepBeforeReconnect() async {
+    await sleep(ifNonzero: reconnectDelayNanoseconds)
+  }
+
+  func sleepBeforeRegistryRefresh() async {
+    await sleep(ifNonzero: registryRefreshIntervalNanoseconds)
+  }
+
+  func sleep(ifNonzero nanoseconds: UInt64) async {
+    guard nanoseconds > 0 else {
+      return
+    }
+    try? await Task.sleep(nanoseconds: nanoseconds)
+  }
+
   func apply(_ envelope: Envelope, to sessionID: String) throws -> FeedAction {
     switch envelope {
     case .control(let control):
@@ -209,6 +296,7 @@ private extension SessionStore {
   func closeFeed(_ sessionID: String) {
     if attachedSessionID == sessionID {
       attachedSessionID = nil
+      connectionState = .disconnected
     }
   }
 }
@@ -250,6 +338,51 @@ private struct SessionRow: View {
 }
 
 @available(iOS 17.5, macOS 14.5, *)
+private struct ConnectionStatusBanner: View {
+  let state: ConnectionState
+
+  var body: some View {
+    Label(title, systemImage: systemImage)
+      .font(.caption)
+      .foregroundStyle(foregroundStyle)
+      .padding(8)
+      .background(.thinMaterial, in: Capsule())
+  }
+
+  private var title: String {
+    switch state {
+    case .connected:
+      "Connected"
+    case .reconnecting:
+      "Reconnecting…"
+    case .disconnected:
+      "Disconnected"
+    }
+  }
+
+  private var systemImage: String {
+    switch state {
+    case .connected:
+      "checkmark.circle.fill"
+    case .reconnecting:
+      "arrow.triangle.2.circlepath"
+    case .disconnected:
+      "wifi.slash"
+    }
+  }
+
+  private var foregroundStyle: Color {
+    switch state {
+    case .connected:
+      .green
+    case .reconnecting:
+      .secondary
+    case .disconnected:
+      .red
+    }
+  }
+}
+
 private struct Composer: View {
   @Binding var text: String
   let canSend: Bool

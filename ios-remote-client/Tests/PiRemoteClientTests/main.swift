@@ -39,6 +39,10 @@ private func runRemoteClientTests() async throws {
   try await sessionStoreAbortSendsPerSessionRequest()
   try await sessionStoreAttachesAndRendersBackfillThenLiveDeltas()
   try await sessionStoreStopsFeedOnSessionEndedControlFrame()
+  try await sessionStoreReconnectsAndReattachesAfterFeedError()
+  try await sessionStoreReconnectsWhenFeedEndsCleanly()
+  try await sessionStoreRefreshLoopTracksSessionRegistry()
+  try await sessionStoreIgnoresSupersededSessionFeed()
 }
 
 private func envelopeRoundTripsTSGeneratedFixturesByteForByte() throws {
@@ -244,15 +248,19 @@ private func sendingPromptDoesNotDisturbLiveAttachFeed() async throws {
     await store.transcript(for: "session-1").map(\.text) == ["before"]
   }
 
+  let stateWhileAttached = await store.connectionState
   let sent = await store.sendPrompt("continue", to: "session-1")
   await attachTask.value
 
   let texts = await store.transcript(for: "session-1").map(\.text)
+  let stateAfterFeedClosed = await store.connectionState
   let streamCount = await transport.recordedStreams().count
   let requestCount = await transport.recordedRequests().count
 
+  try expect(stateWhileAttached == .connected)
   try expect(sent)
   try expect(texts == ["before", "after"])
+  try expect(stateAfterFeedClosed == .disconnected)
   try expect(streamCount == 1)
   try expect(requestCount == 1)
 }
@@ -332,6 +340,7 @@ private func sessionStoreAttachesAndRendersBackfillThenLiveDeltas() async throws
     .session(
       .init(sessionID: "session-1", type: .event, payload: eventPayload(text: "Live answer"))
     ),
+    .control(.init(type: .sessionEnded, payload: ["sessionId": "session-1"])),
   ]
   let store = await storeAttachedWith(frames)
 
@@ -360,6 +369,101 @@ private func sessionStoreStopsFeedOnSessionEndedControlFrame() async throws {
   try expect(attachedSessionID == nil)
 }
 
+private func sessionStoreIgnoresSupersededSessionFeed() async throws {
+  let transport = SwitchingAttachTransport()
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+  let store = await SessionStore(client: client, reconnectDelayNanoseconds: 0)
+  let first = RemoteSession(sessionID: "session-1", name: "First", cwd: "/one")
+  let second = RemoteSession(sessionID: "session-2", name: "Second", cwd: "/two")
+
+  let firstTask = Task { await store.attach(to: first) }
+  try await waitUntil {
+    await store.transcript(for: "session-1").map(\.text) == ["first initial"]
+  }
+  let secondTask = Task { await store.attach(to: second) }
+  await secondTask.value
+  await firstTask.value
+
+  let firstTexts = await store.transcript(for: "session-1").map(\.text)
+  let secondTexts = await store.transcript(for: "session-2").map(\.text)
+  let streamSessionIDs = await transport.streamSessionIDs()
+
+  try expect(firstTexts == ["first initial"])
+  try expect(secondTexts == ["second"])
+  try expect(streamSessionIDs == ["session-1", "session-2"])
+}
+
+private func sessionStoreRefreshLoopTracksSessionRegistry() async throws {
+  let secondList: [Envelope] = [.control(.init(type: .list, payload: [
+    ["sessionId": "session-2", "name": "Second", "cwd": "/two"],
+  ]))]
+  let firstList: [Envelope] = [.control(.init(type: .list, payload: [
+    ["sessionId": "session-1", "name": "First", "cwd": "/one"],
+  ]))]
+  let transport = RecordingTransport(
+    responses: [firstList] + Array(repeating: secondList, count: 100)
+  )
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+  let store = await SessionStore(
+    client: client,
+    reconnectDelayNanoseconds: 0,
+    registryRefreshIntervalNanoseconds: 1_000_000
+  )
+
+  let refreshTask = Task { await store.refreshSessionListUntilCancelled() }
+  try await waitUntil {
+    await store.sessions.map(\.sessionID) == ["session-2"]
+  }
+  refreshTask.cancel()
+
+  let sessions = await store.sessions
+  try expect(sessions == [.init(sessionID: "session-2", name: "Second", cwd: "/two")])
+}
+
+private func sessionStoreReconnectsWhenFeedEndsCleanly() async throws {
+  let transport = ReconnectingAttachTransport(streams: [
+    .success([liveEvent(text: "stale")]),
+    .success([
+      liveEvent(text: "fresh backfill"),
+      .control(.init(type: .sessionEnded, payload: ["sessionId": "session-1"])),
+    ]),
+  ])
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+  let store = await SessionStore(client: client, reconnectDelayNanoseconds: 0)
+
+  await store.attach(to: .init(sessionID: "session-1", name: "Work", cwd: "/repo"))
+
+  let texts = await store.transcript(for: "session-1").map(\.text)
+  let streamCount = await transport.recordedStreams().count
+
+  try expect(texts == ["fresh backfill"])
+  try expect(streamCount == 2)
+}
+
+private func sessionStoreReconnectsAndReattachesAfterFeedError() async throws {
+  let transport = ReconnectingAttachTransport(streams: [
+    .failure([liveEvent(text: "stale")], TestFailure.message("wifi dropped")),
+    .success([
+      liveEvent(text: "fresh backfill"),
+      .control(.init(type: .sessionEnded, payload: ["sessionId": "session-1"])),
+    ]),
+  ])
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+  let store = await SessionStore(client: client, reconnectDelayNanoseconds: 0)
+
+  await store.attach(to: .init(sessionID: "session-1", name: "Work", cwd: "/repo"))
+
+  let texts = await store.transcript(for: "session-1").map(\.text)
+  let attachedSessionID = await store.attachedSessionID
+  let connectionState = await store.connectionState
+  let streamCount = await transport.recordedStreams().count
+
+  try expect(texts == ["fresh backfill"])
+  try expect(attachedSessionID == nil)
+  try expect(connectionState == .disconnected)
+  try expect(streamCount == 2)
+}
+
 private func storeAttachedWith(_ frames: [Envelope]) async -> SessionStore {
   let transport = RecordingTransport(responses: [], streams: [frames])
   let client = RemoteClient(ticket: "ticket", transport: transport)
@@ -371,6 +475,123 @@ private func storeAttachedWith(_ frames: [Envelope]) async -> SessionStore {
 private struct RecordedRequest: Sendable {
   let ticket: String
   let envelopes: [Envelope]
+}
+
+private enum StreamScript: Sendable {
+  case success([Envelope])
+  case failure([Envelope], Error)
+}
+
+private actor SwitchingAttachTransport: RemoteTransport {
+  nonisolated let localNodeID = "node-a"
+
+  private var sessions: [String] = []
+  private var secondStreamStarted: CheckedContinuation<Void, Never>?
+
+  func request(ticket: String, envelopes: [Envelope]) async throws -> [Envelope] {
+    []
+  }
+
+  nonisolated func stream(
+    ticket: String,
+    envelopes: [Envelope]
+  ) -> AsyncThrowingStream<Envelope, Error> {
+    AsyncThrowingStream { continuation in
+      Task {
+        let sessionID = await recordStream(envelopes: envelopes)
+        if sessionID == "session-1" {
+          continuation.yield(liveEvent(text: "first initial"))
+          await waitForSecondStream()
+          continuation.yield(liveEvent(text: "first after switch"))
+          continuation.finish()
+          return
+        }
+        continuation.yield(
+          .session(.init(sessionID: sessionID, type: .event, payload: eventPayload(text: "second")))
+        )
+        continuation.yield(
+          .control(.init(type: .sessionEnded, payload: ["sessionId": .string(sessionID)]))
+        )
+        continuation.finish()
+      }
+    }
+  }
+
+  func streamSessionIDs() -> [String] {
+    sessions
+  }
+
+  private func recordStream(envelopes: [Envelope]) -> String {
+    guard case .control(let envelope) = envelopes[0],
+      case .object(let payload) = envelope.payload,
+      case .string(let sessionID) = payload.first(where: { $0.key == "sessionId" })?.value
+    else {
+      return ""
+    }
+
+    sessions.append(sessionID)
+    if sessions.count == 2 {
+      secondStreamStarted?.resume()
+      secondStreamStarted = nil
+    }
+    return sessionID
+  }
+
+  private func waitForSecondStream() async {
+    if sessions.count >= 2 {
+      return
+    }
+    await withCheckedContinuation { continuation in
+      secondStreamStarted = continuation
+    }
+  }
+}
+
+private actor ReconnectingAttachTransport: RemoteTransport {
+  nonisolated let localNodeID = "node-a"
+
+  private var streams: [StreamScript]
+  private var streamRequests: [RecordedRequest] = []
+
+  init(streams: [StreamScript]) {
+    self.streams = streams
+  }
+
+  func request(ticket: String, envelopes: [Envelope]) async throws -> [Envelope] {
+    []
+  }
+
+  nonisolated func stream(
+    ticket: String,
+    envelopes: [Envelope]
+  ) -> AsyncThrowingStream<Envelope, Error> {
+    AsyncThrowingStream { continuation in
+      Task {
+        let script = await recordStream(ticket: ticket, envelopes: envelopes)
+        switch script {
+        case .success(let frames):
+          for frame in frames {
+            continuation.yield(frame)
+          }
+          continuation.finish()
+        case .failure(let frames, let error):
+          for frame in frames {
+            continuation.yield(frame)
+          }
+          continuation.finish(throwing: error)
+        }
+      }
+    }
+  }
+
+  func recordedStreams() -> [RecordedRequest] {
+    streamRequests
+  }
+
+  private func recordStream(ticket: String, envelopes: [Envelope]) -> StreamScript {
+    streamRequests.append(.init(ticket: ticket, envelopes: envelopes))
+    return streams.removeFirst()
+  }
 }
 
 private actor LiveAttachTransport: RemoteTransport {
@@ -399,6 +620,9 @@ private actor LiveAttachTransport: RemoteTransport {
         continuation.yield(liveEvent(text: "before"))
         await waitForPrompt()
         continuation.yield(liveEvent(text: "after"))
+        continuation.yield(
+          .control(.init(type: .sessionEnded, payload: ["sessionId": "session-1"]))
+        )
         continuation.finish()
       }
     }
@@ -414,10 +638,6 @@ private actor LiveAttachTransport: RemoteTransport {
 
   private func recordStream(ticket: String, envelopes: [Envelope]) {
     streamRequests.append(.init(ticket: ticket, envelopes: envelopes))
-  }
-
-  nonisolated private func liveEvent(text: String) -> Envelope {
-    .session(.init(sessionID: "session-1", type: .event, payload: eventPayload(text: text)))
   }
 
   private func waitForPrompt() async {
@@ -537,6 +757,10 @@ private func promptFrame() -> String {
 
 private func abortFrame() -> String {
   "{\"sessionId\":\"session-1\",\"type\":\"abort\",\"payload\":{}}\n"
+}
+
+private func liveEvent(text: String) -> Envelope {
+  .session(.init(sessionID: "session-1", type: .event, payload: eventPayload(text: text)))
 }
 
 private func eventPayload(
