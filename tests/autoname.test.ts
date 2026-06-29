@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { complete } from "@earendil-works/pi-ai";
+import { complete } from "@earendil-works/pi-ai/compat";
 import autonameExtension, {
   buildAutonameTranscript,
   sanitizeSessionName,
 } from "../pi-extensions/autoname.js";
 
-vi.mock("@earendil-works/pi-ai", () => ({
+vi.mock("@earendil-works/pi-ai/compat", () => ({
   complete: vi.fn(),
 }));
 

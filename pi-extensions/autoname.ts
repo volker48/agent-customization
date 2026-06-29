@@ -1,4 +1,5 @@
-import { complete, type Message, type Model } from "@earendil-works/pi-ai";
+import { complete } from "@earendil-works/pi-ai/compat";
+import type { Message, Model } from "@earendil-works/pi-ai";
 import {
   BorderedLoader,
   type ExtensionAPI,

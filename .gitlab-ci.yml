@@ -1,0 +1,49 @@
+image: node:22-bookworm-slim
+
+stages:
+  - verify
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+
+variables:
+  PNPM_HOME: "$CI_PROJECT_DIR/.pnpm-home"
+  PNPM_STORE_DIR: "$CI_PROJECT_DIR/.pnpm-store"
+
+cache:
+  key:
+    files:
+      - pnpm-lock.yaml
+  paths:
+    - .pnpm-store/
+
+.default_node_job:
+  stage: verify
+  interruptible: true
+  before_script:
+    - corepack enable
+    - corepack prepare pnpm@11.9.0 --activate
+    - pnpm config set store-dir "$PNPM_STORE_DIR"
+    - pnpm install --frozen-lockfile --ignore-scripts
+
+lint:
+  extends: .default_node_job
+  script:
+    - pnpm run lint
+
+format:
+  extends: .default_node_job
+  script:
+    - pnpm run format:check
+
+typecheck:
+  extends: .default_node_job
+  script:
+    - pnpm run typecheck
+
+test:
+  extends: .default_node_job
+  script:
+    - pnpm run test
