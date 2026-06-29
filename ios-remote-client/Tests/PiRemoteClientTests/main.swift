@@ -24,6 +24,9 @@ private func runProjectionTests() throws {
   try emptyLifecycleEntriesAreNotRendered()
   try backfillCompletedEntriesAppendDirectly()
   try toolActivityAndTruncationFieldsRemainRenderable()
+  try toolResultsCollapseByDefaultButUserFacingMessagesDoNot()
+  try freshProjectionsDoNotReuseChatItemIDs()
+  try streamingDeltasKeepTheirChatItemID()
 }
 
 private func runRemoteClientTests() async throws {
@@ -112,12 +115,13 @@ private func emptyLifecycleEntriesAreNotRendered() throws {
   projection.applyLive(.init(role: "system", text: "", status: "turn_started"))
   projection.applyLive(.init(role: "toolResult", text: "", toolName: "bash", status: "running"))
   projection.appendBackfill([
-    .init(role: "system", text: "", status: "turn_completed"),
+    .init(role: "system", text: "", status: "turn_completed")
   ])
 
-  try expect(projection.items == [
-    .init(.init(role: "toolResult", text: "", toolName: "bash", status: "running")),
-  ])
+  try expect(
+    projection.items == [
+      .init(.init(role: "toolResult", text: "", toolName: "bash", status: "running"))
+    ])
 }
 
 private func backfillCompletedEntriesAppendDirectly() throws {
@@ -129,7 +133,7 @@ private func backfillCompletedEntriesAppendDirectly() throws {
 
   projection.appendBackfill(backfill)
 
-  try expect(projection.items == backfill.map(ChatItem.init))
+  try expect(projection.items == backfill.map { ChatItem($0) })
 }
 
 private func toolActivityAndTruncationFieldsRemainRenderable() throws {
@@ -146,6 +150,51 @@ private func toolActivityAndTruncationFieldsRemainRenderable() throws {
   try expect(ChatItem(entry).truncatedOutput)
 }
 
+private func toolResultsCollapseByDefaultButUserFacingMessagesDoNot() throws {
+  let tool = ChatItem(
+    .init(role: "toolResult", text: "long output", toolName: "read", status: "completed")
+  )
+  let runningTool = ChatItem(
+    .init(role: "toolResult", text: "", toolName: "read", status: "running")
+  )
+  let user = ChatItem(.init(role: "user", text: "Question", status: "completed"))
+  let assistant = ChatItem.assistant(text: "Answer", status: "completed")
+
+  try expect(tool.isCollapsedByDefault)
+  try expect(tool.collapsedTitle == "read · completed")
+  try expect(runningTool.isCollapsedByDefault)
+  try expect(!user.isCollapsedByDefault)
+  try expect(!assistant.isCollapsedByDefault)
+}
+
+private func freshProjectionsDoNotReuseChatItemIDs() throws {
+  let entry = TranscriptEntry(
+    role: "toolResult",
+    text: "file contents",
+    toolName: "read",
+    status: "completed"
+  )
+  var first = ConversationProjection()
+  var second = ConversationProjection()
+
+  first.appendBackfill([entry])
+  second.appendBackfill([entry])
+
+  try expect(first.items[0].id != second.items[0].id)
+}
+
+private func streamingDeltasKeepTheirChatItemID() throws {
+  var projection = ConversationProjection()
+
+  projection.applyLive(.assistant(text: "Hel", status: "started"))
+  let initialID = projection.items[0].id
+  projection.applyLive(.assistant(text: "Hello", status: "streaming"))
+  projection.applyLive(.assistant(text: "Hello there", status: "completed"))
+
+  try expect(projection.items == [.assistant(text: "Hello there", status: "completed")])
+  try expect(projection.items[0].id == initialID)
+}
+
 private func pairAndListSendControlFrames() async throws {
   let transport = RecordingTransport(responses: [
     [.control(.init(type: .pair, payload: ["paired": true]))],
@@ -154,10 +203,10 @@ private func pairAndListSendControlFrames() async throws {
         .init(
           type: .list,
           payload: [
-            ["sessionId": "session-1", "name": "Work session", "cwd": "/repo"],
+            ["sessionId": "session-1", "name": "Work session", "cwd": "/repo"]
           ]
         )
-      ),
+      )
     ],
   ])
   let client = RemoteClient(ticket: "ticket", transport: transport)
@@ -184,7 +233,7 @@ private func wrongPairResponseIsRejected() async throws {
 
 private func listSendsNoPairingCodeForAlreadyPairedIdentity() async throws {
   let transport = RecordingTransport(responses: [
-    [.control(.init(type: .list, payload: []))],
+    [.control(.init(type: .list, payload: []))]
   ])
   let client = RemoteClient(ticket: "ticket", transport: transport)
 
@@ -281,7 +330,7 @@ private func sessionStoreReportsPromptFailureAsSteeringError() async throws {
 
 private func successfulPromptDoesNotClearFeedError() async throws {
   let badFeedFrames: [Envelope] = [
-    .session(.init(sessionID: "session-1", type: .event, payload: ["role": "assistant"])),
+    .session(.init(sessionID: "session-1", type: .event, payload: ["role": "assistant"]))
   ]
   let transport = RecordingTransport(responses: [[]], streams: [badFeedFrames])
   let client = RemoteClient(ticket: "ticket", transport: transport)
@@ -394,12 +443,22 @@ private func sessionStoreIgnoresSupersededSessionFeed() async throws {
 }
 
 private func sessionStoreRefreshLoopTracksSessionRegistry() async throws {
-  let secondList: [Envelope] = [.control(.init(type: .list, payload: [
-    ["sessionId": "session-2", "name": "Second", "cwd": "/two"],
-  ]))]
-  let firstList: [Envelope] = [.control(.init(type: .list, payload: [
-    ["sessionId": "session-1", "name": "First", "cwd": "/one"],
-  ]))]
+  let secondList: [Envelope] = [
+    .control(
+      .init(
+        type: .list,
+        payload: [
+          ["sessionId": "session-2", "name": "Second", "cwd": "/two"]
+        ]))
+  ]
+  let firstList: [Envelope] = [
+    .control(
+      .init(
+        type: .list,
+        payload: [
+          ["sessionId": "session-1", "name": "First", "cwd": "/one"]
+        ]))
+  ]
   let transport = RecordingTransport(
     responses: [firstList] + Array(repeating: secondList, count: 100)
   )
@@ -747,8 +806,8 @@ private func listFrame() -> String {
 }
 
 private func streamingAttachFrame() -> String {
-  "{\"sessionId\":null,\"type\":\"attach\",\"payload\":{\"sessionId\":\"session-1\"," +
-    "\"stream\":true}}\n"
+  "{\"sessionId\":null,\"type\":\"attach\",\"payload\":{\"sessionId\":\"session-1\","
+    + "\"stream\":true}}\n"
 }
 
 private func promptFrame() -> String {

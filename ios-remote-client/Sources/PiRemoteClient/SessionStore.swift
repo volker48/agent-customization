@@ -162,6 +162,7 @@ public struct ConversationView: View {
   @Environment(\.scenePhase) private var scenePhase
   @State private var draft = ""
   @State private var attachAttempt = 0
+  private let latestMessageAnchorID = "latest-message-anchor"
 
   public init(store: SessionStore, session: RemoteSession) {
     self.store = store
@@ -196,14 +197,21 @@ public struct ConversationView: View {
   }
 
   private var transcriptView: some View {
-    ScrollView {
-      LazyVStack(alignment: .leading, spacing: 10) {
-        ForEach(Array(store.transcript(for: session.sessionID).enumerated()), id: \.offset) {
-          _, item in
-          ChatBubble(item: item)
+    ScrollViewReader { proxy in
+      ZStack(alignment: .bottomTrailing) {
+        ScrollView {
+          LazyVStack(alignment: .leading, spacing: 10) {
+            ForEach(store.transcript(for: session.sessionID)) { item in
+              ChatBubble(item: item)
+            }
+            Color.clear
+              .frame(height: 1)
+              .id(latestMessageAnchorID)
+          }
+          .padding()
         }
+        latestButton(proxy)
       }
-      .padding()
     }
   }
 
@@ -222,6 +230,26 @@ public struct ConversationView: View {
 
   private func stopTurn() async {
     _ = await store.abort(sessionID: session.sessionID)
+  }
+
+  private func latestButton(_ proxy: ScrollViewProxy) -> some View {
+    Button {
+      scrollToLatest(proxy)
+    } label: {
+      Label("Latest", systemImage: "arrow.down.to.line")
+    }
+    .font(.caption.weight(.semibold))
+    .padding(.horizontal, 12)
+    .padding(.vertical, 8)
+    .background(.regularMaterial, in: Capsule())
+    .padding()
+    .accessibilityLabel("Jump to latest message")
+  }
+
+  private func scrollToLatest(_ proxy: ScrollViewProxy) {
+    withAnimation {
+      proxy.scrollTo(latestMessageAnchorID, anchor: .bottom)
+    }
   }
 }
 
@@ -436,25 +464,68 @@ private struct Composer: View {
 @available(iOS 17.5, macOS 14.5, *)
 private struct ChatBubble: View {
   let item: ChatItem
+  @State private var isExpanded: Bool
+
+  init(item: ChatItem) {
+    self.item = item
+    self._isExpanded = State(initialValue: !item.isCollapsedByDefault)
+  }
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 4) {
-      if let toolName = item.toolName, let status = item.status {
-        Text("\(toolName) · \(status)")
-          .font(.caption)
-          .foregroundStyle(.secondary)
+    VStack(alignment: .leading, spacing: 6) {
+      if item.isCollapsedByDefault {
+        collapsedHeader
       }
-      Text(item.text)
-        .font(.body)
-      if item.truncatedOutput {
-        Text("output truncated")
-          .font(.caption2)
-          .foregroundStyle(.secondary)
+      if isExpanded {
+        expandedContent
       }
     }
     .padding(10)
     .background(bubbleColor, in: RoundedRectangle(cornerRadius: 12))
     .frame(maxWidth: .infinity, alignment: item.role == "user" ? .trailing : .leading)
+    .onTapGesture {
+      toggleIfExpandable()
+    }
+    .accessibilityElement(children: .combine)
+  }
+
+  private var collapsedHeader: some View {
+    HStack(spacing: 6) {
+      if hasExpandableContent {
+        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+          .font(.caption2.weight(.bold))
+      }
+      Text(item.collapsedTitle)
+        .font(.caption)
+        .foregroundStyle(.secondary)
+      if hasExpandableContent && !isExpanded {
+        Text("Tap to expand")
+          .font(.caption2)
+          .foregroundStyle(.tertiary)
+      }
+    }
+  }
+
+  @ViewBuilder
+  private var expandedContent: some View {
+    if !item.isCollapsedByDefault && (item.toolName != nil || item.status != nil) {
+      Text(item.collapsedTitle)
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+    if !item.text.isEmpty {
+      Text(item.text)
+        .font(.body)
+    }
+    if item.truncatedOutput {
+      Text("output truncated")
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+    }
+  }
+
+  private var hasExpandableContent: Bool {
+    !item.text.isEmpty || item.truncatedOutput
   }
 
   private var bubbleColor: Color {
@@ -467,6 +538,15 @@ private struct ChatBubble: View {
       .orange.opacity(0.14)
     default:
       .gray.opacity(0.14)
+    }
+  }
+
+  private func toggleIfExpandable() {
+    guard item.isCollapsedByDefault && hasExpandableContent else {
+      return
+    }
+    withAnimation {
+      isExpanded.toggle()
     }
   }
 }
