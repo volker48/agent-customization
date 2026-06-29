@@ -74,6 +74,46 @@ describe("remote daemon spawn", () => {
     vi.resetModules();
   });
 
+  it("waits past slow cold-starts before reporting daemon startup failure", async () => {
+    const spawned = new EventEmitter() as EventEmitter & { unref: ReturnType<typeof vi.fn> };
+    spawned.unref = vi.fn();
+    const spawn = vi.fn(() => spawned);
+    let connections = 0;
+    const createConnection = vi.fn(() => {
+      connections += 1;
+      return createSocket(connections < 45 ? "missing" : "connect");
+    });
+
+    vi.doMock("node:child_process", () => ({ spawn }));
+    vi.doMock("node:net", () => ({ createConnection }));
+
+    const originalRoot = process.env.PI_REMOTE_ROOT;
+    const root = await mkdtemp(join(tmpdir(), "pi-remote-spawn-"));
+    process.env.PI_REMOTE_ROOT = root;
+    await writeFile(join(root, "allowed-node-ids.json"), `${JSON.stringify(["node"])}\n`);
+
+    try {
+      const { default: remoteExtension } = await import("../pi-extensions/remote/index.js");
+      const { pi, command } = createPi();
+      const ctx = createContext();
+      const started = Date.now();
+
+      remoteExtension(pi as never);
+      await command("remote").handler("", ctx);
+
+      expect(Date.now() - started).toBeGreaterThanOrEqual(2_000);
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(ctx.ui.notify).toHaveBeenCalledWith("Remote session registered", "info");
+    } finally {
+      if (originalRoot === undefined) {
+        delete process.env.PI_REMOTE_ROOT;
+      } else {
+        process.env.PI_REMOTE_ROOT = originalRoot;
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("starts the TypeScript daemon through Node, not a PATH-dependent tsx binary", async () => {
     const spawned = new EventEmitter() as EventEmitter & { unref: ReturnType<typeof vi.fn> };
     spawned.unref = vi.fn();

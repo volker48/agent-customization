@@ -10,6 +10,7 @@ import { connectIpcExtension, type IpcEnvelope, type IpcExtensionClient } from "
 import { projectTranscriptEvent, projectTranscriptMessage } from "./transcript-projection.js";
 
 const DAEMON_SOCKET_FILE = "daemon.sock";
+const DAEMON_START_TIMEOUT_MS = 10_000;
 const LIVE_EVENT_TYPES = [
   "message_start",
   "message_update",
@@ -386,7 +387,7 @@ function requestDaemon(path: string, envelope: IpcEnvelope): Promise<IpcEnvelope
 }
 
 async function waitForDaemon(path: string): Promise<void> {
-  const deadline = Date.now() + 2_000;
+  const deadline = Date.now() + DAEMON_START_TIMEOUT_MS;
   while (Date.now() < deadline) {
     if (await canConnect(path)) {
       return;
