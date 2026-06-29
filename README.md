@@ -18,6 +18,9 @@ pi-extensions/         # Pi agent extensions (TypeScript)
   webfetch.ts          # Generic web fetch tool
   rtk.ts               # RTK bash rewrite hook
 
+skills/                # Agent Skills shared by Pi and compatible agents
+  claude-review/       # Claude Code /code-review workflow
+
 pi-themes/             # Pi agent color themes
   obsec-dark.json
   obsec-light.json
@@ -177,6 +180,13 @@ extension from this checkout (or distribute it as a pi package); copying only
 ### Pi: RTK (`pi-extensions/rtk.ts`)
 
 Intercepts `bash` tool calls and delegates command rewriting to `rtk rewrite <command>`. Only rewrites when RTK returns a different non-empty command. Supports `PI_RTK_BIN` or Pi's `--rtk-bin` flag for binary overrides.
+
+### Skill: Claude Review (`skills/claude-review/`)
+
+Adds a shared Agent Skill for running Claude Code's `/code-review` from the target
+repository. Agents can load it automatically for independent review workflows, and humans
+can invoke it with `/skill:claude-review` or the bundled `scripts/run-claude-review.sh`
+helper. This does not replace the Pi `/claude-review` extension command.
 
 ### Pi: Themes (`pi-themes/`)
 

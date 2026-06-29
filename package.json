@@ -51,6 +51,9 @@
     "extensions": [
       "./pi-extensions"
     ],
+    "skills": [
+      "./skills"
+    ],
     "prompts": [
       "./prompts"
     ]
