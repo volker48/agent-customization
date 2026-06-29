@@ -17,6 +17,7 @@ pi-extensions/         # Pi agent extensions (TypeScript)
   exa-search.ts        # Exa web search tool
   webfetch.ts          # Generic web fetch tool
   rtk.ts               # RTK bash rewrite hook
+  fusion/              # Multi-model Fusion panel and judge command
 
 skills/                # Agent Skills shared by Pi and compatible agents
   claude-review/       # Claude Code /code-review workflow
@@ -180,6 +181,16 @@ extension from this checkout (or distribute it as a pi package); copying only
 ### Pi: RTK (`pi-extensions/rtk.ts`)
 
 Intercepts `bash` tool calls and delegates command rewriting to `rtk rewrite <command>`. Only rewrites when RTK returns a different non-empty command. Supports `PI_RTK_BIN` or Pi's `--rtk-bin` flag for binary overrides.
+
+### Pi: Fusion (`pi-extensions/fusion/`)
+
+Adds a `/fusion` command that runs a configured multi-model panel, judges the panel
+responses, and sends a synthesis prompt back to the active model. The judge uses
+binary question decomposition inspired by the BinEval framework: see
+[“Ask, Don’t Judge: Systematic Evaluation via Binary Decomposition”][bineval]
+(arXiv:2606.27226).
+
+[bineval]: https://arxiv.org/abs/2606.27226
 
 ### Skill: Claude Review (`skills/claude-review/`)
 
