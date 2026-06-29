@@ -39,9 +39,11 @@ export function reduceProgress(state: ProgressState, event: FusionProgressEvent)
       return {
         ...state,
         panels,
-        phase: allPanelsDone(panels) ? "running judge" : "running panel",
+        phase: allPanelsDone(panels) ? "waiting for judge" : "running panel",
       };
     }
+    case "meta-failed":
+      return state;
     case "judge-started":
       return { ...state, phase: "running judge", judge: event.model, judgeStatus: "running" };
     case "judge-finished":

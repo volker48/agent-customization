@@ -37,6 +37,7 @@ export interface FusionConfig {
   webSearch?: WebSearchPolicy;
   webfetch?: WebFetchPolicy;
   debugLogPath?: string;
+  maxBinaryQuestions?: number;
 }
 
 export interface ToolUseSummary {
@@ -78,9 +79,15 @@ export interface FusionAnalysis {
   risks: string[];
 }
 
+export interface BinaryDimension {
+  name: string;
+  questions: string[];
+}
+
 export interface FusionJudgeOutput {
+  questions: BinaryDimension[];
+  panelScores: Record<ModelRef, Record<string, boolean[]>>;
   analysis: FusionAnalysis;
-  confidence: Confidence;
 }
 
 export interface FusionResult {
@@ -89,6 +96,7 @@ export interface FusionResult {
   judge: ModelRef;
   responses: AnyPanelResponse[];
   judgeOutput?: FusionJudgeOutput;
+  confidence?: Confidence;
   error?: string;
   elapsedMs: number;
 }
@@ -107,6 +115,7 @@ export type FusionProgressEvent =
       error?: string;
       errorDetails?: Record<string, unknown>;
     }
+  | { phase: "meta-failed"; model: ModelRef; error: string }
   | { phase: "judge-started"; model: ModelRef }
   | { phase: "judge-finished"; model: ModelRef; elapsedMs: number; confidence: Confidence };
 

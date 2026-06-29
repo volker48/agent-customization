@@ -1,4 +1,4 @@
-import { completeSimple } from "@earendil-works/pi-ai";
+import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { AssistantMessage, Message, Tool, ToolCall } from "@earendil-works/pi-ai";
 import type {
   CompletionClient,

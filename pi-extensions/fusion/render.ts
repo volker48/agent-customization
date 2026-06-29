@@ -1,5 +1,5 @@
-import { buildSynthesisPrompt, emptyAnalysis } from "./prompts.js";
-import type { FusionAnalysis, FusionResult } from "./types.js";
+import { buildSynthesisPrompt, computePassRate, emptyAnalysis } from "./prompts.js";
+import type { BinaryDimension, FusionAnalysis, FusionResult } from "./types.js";
 
 export const FUSION_MESSAGE_TYPE = "fusion-panel";
 
@@ -8,6 +8,8 @@ export interface FusionPanelDetails {
   judge: string;
   models: string[];
   analysis?: FusionAnalysis;
+  questions?: BinaryDimension[];
+  panelScores?: Record<string, Record<string, boolean[]>>;
   panelResponses: Array<{
     model: string;
     status: "ok" | "error";
@@ -28,7 +30,7 @@ export function toFusionPanelMessage(result: FusionResult) {
   const content = buildSynthesisPrompt({
     prompt: result.prompt,
     analysis: result.judgeOutput?.analysis ?? emptyAnalysis(),
-    confidence: result.judgeOutput?.confidence ?? "low",
+    confidence: result.confidence ?? "low",
     responses: result.responses,
   });
   return {
@@ -45,6 +47,8 @@ export function toFusionDetails(result: FusionResult): FusionPanelDetails {
     judge: result.judge,
     models: result.responses.map((response) => response.model),
     analysis: result.judgeOutput?.analysis,
+    questions: result.judgeOutput?.questions,
+    panelScores: result.judgeOutput?.panelScores,
     panelResponses: result.responses.map((response) => ({
       model: response.model,
       status: response.status,
@@ -53,7 +57,7 @@ export function toFusionDetails(result: FusionResult): FusionPanelDetails {
       content: response.status === "ok" ? response.content : undefined,
     })),
     elapsedMs: result.elapsedMs,
-    confidence: result.judgeOutput?.confidence,
+    confidence: result.confidence,
   };
 }
 
@@ -89,8 +93,40 @@ export function renderFusionPanelMarkdown(
     `- Elapsed: ${details.elapsedMs}ms`,
     "- Panel:",
     ...panelLines,
+    ...renderBinaryScoreLines(details),
     ...renderAnalysisLines(details.analysis),
   ].join("\n");
+}
+
+function renderBinaryScoreLines(details: FusionPanelDetails): string[] {
+  const questions = details.questions ?? [];
+  const panelScores = details.panelScores;
+  if (questions.length === 0 || !panelScores) return [];
+
+  const lines = ["- Binary questions:"];
+  for (const dimension of questions) {
+    lines.push(`  - ${dimension.name}: ${dimension.questions.length} questions`);
+    for (const question of dimension.questions) lines.push(`    - ${question}`);
+  }
+
+  lines.push("- Binary scores:");
+  for (const [model, dimensions] of Object.entries(panelScores)) {
+    lines.push(`  - ${model}:`);
+    for (const dimension of questions) {
+      const scores = dimensions[dimension.name] ?? [];
+      const passed = scores.filter(Boolean).length;
+      lines.push(`    - ${dimension.name}: ${passed}/${scores.length}`);
+    }
+  }
+
+  const rate = computePassRate(panelScores);
+  if (details.confidence && rate !== undefined) {
+    lines.push(
+      `- Confidence: ${details.confidence} (${Math.round(rate * 100)}% questions passed across panels)`,
+    );
+  }
+
+  return lines;
 }
 
 function renderAnalysisLines(analysis: FusionAnalysis | undefined): string[] {

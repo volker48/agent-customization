@@ -3,19 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { AssistantMessage, Api, Model } from "@earendil-works/pi-ai";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import {
-  loadFusionConfig,
-  validateFusionConfig,
-} from "../pi-extensions/fusion/config.js";
+import { loadFusionConfig, validateFusionConfig } from "../pi-extensions/fusion/config.js";
 import { createFusionDebugLogger } from "../pi-extensions/fusion/debug-log.js";
-import {
-  parseModelRef,
-  resolveModelRef,
-} from "../pi-extensions/fusion/model-ref.js";
+import { parseModelRef, resolveModelRef } from "../pi-extensions/fusion/model-ref.js";
 import { completeWithTools } from "../pi-extensions/fusion/model-runner.js";
-import { runFusion } from "../pi-extensions/fusion/orchestrator.js";
+import { parseJudgeOutput, runFusion } from "../pi-extensions/fusion/orchestrator.js";
 import {
   createProgressState,
   formatProgress,
@@ -23,14 +17,14 @@ import {
 } from "../pi-extensions/fusion/progress.js";
 import {
   buildJudgePrompt,
+  buildMetaPrompt,
   buildPanelPrompt,
+  computeConfidence,
   JUDGE_SYSTEM_PROMPT,
   PANEL_SYSTEM_PROMPT,
+  parseMetaPromptOutput,
 } from "../pi-extensions/fusion/prompts.js";
-import {
-  renderFusionPanelMarkdown,
-  toFusionPanelMessage,
-} from "../pi-extensions/fusion/render.js";
+import { renderFusionPanelMarkdown, toFusionPanelMessage } from "../pi-extensions/fusion/render.js";
 import type {
   CompletionClient,
   FusionConfig,
@@ -77,14 +71,21 @@ function toolCallMessage(
   name: string,
   args: Record<string, unknown>,
 ): AssistantMessage {
-  return assistant(
-    [{ type: "toolCall", id, name, arguments: args }],
-    "toolUse",
-  );
+  return assistant([{ type: "toolCall", id, name, arguments: args }], "toolUse");
 }
 
 function resolved(ref: string): ResolvedModel {
   return { ref, model: FAKE_MODEL, apiKey: "key" };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 const baseConfig: FusionConfig = {
@@ -103,27 +104,39 @@ describe("config validation", () => {
   });
 
   it("rejects empty panel", () => {
-    expect(() => validateFusionConfig({ judge: "a/b", models: [] })).toThrow(
-      /non-empty/,
-    );
+    expect(() => validateFusionConfig({ judge: "a/b", models: [] })).toThrow(/non-empty/);
   });
 
   it("rejects too-large panel", () => {
     const models = Array.from({ length: 9 }, (_, i) => `p/m${i}`);
-    expect(() => validateFusionConfig({ judge: "a/b", models })).toThrow(
-      /at most 8/,
-    );
+    expect(() => validateFusionConfig({ judge: "a/b", models })).toThrow(/at most 8/);
   });
 
   it("rejects an invalid model ref", () => {
-    expect(() =>
-      validateFusionConfig({ judge: "noslash", models: ["a/b"] }),
-    ).toThrow(/provider\/model/);
+    expect(() => validateFusionConfig({ judge: "noslash", models: ["a/b"] })).toThrow(
+      /provider\/model/,
+    );
   });
 
-  it("defaults maxToolCalls when omitted", () => {
+  it("defaults maxToolCalls and maxBinaryQuestions when omitted", () => {
     const config = validateFusionConfig({ judge: "a/b", models: ["c/d"] });
     expect(config.maxToolCalls).toBe(8);
+    expect(config.maxBinaryQuestions).toBe(15);
+  });
+
+  it.each([0, -1, 1.5])("rejects invalid maxBinaryQuestions %s", (maxBinaryQuestions) => {
+    expect(() =>
+      validateFusionConfig({ judge: "a/b", models: ["c/d"], maxBinaryQuestions }),
+    ).toThrow(/maxBinaryQuestions/);
+  });
+
+  it("accepts valid maxBinaryQuestions", () => {
+    const config = validateFusionConfig({
+      judge: "a/b",
+      models: ["c/d"],
+      maxBinaryQuestions: 10,
+    });
+    expect(config.maxBinaryQuestions).toBe(10);
   });
 
   it("rejects an unknown reasoning effort", () => {
@@ -143,9 +156,9 @@ describe("config validation", () => {
       debugLogPath: "/tmp/fusion-debug.jsonl",
     });
     expect(config.debugLogPath).toBe("/tmp/fusion-debug.jsonl");
-    expect(() =>
-      validateFusionConfig({ judge: "a/b", models: ["c/d"], debugLogPath: 42 }),
-    ).toThrow(/debugLogPath/);
+    expect(() => validateFusionConfig({ judge: "a/b", models: ["c/d"], debugLogPath: 42 })).toThrow(
+      /debugLogPath/,
+    );
   });
 
   it("loads and validates from a file", async () => {
@@ -161,9 +174,7 @@ describe("config validation", () => {
   });
 
   it("throws a clear error for a missing config file", async () => {
-    await expect(loadFusionConfig("/no/such/fusion.json")).rejects.toThrow(
-      /Could not read/,
-    );
+    await expect(loadFusionConfig("/no/such/fusion.json")).rejects.toThrow(/Could not read/);
   });
 
   it("throws a clear error for invalid JSON", async () => {
@@ -171,9 +182,7 @@ describe("config validation", () => {
     const path = join(dir, "fusion.json");
     await writeFile(path, "{ not json");
     try {
-      await expect(loadFusionConfig(path)).rejects.toThrow(
-        /Invalid Fusion config JSON/,
-      );
+      await expect(loadFusionConfig(path)).rejects.toThrow(/Invalid Fusion config JSON/);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -230,9 +239,9 @@ describe("model resolution", () => {
   }
 
   it("throws when the model is not found", async () => {
-    await expect(
-      resolveModelRef(registry({ find: () => undefined }), "a/b"),
-    ).rejects.toThrow(/not found/);
+    await expect(resolveModelRef(registry({ find: () => undefined }), "a/b")).rejects.toThrow(
+      /not found/,
+    );
   });
 
   it("resolves an API-key-backed model", async () => {
@@ -313,10 +322,7 @@ describe("bounded tool loop", () => {
       tools: [echoTool()],
       maxToolCalls: 4,
       signal: new AbortController().signal,
-      client: client([
-        toolCallMessage("c1", "web_search", { query: "x" }),
-        textMessage("done"),
-      ]),
+      client: client([toolCallMessage("c1", "web_search", { query: "x" }), textMessage("done")]),
     });
     expect(result.content).toBe("done");
     expect(result.toolCalls).toEqual([{ name: "web_search", ok: true }]);
@@ -412,14 +418,38 @@ describe("bounded tool loop", () => {
 describe("prompt builders", () => {
   it("panel prompt contains only the command args, no session context", () => {
     expect(buildPanelPrompt("compare X and Y")).toBe("compare X and Y");
-    expect(PANEL_SYSTEM_PROMPT).toMatch(
-      /Do not assume access to prior conversation/i,
-    );
+    expect(PANEL_SYSTEM_PROMPT).toMatch(/Do not assume access to prior conversation/i);
   });
 
-  it("judge prompt includes the task, panel responses, and failed models", () => {
+  it("meta prompt includes the task, cap, and JSON shape", () => {
+    const prompt = buildMetaPrompt("the task", 7);
+    expect(prompt).toContain("the task");
+    expect(prompt).toContain("at most 7");
+    expect(prompt).toContain("dimensions");
+  });
+
+  it("parses meta-prompt output defensively and enforces the question cap", () => {
+    expect(
+      parseMetaPromptOutput(
+        '{"dimensions":[{"name":"Quality","questions":["OK?","Complete?"]}]}',
+        1,
+      ),
+    ).toEqual([{ name: "Quality", questions: ["OK?"] }]);
+    expect(parseMetaPromptOutput("not json")).toEqual([]);
+  });
+
+  it("computes confidence from pass rates", () => {
+    expect(computeConfidence({ a: { Quality: [true, true, true, false] } })).toBe("medium");
+    expect(computeConfidence({ a: { Quality: [true, true, true, true, false] } })).toBe("high");
+    expect(computeConfidence({ a: { Quality: [true, true, true, true, true] } })).toBe("high");
+    expect(computeConfidence({ a: { Quality: [true, false, false] } })).toBe("low");
+    expect(computeConfidence({})).toBe("low");
+  });
+
+  it("judge prompt includes the task, questions, panel responses, and failed models", () => {
     const prompt = buildJudgePrompt({
       prompt: "the task",
+      questions: [{ name: "Quality", questions: ["Is it correct?"] }],
       responses: [
         {
           model: "openai/gpt-5",
@@ -439,15 +469,26 @@ describe("prompt builders", () => {
       ],
     });
     expect(prompt).toContain("the task");
+    expect(prompt).toContain("Is it correct?");
     expect(prompt).toContain("panel says hello");
     expect(prompt).toContain("anthropic/claude-opus-4-8: rate limited");
     expect(JUDGE_SYSTEM_PROMPT).not.toContain("finalAnswer");
     expect(JUDGE_SYSTEM_PROMPT).toContain("calling model");
+    expect(JUDGE_SYSTEM_PROMPT).toContain("panelScores");
+    expect(JUDGE_SYSTEM_PROMPT).not.toContain('"confidence"');
   });
 });
 
 describe("orchestrator", () => {
+  const metaJson = JSON.stringify({
+    dimensions: [{ name: "Quality", questions: ["Is it correct?", "Is it complete?"] }],
+  });
   const judgeJson = JSON.stringify({
+    questions: [{ name: "Quality", questions: ["Is it correct?", "Is it complete?"] }],
+    panelScores: {
+      "openai/gpt-5": { Quality: [true, true] },
+      "anthropic/claude-opus-4-8": { Quality: [true, true] },
+    },
     analysis: {
       consensus: ["both agree"],
       contradictions: [],
@@ -457,7 +498,6 @@ describe("orchestrator", () => {
       sourceQuality: [],
       risks: [],
     },
-    confidence: "high",
   });
 
   function registry(): ModelRegistryLike {
@@ -467,30 +507,28 @@ describe("orchestrator", () => {
     };
   }
 
-  function scriptedClient(
-    handler: (systemPrompt: string, userPrompt: string) => string,
-  ) {
+  function scriptedClient(handler: (systemPrompt: string, userPrompt: string) => string) {
     const judgeInputs: string[] = [];
     const client: CompletionClient = {
       complete: async (args) => {
-        if (args.systemPrompt === JUDGE_SYSTEM_PROMPT) {
+        const userPrompt = args.messages[0]?.content as string;
+        if (args.systemPrompt === JUDGE_SYSTEM_PROMPT && !userPrompt.includes("Decompose")) {
           const userText = args.messages
             .map((m) => (typeof m.content === "string" ? m.content : ""))
             .join("");
           judgeInputs.push(userText);
         }
-        return textMessage(
-          handler(args.systemPrompt, args.messages[0]?.content as string),
-        );
+        return textMessage(handler(args.systemPrompt, userPrompt));
       },
     };
     return { client, judgeInputs };
   }
 
   it("runs all panels, invokes the judge, and parses the judge output", async () => {
-    const { client, judgeInputs } = scriptedClient((systemPrompt) =>
-      systemPrompt === JUDGE_SYSTEM_PROMPT ? judgeJson : "panel response",
-    );
+    const { client, judgeInputs } = scriptedClient((systemPrompt, userPrompt) => {
+      if (userPrompt.includes("Decompose")) return metaJson;
+      return systemPrompt === JUDGE_SYSTEM_PROMPT ? judgeJson : "panel response";
+    });
 
     const result = await runFusion({
       prompt: "task",
@@ -501,18 +539,22 @@ describe("orchestrator", () => {
     });
 
     expect(result.status).toBe("ok");
-    expect(result.judgeOutput?.confidence).toBe("high");
+    expect(result.confidence).toBe("high");
+    expect(result.judgeOutput?.questions[0]?.name).toBe("Quality");
+    expect(result.judgeOutput?.panelScores["openai/gpt-5"]?.Quality).toEqual([true, true]);
     expect(result.judgeOutput?.analysis.consensus).toContain("both agree");
     expect(result.responses).toHaveLength(2);
     expect(judgeInputs[0]).toContain("panel response");
+    expect(judgeInputs[0]).toContain("Is it correct?");
   });
 
   it("degrades but still judges when one panel model fails", async () => {
     let panelCalls = 0;
     const client: CompletionClient = {
       complete: async (args) => {
-        if (args.systemPrompt === JUDGE_SYSTEM_PROMPT)
-          return textMessage(judgeJson);
+        const userPrompt = args.messages[0]?.content as string;
+        if (userPrompt.includes("Decompose")) return textMessage(metaJson);
+        if (args.systemPrompt === JUDGE_SYSTEM_PROMPT) return textMessage(judgeJson);
         panelCalls += 1;
         if (panelCalls === 1) throw new Error("provider down");
         return textMessage("survivor response");
@@ -528,7 +570,7 @@ describe("orchestrator", () => {
     });
 
     expect(result.status).toBe("degraded");
-    expect(result.judgeOutput?.confidence).toBe("high");
+    expect(result.confidence).toBe("high");
     expect(result.responses.some((r) => r.status === "error")).toBe(true);
   });
 
@@ -536,6 +578,8 @@ describe("orchestrator", () => {
     const judge = vi.fn();
     const client: CompletionClient = {
       complete: async (args) => {
+        const userPrompt = args.messages[0]?.content as string;
+        if (userPrompt.includes("Decompose")) return textMessage(metaJson);
         if (args.systemPrompt === JUDGE_SYSTEM_PROMPT) {
           judge();
           return textMessage(judgeJson);
@@ -557,11 +601,121 @@ describe("orchestrator", () => {
     expect(judge).not.toHaveBeenCalled();
   });
 
+  it("does not give the meta-prompt a tool-call budget", async () => {
+    const metaToolBudgets: number[] = [];
+    const client: CompletionClient = {
+      complete: async (args) => {
+        const userPrompt = args.messages[0]?.content as string;
+        if (userPrompt.includes("Decompose")) {
+          metaToolBudgets.push(args.tools.length);
+          return textMessage(metaJson);
+        }
+        if (args.systemPrompt === JUDGE_SYSTEM_PROMPT) return textMessage(judgeJson);
+        return textMessage("panel response");
+      },
+    };
+
+    await runFusion({
+      prompt: "task",
+      config: baseConfig,
+      registry: registry(),
+      signal: new AbortController().signal,
+      client,
+    });
+
+    expect(metaToolBudgets[0]).toBe(0);
+  });
+
+  it("runs the meta-prompt concurrently with panel models", async () => {
+    const calls: string[] = [];
+    const meta = deferred<AssistantMessage>();
+    const panel = deferred<AssistantMessage>();
+    const client: CompletionClient = {
+      complete: async (args) => {
+        const userPrompt = args.messages[0]?.content as string;
+        if (userPrompt.includes("Decompose")) {
+          calls.push("meta-started");
+          return meta.promise;
+        }
+        if (args.systemPrompt === JUDGE_SYSTEM_PROMPT) return textMessage(judgeJson);
+        calls.push("panel-started");
+        return panel.promise;
+      },
+    };
+
+    const run = runFusion({
+      prompt: "task",
+      config: baseConfig,
+      registry: registry(),
+      signal: new AbortController().signal,
+      client,
+    });
+
+    await vi.waitFor(() => expect(calls).toContain("panel-started"));
+    expect(calls).toContain("meta-started");
+    meta.resolve(textMessage(metaJson));
+    panel.resolve(textMessage("panel response"));
+    await run;
+  });
+
+  it("falls back to empty questions and emits progress when the meta-prompt fails", async () => {
+    const events: FusionProgressEvent[] = [];
+    const client: CompletionClient = {
+      complete: async (args) => {
+        const userPrompt = args.messages[0]?.content as string;
+        if (userPrompt.includes("Decompose")) throw new Error("meta down");
+        if (args.systemPrompt === JUDGE_SYSTEM_PROMPT) {
+          return textMessage(JSON.stringify({ analysis: {}, panelScores: {} }));
+        }
+        return textMessage("panel response");
+      },
+    };
+
+    const result = await runFusion({
+      prompt: "task",
+      config: baseConfig,
+      registry: registry(),
+      signal: new AbortController().signal,
+      client,
+      onProgress: (event) => events.push(event),
+    });
+
+    expect(result.status).toBe("ok");
+    expect(result.judgeOutput?.questions).toEqual([]);
+    expect(events).toContainEqual(
+      expect.objectContaining({ phase: "meta-failed", error: "meta down" }),
+    );
+  });
+
+  it("parses malformed judge panelScores defensively", () => {
+    const output = parseJudgeOutput(JSON.stringify({ analysis: {}, panelScores: [] }));
+    expect(output.panelScores).toEqual({});
+  });
+
+  it("filters and canonicalizes judge panelScores to real models and dimensions", () => {
+    const output = parseJudgeOutput(
+      JSON.stringify({
+        analysis: {},
+        panelScores: {
+          "openai/gpt-5": { code_quality: [true, null, false], Bogus: [true] },
+          "anthropic/claude-opus-4-8": { Bogus: [true] },
+          "unknown/model": { "Code Quality": [true] },
+        },
+      }),
+      [{ name: "Code Quality", questions: ["A?", "B?", "C?"] }],
+      ["openai/gpt-5", "anthropic/claude-opus-4-8"],
+    );
+    expect(output.panelScores).toEqual({
+      "openai/gpt-5": { "Code Quality": [true, false, false] },
+    });
+  });
+
   it("reports progress for model resolution, panel runs, and judge synthesis", async () => {
     const events: FusionProgressEvent[] = [];
-    const { client } = scriptedClient((systemPrompt) =>
-      systemPrompt === JUDGE_SYSTEM_PROMPT ? judgeJson : "panel response",
-    );
+    const { client } = scriptedClient((systemPrompt, userPrompt) => {
+      if (userPrompt.includes("Decompose")) return metaJson;
+      return systemPrompt === JUDGE_SYSTEM_PROMPT ? judgeJson : "panel response";
+    });
 
     await runFusion({
       prompt: "task",
@@ -595,6 +749,7 @@ describe("orchestrator", () => {
         expect.objectContaining({
           phase: "judge-finished",
           model: baseConfig.judge,
+          confidence: "high",
         }),
       ]),
     );
@@ -617,7 +772,10 @@ describe("panel message rendering", () => {
         toolCalls: [],
       },
     ],
+    confidence: "medium" as const,
     judgeOutput: {
+      questions: [{ name: "Quality", questions: ["Is it correct?", "Is it complete?"] }],
+      panelScores: { "openai/gpt-5": { Quality: [true, false] } },
       analysis: {
         consensus: ["both agree"],
         contradictions: [],
@@ -627,7 +785,6 @@ describe("panel message rendering", () => {
         sourceQuality: [],
         risks: [],
       },
-      confidence: "high" as const,
     },
   };
 
@@ -647,13 +804,45 @@ describe("panel message rendering", () => {
 
     const collapsed = renderFusionPanelMarkdown(message.details, false);
     expect(collapsed).toContain("Fusion panel");
-    expect(collapsed).toContain("confidence high");
+    expect(collapsed).toContain("confidence medium");
     expect(collapsed).not.toContain("You are the calling model");
 
     const expanded = renderFusionPanelMarkdown(message.details, true);
     expect(expanded).toContain("anthropic/claude-opus-4-8");
     expect(expanded).toContain("openai/gpt-5");
     expect(expanded).toContain("both agree");
+    expect(expanded).toContain("Quality: 2 questions");
+    expect(expanded).toContain("openai/gpt-5");
+    expect(expanded).toContain("Quality: 1/2");
+    expect(expanded).toContain("Confidence: medium (50% questions passed across panels)");
+  });
+
+  it("omits binary scores when questions are empty and keeps collapsed output unchanged", () => {
+    const message = toFusionPanelMessage({
+      ...result,
+      judgeOutput: { ...result.judgeOutput, questions: [] },
+    });
+    expect(renderFusionPanelMarkdown(message.details, false)).not.toContain("Binary questions");
+    expect(renderFusionPanelMarkdown(message.details, true)).not.toContain("Binary questions");
+  });
+
+  it("omits binary scores when panelScores are missing", () => {
+    const message = toFusionPanelMessage(result);
+    expect(
+      renderFusionPanelMarkdown({ ...message.details, panelScores: undefined }, true),
+    ).not.toContain("Binary questions");
+  });
+
+  it("handles mismatched binary score lengths without throwing or miscounting", () => {
+    const message = toFusionPanelMessage({
+      ...result,
+      judgeOutput: {
+        ...result.judgeOutput,
+        panelScores: { "openai/gpt-5": { Quality: [true, true, false] } },
+      },
+    });
+    const rendered = renderFusionPanelMarkdown(message.details, true);
+    expect(rendered).toContain("Quality: 2/3");
   });
 });
 
@@ -673,7 +862,7 @@ describe("progress reducer", () => {
     expect(seeded.judge).toBe(baseConfig.judge);
   });
 
-  it("holds at running-panel until the last panel finishes, then runs the judge", () => {
+  it("holds before judge-started until the last panel and meta-prompt finish", () => {
     let state = createProgressState(baseConfig);
     state = reduceProgress(state, {
       phase: "panel-started",
@@ -698,7 +887,7 @@ describe("progress reducer", () => {
       status: "error",
       elapsedMs: 1,
     });
-    expect(state.phase).toBe("running judge");
+    expect(state.phase).toBe("waiting for judge");
   });
 
   it("marks the judge running then complete", () => {

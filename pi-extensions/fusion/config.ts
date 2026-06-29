@@ -5,6 +5,7 @@ import { parseModelRef } from "./model-ref.js";
 import type { FusionConfig, ReasoningEffort } from "./types.js";
 
 const DEFAULT_MAX_TOOL_CALLS = 8;
+export const DEFAULT_MAX_BINARY_QUESTIONS = 15;
 const MAX_PANEL_MODELS = 8;
 const REASONING_EFFORTS: readonly ReasoningEffort[] = ["minimal", "low", "medium", "high", "xhigh"];
 
@@ -61,9 +62,20 @@ export function validateFusionConfig(value: unknown): FusionConfig {
     throw new Error("Fusion config maxToolCalls must be an integer from 0 to 64");
   }
 
+  const maxBinaryQuestions = config.maxBinaryQuestions ?? DEFAULT_MAX_BINARY_QUESTIONS;
+  if (!Number.isInteger(maxBinaryQuestions) || maxBinaryQuestions <= 0) {
+    throw new Error("Fusion config maxBinaryQuestions must be a positive integer");
+  }
+
   validateOptionalFields(config);
 
-  return { ...config, judge: config.judge, models: config.models, maxToolCalls };
+  return {
+    ...config,
+    judge: config.judge,
+    models: config.models,
+    maxToolCalls,
+    maxBinaryQuestions,
+  };
 }
 
 function validateOptionalFields(config: Partial<FusionConfig>): void {

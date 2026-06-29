@@ -49,7 +49,7 @@ describeIf("fusion extension e2e", () => {
 
     expect(result.status).not.toBe("error");
     expect(result.responses.every((r) => r.status === "ok")).toBe(true);
-    expect(result.judgeOutput?.confidence).toBeDefined();
+    expect(result.confidence).toBeDefined();
     const panelMentionsParis = result.responses.some(
       (r) => r.status === "ok" && r.content.toLowerCase().includes("paris"),
     );
