@@ -440,7 +440,10 @@ describe("prompt builders", () => {
 
   it("computes confidence from pass rates", () => {
     expect(computeConfidence({ a: { Quality: [true, true, true, false] } })).toBe("medium");
-    expect(computeConfidence({ a: { Quality: [true, true, true, true, false] } })).toBe("high");
+    expect(computeConfidence({ a: { Quality: [true, true, true, true, false] } })).toBe("medium");
+    expect(computeConfidence({ a: { Quality: [true, true, true, true, true, false] } })).toBe(
+      "high",
+    );
     expect(computeConfidence({ a: { Quality: [true, true, true, true, true] } })).toBe("high");
     expect(computeConfidence({ a: { Quality: [true, false, false] } })).toBe("low");
     expect(computeConfidence({})).toBe("low");
@@ -684,6 +687,38 @@ describe("orchestrator", () => {
     expect(result.judgeOutput?.questions).toEqual([]);
     expect(events).toContainEqual(
       expect.objectContaining({ phase: "meta-failed", error: "meta down" }),
+    );
+  });
+
+  it("logs a meta-prompt fallback when generated questions are empty", async () => {
+    const events: FusionProgressEvent[] = [];
+    const client: CompletionClient = {
+      complete: async (args) => {
+        const userPrompt = args.messages[0]?.content as string;
+        if (userPrompt.includes("Decompose")) return textMessage('{"dimensions":[]}');
+        if (args.systemPrompt === JUDGE_SYSTEM_PROMPT) {
+          return textMessage(JSON.stringify({ analysis: {}, panelScores: {} }));
+        }
+        return textMessage("panel response");
+      },
+    };
+
+    const result = await runFusion({
+      prompt: "task",
+      config: baseConfig,
+      registry: registry(),
+      signal: new AbortController().signal,
+      client,
+      onProgress: (event) => events.push(event),
+    });
+
+    expect(result.status).toBe("ok");
+    expect(result.judgeOutput?.questions).toEqual([]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        phase: "meta-failed",
+        error: "meta-prompt returned no binary questions",
+      }),
     );
   });
 

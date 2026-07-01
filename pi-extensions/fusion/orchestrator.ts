@@ -130,10 +130,18 @@ async function runMetaPrompt(args: {
       maxCompletionTokens: args.config.maxCompletionTokens,
       reasoning: args.config.reasoning,
     });
-    return parseMetaPromptOutput(
+    const questions = parseMetaPromptOutput(
       result.content,
       args.config.maxBinaryQuestions ?? DEFAULT_MAX_BINARY_QUESTIONS,
     );
+    if (questions.length === 0) {
+      args.onProgress?.({
+        phase: "meta-failed",
+        model: args.config.judge,
+        error: "meta-prompt returned no binary questions",
+      });
+    }
+    return questions;
   } catch (error) {
     if (args.signal.aborted) throw error;
     const message = error instanceof Error ? error.message : String(error);

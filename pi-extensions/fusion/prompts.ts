@@ -170,7 +170,7 @@ export function computeConfidence(
 ): Confidence {
   const passRate = computePassRate(panelScores);
   if (passRate === undefined) return "low";
-  if (passRate >= HIGH_CONFIDENCE_PASS_RATE) return "high";
+  if (passRate > HIGH_CONFIDENCE_PASS_RATE) return "high";
   if (passRate >= MEDIUM_CONFIDENCE_PASS_RATE) return "medium";
   return "low";
 }
