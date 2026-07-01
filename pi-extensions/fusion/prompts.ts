@@ -194,6 +194,7 @@ export function buildSynthesisPrompt(args: {
   analysis: FusionAnalysis;
   confidence: Confidence;
   responses: AnyPanelResponse[];
+  warning?: string;
 }): string {
   const successful = args.responses.filter((response): response is PanelResponse => {
     return response.status === "ok";
@@ -205,6 +206,7 @@ export function buildSynthesisPrompt(args: {
     "# User's task",
     args.prompt,
     "",
+    ...formatOptionalWarning(args.warning),
     "# Judge analysis",
     `Confidence: ${args.confidence}`,
     formatAnalysis(args.analysis),
@@ -212,6 +214,10 @@ export function buildSynthesisPrompt(args: {
     "# Panel responses",
     successful.length === 0 ? "None succeeded." : successful.map(formatPanelResponse).join("\n"),
   ].join("\n");
+}
+
+function formatOptionalWarning(warning: string | undefined): string[] {
+  return warning ? ["# Fusion recovery notice", warning, ""] : [];
 }
 
 function formatAnalysis(analysis: FusionAnalysis): string {

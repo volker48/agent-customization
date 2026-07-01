@@ -604,6 +604,37 @@ describe("orchestrator", () => {
     expect(judge).not.toHaveBeenCalled();
   });
 
+  it("preserves successful panel responses when judge synthesis fails", async () => {
+    const events: FusionProgressEvent[] = [];
+    const client: CompletionClient = {
+      complete: async (args) => {
+        const userPrompt = args.messages[0]?.content as string;
+        if (userPrompt.includes("Decompose")) return textMessage(metaJson);
+        if (args.systemPrompt === JUDGE_SYSTEM_PROMPT) throw new Error("judge down");
+        return textMessage(`panel response from ${args.model.ref}`);
+      },
+    };
+
+    const result = await runFusion({
+      prompt: "task",
+      config: baseConfig,
+      registry: registry(),
+      signal: new AbortController().signal,
+      client,
+      onProgress: (event) => events.push(event),
+    });
+
+    expect(result.status).toBe("error");
+    expect(result.error).toMatch(/Fusion judge failed/);
+    expect(result.error).toContain("2/2 panel responses succeeded");
+    expect(result.responses).toHaveLength(2);
+    expect(result.responses.every((response) => response.status === "ok")).toBe(true);
+    expect(result.judgeOutput).toBeUndefined();
+    expect(events).toContainEqual(
+      expect.objectContaining({ phase: "judge-failed", error: "judge down" }),
+    );
+  });
+
   it("does not give the meta-prompt a tool-call budget", async () => {
     const metaToolBudgets: number[] = [];
     const client: CompletionClient = {
@@ -879,6 +910,28 @@ describe("panel message rendering", () => {
     const rendered = renderFusionPanelMarkdown(message.details, true);
     expect(rendered).toContain("Quality: 2/3");
   });
+
+  it("carries judge failure details while preserving panel content for recovery", () => {
+    const message = toFusionPanelMessage({
+      ...result,
+      status: "error",
+      judgeOutput: undefined,
+      confidence: undefined,
+      error: "Fusion judge failed after 1/1 panel responses succeeded: judge down",
+    });
+
+    expect(message.content).toContain("Fusion recovery notice");
+    expect(message.content).toContain("panel content");
+    expect(message.content).toContain("judge down");
+    expect(message.details.error).toContain("judge down");
+
+    const collapsed = renderFusionPanelMarkdown(message.details, false);
+    expect(collapsed).toContain("judge failed");
+
+    const expanded = renderFusionPanelMarkdown(message.details, true);
+    expect(expanded).toContain("Fusion judge failed");
+    expect(expanded).toContain("openai/gpt-5");
+  });
 });
 
 describe("progress reducer", () => {
@@ -938,6 +991,27 @@ describe("progress reducer", () => {
     });
     expect(state.phase).toBe("complete");
     expect(state.judgeStatus).toBe("ok");
+  });
+
+  it("marks judge failures without clearing panel progress", () => {
+    let state = createProgressState(baseConfig);
+    state = reduceProgress(state, {
+      phase: "panel-finished",
+      model: "openai/gpt-5",
+      panelRunId: "a",
+      status: "ok",
+      elapsedMs: 1,
+    });
+    state = reduceProgress(state, {
+      phase: "judge-failed",
+      model: baseConfig.judge,
+      elapsedMs: 1,
+      error: "judge down",
+    });
+
+    expect(state.phase).toBe("judge failed");
+    expect(state.judgeStatus).toBe("error");
+    expect(state.panels.get("openai/gpt-5")).toBe("ok");
   });
 
   it("does not mutate the input state", () => {

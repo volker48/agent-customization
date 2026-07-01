@@ -70,17 +70,42 @@ export async function runFusion(args: {
 
   const judgeStarted = Date.now();
   args.onProgress?.({ phase: "judge-started", model: args.config.judge });
-  const judgeRun = await completeWithTools({
-    model: judge,
-    systemPrompt: JUDGE_SYSTEM_PROMPT,
-    userPrompt: buildJudgePrompt({ prompt: args.prompt, questions, responses }),
-    tools,
-    maxToolCalls: args.config.maxToolCalls,
-    signal: args.signal,
-    client: args.client,
-    maxCompletionTokens: args.config.maxCompletionTokens,
-    reasoning: args.config.reasoning,
-  });
+  let judgeRun: Awaited<ReturnType<typeof completeWithTools>>;
+  try {
+    judgeRun = await completeWithTools({
+      model: judge,
+      systemPrompt: JUDGE_SYSTEM_PROMPT,
+      userPrompt: buildJudgePrompt({ prompt: args.prompt, questions, responses }),
+      tools,
+      maxToolCalls: args.config.maxToolCalls,
+      signal: args.signal,
+      client: args.client,
+      maxCompletionTokens: args.config.maxCompletionTokens,
+      reasoning: args.config.reasoning,
+    });
+  } catch (error) {
+    if (args.signal.aborted) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    args.onProgress?.({
+      phase: "judge-failed",
+      model: args.config.judge,
+      elapsedMs: Date.now() - judgeStarted,
+      error: message,
+    });
+    const panelCount = `${successes.length}/${responses.length}`;
+    const failure = [
+      `Fusion judge failed after ${panelCount} panel responses succeeded:`,
+      message,
+    ].join(" ");
+    return {
+      status: "error",
+      prompt: args.prompt,
+      judge: args.config.judge,
+      responses,
+      error: failure,
+      elapsedMs: Date.now() - started,
+    };
+  }
 
   const judgeOutput = parseJudgeOutput(
     judgeRun.content,

@@ -117,6 +117,7 @@ export type FusionProgressEvent =
     }
   | { phase: "meta-failed"; model: ModelRef; error: string }
   | { phase: "judge-started"; model: ModelRef }
+  | { phase: "judge-failed"; model: ModelRef; elapsedMs: number; error: string }
   | { phase: "judge-finished"; model: ModelRef; elapsedMs: number; confidence: Confidence };
 
 export interface ResolvedModel {

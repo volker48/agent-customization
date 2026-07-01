@@ -1,7 +1,7 @@
 import type { FusionConfig, FusionProgressEvent } from "./types.js";
 
 type PanelStatus = "pending" | "running" | "ok" | "error";
-type JudgeStatus = "pending" | "running" | "ok";
+type JudgeStatus = "pending" | "running" | "ok" | "error";
 
 export interface ProgressState {
   phase: string;
@@ -46,6 +46,8 @@ export function reduceProgress(state: ProgressState, event: FusionProgressEvent)
       return state;
     case "judge-started":
       return { ...state, phase: "running judge", judge: event.model, judgeStatus: "running" };
+    case "judge-failed":
+      return { ...state, phase: "judge failed", judge: event.model, judgeStatus: "error" };
     case "judge-finished":
       return { ...state, phase: "complete", judgeStatus: "ok" };
   }
@@ -62,7 +64,7 @@ export function formatProgress(state: ProgressState): string {
   return lines.join("\n");
 }
 
-function statusIcon(status: PanelStatus): string {
+function statusIcon(status: PanelStatus | JudgeStatus): string {
   if (status === "ok") return "✓";
   if (status === "error") return "✗";
   if (status === "running") return "…";

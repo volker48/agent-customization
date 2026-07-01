@@ -4,6 +4,7 @@ import type { BinaryDimension, FusionAnalysis, FusionResult } from "./types.js";
 export const FUSION_MESSAGE_TYPE = "fusion-panel";
 
 export interface FusionPanelDetails {
+  status: FusionResult["status"];
   prompt: string;
   judge: string;
   models: string[];
@@ -19,6 +20,7 @@ export interface FusionPanelDetails {
   }>;
   elapsedMs: number;
   confidence?: string;
+  error?: string;
 }
 
 /**
@@ -32,6 +34,7 @@ export function toFusionPanelMessage(result: FusionResult) {
     analysis: result.judgeOutput?.analysis ?? emptyAnalysis(),
     confidence: result.confidence ?? "low",
     responses: result.responses,
+    warning: recoveryWarning(result),
   });
   return {
     customType: FUSION_MESSAGE_TYPE,
@@ -43,6 +46,7 @@ export function toFusionPanelMessage(result: FusionResult) {
 
 export function toFusionDetails(result: FusionResult): FusionPanelDetails {
   return {
+    status: result.status,
     prompt: result.prompt,
     judge: result.judge,
     models: result.responses.map((response) => response.model),
@@ -58,6 +62,7 @@ export function toFusionDetails(result: FusionResult): FusionPanelDetails {
     })),
     elapsedMs: result.elapsedMs,
     confidence: result.confidence,
+    error: result.error,
   };
 }
 
@@ -72,7 +77,7 @@ export function renderFusionPanelMarkdown(
     "🔀 **Fusion panel**",
     `${okCount}/${details.panelResponses.length} models`,
     `judge ${details.judge}`,
-    `confidence ${details.confidence ?? "unknown"}`,
+    details.status === "error" ? "judge failed" : `confidence ${details.confidence ?? "unknown"}`,
   ].join(" · ");
 
   if (!expanded) {
@@ -91,11 +96,31 @@ export function renderFusionPanelMarkdown(
     "**Fusion details**",
     "",
     `- Elapsed: ${details.elapsedMs}ms`,
+    ...renderErrorLines(details),
     "- Panel:",
     ...panelLines,
     ...renderBinaryScoreLines(details),
     ...renderAnalysisLines(details.analysis),
   ].join("\n");
+}
+
+function recoveryWarning(result: FusionResult): string | undefined {
+  const successfulPanels = result.responses.filter((response) => response.status === "ok").length;
+  if (result.status !== "error" || successfulPanels === 0) return undefined;
+  const panelCount = `${successfulPanels}/${result.responses.length}`;
+  return [
+    `The Fusion judge failed after ${panelCount} panel responses succeeded.`,
+    result.error ? `Judge failure: ${result.error}` : undefined,
+    "Write a best-effort answer from the successful panel responses.",
+    "Note the missing judge analysis when it affects confidence.",
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join(" ");
+}
+
+function renderErrorLines(details: FusionPanelDetails): string[] {
+  if (details.status !== "error" || !details.error) return [];
+  return [`- Error: ${details.error}`];
 }
 
 function renderBinaryScoreLines(details: FusionPanelDetails): string[] {
@@ -121,9 +146,8 @@ function renderBinaryScoreLines(details: FusionPanelDetails): string[] {
 
   const rate = computePassRate(panelScores);
   if (details.confidence && rate !== undefined) {
-    lines.push(
-      `- Confidence: ${details.confidence} (${Math.round(rate * 100)}% questions passed across panels)`,
-    );
+    const percent = Math.round(rate * 100);
+    lines.push(`- Confidence: ${details.confidence} (${percent}% questions passed across panels)`);
   }
 
   return lines;

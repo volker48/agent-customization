@@ -21,6 +21,7 @@ import {
   renderFusionPanelMarkdown,
   toFusionPanelMessage,
 } from "./render.js";
+import type { FusionResult } from "./types.js";
 
 const LOADER_KEY = "fusion";
 
@@ -36,6 +37,10 @@ async function resolvePrompt(parsed: FusionArgs, ctx: ResolveContext): Promise<s
   const bundle = await readBundleFile(parsed.filePath);
   ctx.ui.notify(`Fusion: loaded ${(bundle.length / 1024).toFixed(1)} KB bundle from file`, "info");
   return parsed.text ? `${parsed.text}\n\n${bundle}` : bundle;
+}
+
+function hasSuccessfulPanelResponse(result: FusionResult): boolean {
+  return result.responses.some((response) => response.status === "ok");
 }
 
 export default function fusionExtension(pi: ExtensionAPI) {
@@ -96,12 +101,21 @@ export default function fusionExtension(pi: ExtensionAPI) {
         debugLogger?.log("result", resultLogDetails(result));
         await debugLogger?.flush();
 
-        if (result.status === "error") {
+        if (result.status === "error" && !hasSuccessfulPanelResponse(result)) {
           ctx.ui.notify(result.error ?? "Fusion failed", "error");
           return;
         }
+        if (result.status === "error") {
+          ctx.ui.notify(
+            result.error ?? "Fusion judge failed; recovering from panel responses",
+            "error",
+          );
+        }
 
-        debugLogger?.log("synthesis-triggered", { activeModel: ctx.model?.id });
+        debugLogger?.log("synthesis-triggered", {
+          activeModel: ctx.model?.id,
+          recovery: result.status === "error",
+        });
         await debugLogger?.flush();
         pi.sendMessage(toFusionPanelMessage(result), { triggerTurn: true });
       } catch (error) {
