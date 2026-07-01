@@ -30,6 +30,7 @@ If the Pi `claude-review` extension is installed, humans may also use:
 1. Use this skill only when an independent Claude Code review is useful: requested by the
    user, after non-trivial edits, or before finalizing risky correctness/security work.
 2. Pick a review level:
+   - `low`: fastest check for quick smoke reviews.
    - `medium`: default for normal code changes.
    - `high`: bug fixes, security-sensitive code, or cross-file behavior changes.
    - `max`: substantial or high-risk changes where extra review cost is justified.
@@ -41,6 +42,9 @@ claude --permission-mode auto \
   --allowed-tools "Bash,Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill" \
   -p "/code-review high review the current diff for correctness and edge cases"
 ```
+
+Headless Claude review can take several minutes to complete. Do not treat a quiet run as
+failed unless the process exits with an error or clearly hangs beyond a reasonable timeout.
 
 4. Read the review and act only on high-confidence, actionable findings.
 5. Ignore speculative, stylistic, or out-of-scope suggestions unless the user asked for them.

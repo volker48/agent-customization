@@ -36,6 +36,8 @@ if [[ -n "${CONTEXT}" ]]; then
 	PROMPT="${PROMPT} ${CONTEXT}"
 fi
 
+echo "Running Claude review (${LEVEL})..." >&2
+
 exec "${CLAUDE_BIN}" \
 	--permission-mode auto \
 	--allowed-tools "${REVIEW_TOOLS}" \
