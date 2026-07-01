@@ -11,7 +11,9 @@ import {
   resultLogDetails,
   type FusionDebugLogger,
 } from "./debug-log.js";
+import { collectFiles, formatBundle } from "../lib/bundle-core.js";
 import { loadFusionConfig } from "./config.js";
+import { buildManifestPrompt, type FusionArgs, parseFusionArgs, readManifest } from "./manifest.js";
 import { runFusion } from "./orchestrator.js";
 import { createProgressState, formatProgress, reduceProgress } from "./progress.js";
 import {
@@ -23,6 +25,34 @@ import {
 
 const LOADER_KEY = "fusion";
 
+interface ResolveContext {
+  cwd?: string;
+  ui: { notify: (message: string, level?: string) => void };
+}
+
+async function resolvePrompt(parsed: FusionArgs, ctx: ResolveContext): Promise<string> {
+  if (!parsed.manifestPath) {
+    return parsed.text;
+  }
+
+  const manifest = await readManifest(parsed.manifestPath);
+  const files = await collectFiles(manifest.files, { cwd: manifest.root ?? ctx.cwd });
+  const bundle = formatBundle(files, { lineNumbers: true });
+  const question = parsed.text || manifest.question;
+  if (!question) {
+    throw new Error(
+      'Provide a question: /fusion --manifest <path> <question>, or set "question" in the manifest',
+    );
+  }
+
+  const totalBytes = files.reduce((sum, file) => sum + Buffer.byteLength(file.content), 0);
+  ctx.ui.notify(
+    `Fusion: bundled ${files.length} file(s), ${(totalBytes / 1024).toFixed(1)} KB from manifest`,
+    "info",
+  );
+  return buildManifestPrompt(question, bundle);
+}
+
 export default function fusionExtension(pi: ExtensionAPI) {
   pi.registerMessageRenderer<FusionPanelDetails>(FUSION_MESSAGE_TYPE, (message, { expanded }) => {
     const markdown = renderFusionPanelMarkdown(message.details, expanded);
@@ -32,9 +62,9 @@ export default function fusionExtension(pi: ExtensionAPI) {
   pi.registerCommand("fusion", {
     description: "Run a configured multi-model Fusion panel and judge",
     handler: async (args, ctx) => {
-      const prompt = args.trim();
-      if (!prompt) {
-        ctx.ui.notify("Usage: /fusion <prompt>", "error");
+      const parsed = parseFusionArgs(args);
+      if (!parsed.manifestPath && !parsed.text) {
+        ctx.ui.notify("Usage: /fusion <prompt>  |  /fusion --manifest <path> [question]", "error");
         return;
       }
 
@@ -53,6 +83,7 @@ export default function fusionExtension(pi: ExtensionAPI) {
 
       try {
         const config = await loadFusionConfig();
+        const prompt = await resolvePrompt(parsed, ctx);
         const debugLogPath = resolveFusionDebugLogPath(config);
         debugLogger = debugLogPath ? createFusionDebugLogger(debugLogPath) : undefined;
         if (debugLogger) {

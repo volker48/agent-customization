@@ -11,3 +11,7 @@ Default canonical label vocabulary (`needs-triage`, `needs-info`, `ready-for-age
 ### Domain docs
 
 Single-context layout — one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+### Fusion bundle
+
+To ask the Fusion panel about real code, write a manifest of curated files, then have the user run `/fusion --manifest <path>`. See `docs/agents/fusion-bundle.md`.
