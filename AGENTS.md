@@ -14,4 +14,4 @@ Single-context layout — one `CONTEXT.md` + `docs/adr/` at the repo root. See `
 
 ### Fusion bundle
 
-To ask the Fusion panel about real code, write a manifest of curated files, then have the user run `/fusion --manifest <path>`. See `docs/agents/fusion-bundle.md`.
+To ask the Fusion panel about real code, curate files and bundle them for the panel. Shipped as the `fusion` skill (`skills/fusion/SKILL.md`), so the workflow travels with the extension install.

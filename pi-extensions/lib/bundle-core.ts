@@ -243,7 +243,7 @@ function isDynamicPattern(pattern: string): boolean {
 
 /**
  * Filter out paths ignored by git (e.g. .env, build artifacts, secrets) so a
- * broad manifest glob can't leak them to the panel. Uses `git check-ignore`,
+ * broad glob can't leak them to the panel. Uses `git check-ignore`,
  * which honors nested and negated .gitignore rules. Outside a git repo or
  * without git installed, it degrades to no filtering.
  */

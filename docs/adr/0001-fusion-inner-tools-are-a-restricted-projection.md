@@ -6,7 +6,9 @@ Fusion's inner `web_search` and `webfetch` tools (`pi-extensions/fusion/tools.ts
 
 ## Why
 
-Fusion runs untrusted panel and judge models directly via the AI completion API, outside Pi's agent loop, with an explicit allowlist of exactly two tools (see `FUSION_PRD.md` lines 70, 73, 93, 123, 137, 401). The narrow schema, the rename, and the hand-written `createFusionTools` list are part of that restriction: the operator — not the panel model — decides search type, fetch strategy, domain policy, and result caps. The hand-written tool list *is* the allowlist; its explicitness is the control.
+Fusion runs untrusted **inner** models — the panel models and judge — directly via the AI completion API, outside Pi's agent loop, with an explicit allowlist of exactly two tools: `web_search` and `webfetch`. The narrow schema, the rename, and the hand-written `createFusionTools` list are part of that restriction: the operator — not the inner model — decides search type, fetch strategy, domain policy, and result caps. The hand-written tool list *is* the allowlist; its explicitness is the control.
+
+The calling model is intentionally different: ADR-0002 records that it synthesizes the final answer inside Pi's normal agent loop after the `fusion-panel` message is injected. ADR-0001's restricted-tool claim applies only to the inner panel and judge calls.
 
 ## Considered options
 
