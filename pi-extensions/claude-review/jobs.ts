@@ -13,6 +13,7 @@ export type ClaudeReviewJobStatus =
   | "queued"
   | "starting"
   | "running"
+  | "blocked"
   | "review"
   | "failed"
   | "cancelled"
