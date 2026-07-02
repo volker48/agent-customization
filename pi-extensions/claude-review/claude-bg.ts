@@ -16,7 +16,18 @@ interface ClaudeAgentRecord {
 }
 
 export function claudeBackgroundArgs(prompt: string, sessionName: string, reviewTools: string): string[] {
-  return ["--bg", "--name", sessionName, "--permission-mode", "auto", "--allowed-tools", reviewTools, prompt];
+  return [
+    "--bg",
+    "--name",
+    sessionName,
+    "--permission-mode",
+    "auto",
+    "--tools",
+    reviewTools,
+    "--allowed-tools",
+    reviewTools,
+    prompt,
+  ];
 }
 
 export function claudeAgentsArgs(cwd: string): string[] {
@@ -201,6 +212,11 @@ export function parseBackgroundSessionId(output: string): string | undefined {
   const commandPrefixes = ["claude attach ", "claude logs ", "claude stop "];
 
   for (const line of lines) {
+    const backgroundedParts = line.split("·").map((part) => part.trim());
+    if (backgroundedParts[0] === "backgrounded" && backgroundedParts[1]) {
+      return backgroundedParts[1];
+    }
+
     const labelMatch = line.match(/(?:session|agent)\s+(?:id|ID)[:\s]+([A-Za-z0-9_-]{6,})/i);
     if (labelMatch?.[1]) {
       return labelMatch[1];
@@ -274,7 +290,7 @@ function normalizeAgentStatus(agent: ClaudeAgentRecord, fallback: ClaudeReviewJo
     return "failed";
   }
 
-  const raw = String(pickString(agent, ["status", "state", "lifecycle", "phase"]) ?? "").toLowerCase();
+  const raw = String(pickString(agent, ["state", "status", "lifecycle", "phase"]) ?? "").toLowerCase();
   if (!raw) {
     return fallback === "queued" || fallback === "starting" ? "running" : fallback;
   }
@@ -283,6 +299,9 @@ function normalizeAgentStatus(agent: ClaudeAgentRecord, fallback: ClaudeReviewJo
   }
   if (raw.includes("cancel") || raw.includes("killed") || raw.includes("stopped") || raw.includes("stop")) {
     return "cancelled";
+  }
+  if (raw.includes("blocked") || raw.includes("waiting") || raw.includes("needs input")) {
+    return "blocked";
   }
   if (
     raw.includes("complete") ||
