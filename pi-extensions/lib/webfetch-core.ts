@@ -29,9 +29,9 @@ import { fileURLToPath } from "node:url";
 const DEFAULT_ACCEPT_HEADER =
   "text/markdown;q=1.0, text/x-markdown;q=0.95, application/markdown;q=0.95, text/html;q=0.8";
 const DEFAULT_ACCEPT_ENCODING = "identity";
-const DEFAULT_MAX_CHARS = 12000;
-const MIN_MAX_CHARS = 1000;
-const MAX_MAX_CHARS = 100000;
+export const DEFAULT_MAX_CHARS = 12000;
+export const MIN_MAX_CHARS = 1000;
+export const MAX_MAX_CHARS = 100000;
 const DEFAULT_PROBE_MAX_BYTES = 8192;
 const MAX_HTML_CONVERT_BYTES = 5 * 1024 * 1024;
 const MIN_READABILITY_LENGTH = 200;
@@ -41,7 +41,7 @@ const FETCH_MODES = ["full", "probe"] as const;
 type FetchMode = (typeof FETCH_MODES)[number];
 const DEFAULT_FETCH_MODE: FetchMode = "full";
 
-const FETCH_STRATEGIES = ["direct", "smart"] as const;
+export const FETCH_STRATEGIES = ["direct", "smart"] as const;
 type FetchStrategy = (typeof FETCH_STRATEGIES)[number];
 const DEFAULT_FETCH_STRATEGY: FetchStrategy = "direct";
 

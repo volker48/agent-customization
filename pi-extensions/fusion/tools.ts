@@ -1,7 +1,12 @@
 import { Type } from "@earendil-works/pi-ai";
 import type { TextContent, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
-import { executeWebSearch } from "../lib/exa-search-core.js";
-import { executeWebfetch, type WebFetchInput } from "../lib/webfetch-core.js";
+import { MAX_NUM_RESULTS, MIN_NUM_RESULTS, executeWebSearch } from "../lib/exa-search-core.js";
+import {
+  MAX_MAX_CHARS,
+  MIN_MAX_CHARS,
+  executeWebfetch,
+  type WebFetchInput,
+} from "../lib/webfetch-core.js";
 import type { FusionConfig, FusionTool } from "./types.js";
 
 export function createFusionTools(config: FusionConfig): FusionTool[] {
@@ -14,7 +19,9 @@ function createWebSearchTool(config: FusionConfig): FusionTool {
     description: "Search the web and return ranked links with snippets.",
     parameters: Type.Object({
       query: Type.String({ minLength: 1 }),
-      numResults: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })),
+      numResults: Type.Optional(
+        Type.Integer({ minimum: MIN_NUM_RESULTS, maximum: MAX_NUM_RESULTS }),
+      ),
     }),
     async execute(call, signal) {
       const result = await executeWebSearch(
@@ -37,7 +44,7 @@ function createWebfetchTool(config: FusionConfig): FusionTool {
     description: "Fetch an HTTP(S) URL and return text content.",
     parameters: Type.Object({
       url: Type.String({ minLength: 1 }),
-      maxChars: Type.Optional(Type.Integer({ minimum: 1000, maximum: 100000 })),
+      maxChars: Type.Optional(Type.Integer({ minimum: MIN_MAX_CHARS, maximum: MAX_MAX_CHARS })),
     }),
     async execute(call, signal) {
       const url = stringArg(call, "url").trim();

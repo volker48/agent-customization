@@ -112,6 +112,12 @@ describe("config validation", () => {
     expect(() => validateFusionConfig({ judge: "a/b", models })).toThrow(/at most 8/);
   });
 
+  it("rejects duplicate panel models", () => {
+    expect(() => validateFusionConfig({ judge: "a/b", models: ["c/d", "c/d"] })).toThrow(
+      /duplicates/,
+    );
+  });
+
   it("rejects an invalid model ref", () => {
     expect(() => validateFusionConfig({ judge: "noslash", models: ["a/b"] })).toThrow(
       /provider\/model/,
@@ -124,7 +130,7 @@ describe("config validation", () => {
     expect(config.maxBinaryQuestions).toBe(15);
   });
 
-  it.each([0, -1, 1.5])("rejects invalid maxBinaryQuestions %s", (maxBinaryQuestions) => {
+  it.each([0, -1, 1.5, 65])("rejects invalid maxBinaryQuestions %s", (maxBinaryQuestions) => {
     expect(() =>
       validateFusionConfig({ judge: "a/b", models: ["c/d"], maxBinaryQuestions }),
     ).toThrow(/maxBinaryQuestions/);
@@ -159,6 +165,67 @@ describe("config validation", () => {
     expect(() => validateFusionConfig({ judge: "a/b", models: ["c/d"], debugLogPath: 42 })).toThrow(
       /debugLogPath/,
     );
+  });
+
+  it("rejects unknown config fields", () => {
+    expect(() => validateFusionConfig({ judge: "a/b", models: ["c/d"], bogus: true })).toThrow(
+      /unknown field: bogus/,
+    );
+    expect(() =>
+      validateFusionConfig({ judge: "a/b", models: ["c/d"], webSearch: { type: "fast" } }),
+    ).toThrow(/webSearch.*unknown field: type/);
+  });
+
+  it("validates web search policy fields", () => {
+    const config = validateFusionConfig({
+      judge: "a/b",
+      models: ["c/d"],
+      webSearch: { numResults: 3, textMaxCharacters: 500, excludedDomains: ["example.com"] },
+    });
+    expect(config.webSearch).toEqual({
+      numResults: 3,
+      textMaxCharacters: 500,
+      excludedDomains: ["example.com"],
+    });
+    expect(() =>
+      validateFusionConfig({ judge: "a/b", models: ["c/d"], webSearch: { numResults: 0 } }),
+    ).toThrow(/webSearch\.numResults/);
+    expect(() =>
+      validateFusionConfig({
+        judge: "a/b",
+        models: ["c/d"],
+        webSearch: { textMaxCharacters: 100 },
+      }),
+    ).toThrow(/webSearch\.textMaxCharacters/);
+    expect(() =>
+      validateFusionConfig({
+        judge: "a/b",
+        models: ["c/d"],
+        webSearch: { excludedDomains: [""] },
+      }),
+    ).toThrow(/webSearch\.excludedDomains/);
+  });
+
+  it("validates webfetch policy fields", () => {
+    const config = validateFusionConfig({
+      judge: "a/b",
+      models: ["c/d"],
+      webfetch: { strategy: "smart", maxChars: 30000, blockedDomains: ["localhost"] },
+    });
+    expect(config.webfetch).toEqual({
+      strategy: "smart",
+      maxChars: 30000,
+      blockedDomains: ["localhost"],
+    });
+    expect(() =>
+      validateFusionConfig({ judge: "a/b", models: ["c/d"], webfetch: { strategy: "auto" } }),
+    ).toThrow(/webfetch\.strategy/);
+    expect(() =>
+      validateFusionConfig({ judge: "a/b", models: ["c/d"], webfetch: { maxChars: 999 } }),
+    ).toThrow(/webfetch\.maxChars/);
+    expect(() =>
+      validateFusionConfig({ judge: "a/b", models: ["c/d"], webfetch: { blockedDomains: [1] } }),
+    ).toThrow(/webfetch\.blockedDomains/);
   });
 
   it("loads and validates from a file", async () => {
