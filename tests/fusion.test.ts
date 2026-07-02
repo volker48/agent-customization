@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { AssistantMessage, Api, Model } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Api, Message, Model } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 
 import { loadFusionConfig, validateFusionConfig } from "../pi-extensions/fusion/config.js";
@@ -455,30 +455,37 @@ describe("bounded tool loop", () => {
     expect(result.toolCalls).toEqual([{ name: "read_file", ok: false }]);
   });
 
-  it("fails instead of looping when the tool budget is exhausted", async () => {
+  it("injects a budget error and allows a final answer when tool budget is exhausted", async () => {
     const tool = echoTool();
     const execute = vi.spyOn(tool, "execute");
-    let completions = 0;
-    const loopingClient: CompletionClient = {
-      complete: async () => {
-        completions += 1;
-        return toolCallMessage(`c${completions}`, "web_search", { query: "x" });
+    const seenToolCounts: number[] = [];
+    const seenMessages: Message[][] = [];
+    const client: CompletionClient = {
+      complete: async (args) => {
+        seenToolCounts.push(args.tools.length);
+        seenMessages.push([...args.messages]);
+        if (seenToolCounts.length === 1) {
+          return toolCallMessage("c1", "web_search", { query: "x" });
+        }
+        return textMessage("final from partial context");
       },
     };
 
-    await expect(
-      completeWithTools({
-        model: resolved("a/b"),
-        systemPrompt: "s",
-        userPrompt: "u",
-        tools: [tool],
-        maxToolCalls: 0,
-        signal: new AbortController().signal,
-        client: loopingClient,
-      }),
-    ).rejects.toThrow(/Tool-call budget exceeded/);
+    const result = await completeWithTools({
+      model: resolved("a/b"),
+      systemPrompt: "s",
+      userPrompt: "u",
+      tools: [tool],
+      maxToolCalls: 0,
+      signal: new AbortController().signal,
+      client,
+    });
+
+    expect(result.content).toBe("final from partial context");
+    expect(result.toolCalls).toEqual([{ name: "web_search", ok: false }]);
     expect(execute).not.toHaveBeenCalled();
-    expect(completions).toBe(1);
+    expect(seenToolCounts).toEqual([1, 0]);
+    expect(JSON.stringify(seenMessages[1])).toContain("Tool-call budget exceeded");
   });
 });
 

@@ -43,7 +43,7 @@ export const defaultCompletionClient: CompletionClient = {
   },
 };
 
-export async function completeWithTools(args: {
+export interface CompleteWithToolsArgs {
   model: ResolvedModel;
   systemPrompt: string;
   userPrompt: string;
@@ -53,11 +53,14 @@ export async function completeWithTools(args: {
   client?: CompletionClient;
   maxCompletionTokens?: number;
   reasoning?: FusionReasoning;
-}): Promise<ModelRunResult> {
+}
+
+export async function completeWithTools(args: CompleteWithToolsArgs): Promise<ModelRunResult> {
   const client = args.client ?? defaultCompletionClient;
   const messages: Message[] = [{ role: "user", content: args.userPrompt, timestamp: Date.now() }];
   const toolCalls: ToolUseSummary[] = [];
   let callsUsed = 0;
+  let toolBudgetExceeded = false;
 
   while (true) {
     throwIfAborted(args.signal);
@@ -65,7 +68,7 @@ export async function completeWithTools(args: {
       model: args.model,
       systemPrompt: args.systemPrompt,
       messages,
-      tools: args.tools,
+      tools: toolBudgetExceeded ? [] : args.tools,
       signal: args.signal,
       maxCompletionTokens: args.maxCompletionTokens,
       reasoning: args.reasoning,
@@ -74,20 +77,19 @@ export async function completeWithTools(args: {
 
     const calls = extractToolCalls(assistant);
     if (calls.length === 0 || assistant.stopReason !== "toolUse") {
-      const content = extractText(assistant);
-      if (assistant.stopReason === "error") {
-        throw modelRunError(args.model.ref, assistant, "Model error");
-      }
-      if (!content) {
-        throw modelRunError(args.model.ref, assistant, "Empty response");
-      }
-      return { content, toolCalls };
+      return { content: finalContentOrThrow(args.model.ref, assistant), toolCalls };
+    }
+
+    if (toolBudgetExceeded) {
+      return finalAfterBudgetExceeded(args.model.ref, assistant, toolCalls);
     }
 
     if (callsUsed + calls.length > args.maxToolCalls) {
-      throw new Error(
-        `Tool-call budget exceeded for ${args.model.ref}: ${callsUsed}/${args.maxToolCalls} used`,
+      messages.push(
+        ...recordBudgetExceeded(calls, args.model.ref, callsUsed, args.maxToolCalls, toolCalls),
       );
+      toolBudgetExceeded = true;
+      continue;
     }
 
     throwIfAborted(args.signal);
@@ -98,6 +100,41 @@ export async function completeWithTools(args: {
     toolCalls.push(...results.map((result) => ({ name: result.toolName, ok: !result.isError })));
     messages.push(...results);
   }
+}
+
+function finalContentOrThrow(modelRef: string, assistant: AssistantMessage): string {
+  const content = extractText(assistant);
+  if (assistant.stopReason === "error") {
+    throw modelRunError(modelRef, assistant, "Model error");
+  }
+  if (!content) {
+    throw modelRunError(modelRef, assistant, "Empty response");
+  }
+  return content;
+}
+
+function finalAfterBudgetExceeded(
+  modelRef: string,
+  assistant: AssistantMessage,
+  toolCalls: ToolUseSummary[],
+): ModelRunResult {
+  const content = extractText(assistant);
+  if (content) return { content, toolCalls };
+  throw new Error(`Tool-call budget exhausted for ${modelRef}; no final answer returned`);
+}
+
+function recordBudgetExceeded(
+  calls: ToolCall[],
+  modelRef: string,
+  callsUsed: number,
+  maxToolCalls: number,
+  toolCalls: ToolUseSummary[],
+): Message[] {
+  const results = calls.map((call) => {
+    return toolBudgetExceededResult(call, modelRef, callsUsed, maxToolCalls);
+  });
+  toolCalls.push(...results.map((result) => ({ name: result.toolName, ok: false })));
+  return results;
 }
 
 function throwIfAborted(signal: AbortSignal): void {
@@ -155,6 +192,20 @@ function extractText(message: AssistantMessage): string {
     .map((part) => part.text)
     .join("\n")
     .trim();
+}
+
+function toolBudgetExceededResult(
+  call: ToolCall,
+  modelRef: string,
+  callsUsed: number,
+  maxToolCalls: number,
+) {
+  return toolError(
+    call.id,
+    call.name,
+    `Tool-call budget exceeded for ${modelRef}: ${callsUsed}/${maxToolCalls} used. ` +
+      "No more tools are available; answer from existing context.",
+  );
 }
 
 async function executeAllowedTool(call: ToolCall, tools: FusionTool[], signal: AbortSignal) {
