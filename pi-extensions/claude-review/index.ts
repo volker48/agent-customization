@@ -43,7 +43,16 @@ function claudeBinary(): string {
 }
 
 function claudeArgs(prompt: string): string[] {
-  return ["--permission-mode", "auto", "--allowed-tools", REVIEW_TOOLS, "-p", prompt];
+  return [
+    "--permission-mode",
+    "auto",
+    "--tools",
+    REVIEW_TOOLS,
+    "--allowed-tools",
+    REVIEW_TOOLS,
+    "-p",
+    prompt,
+  ];
 }
 
 function updateLoader(ctx: ExtensionCommandContext, message: string, controller: AbortController) {
