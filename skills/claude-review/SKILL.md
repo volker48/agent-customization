@@ -62,6 +62,7 @@ Then retrieve it later:
 
 ```bash
 claude --permission-mode auto \
+  --tools "Bash,Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill" \
   --allowed-tools "Bash,Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill" \
   -p "/code-review high review the current diff for correctness and edge cases"
 ```
