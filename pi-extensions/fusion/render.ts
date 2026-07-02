@@ -108,9 +108,13 @@ function recoveryWarning(result: FusionResult): string | undefined {
   const successfulPanels = result.responses.filter((response) => response.status === "ok").length;
   if (result.status !== "error" || successfulPanels === 0) return undefined;
   const panelCount = `${successfulPanels}/${result.responses.length}`;
+  const prefix = `Fusion judge failed after ${panelCount} panel responses succeeded`;
+  const judgeFailure = result.error?.startsWith(prefix)
+    ? result.error.slice(prefix.length).replace(/^:\s*/, "")
+    : result.error;
   return [
-    `The Fusion judge failed after ${panelCount} panel responses succeeded.`,
-    result.error ? `Judge failure: ${result.error}` : undefined,
+    `The ${prefix}.`,
+    judgeFailure ? `Judge failure: ${judgeFailure}` : undefined,
     "Write a best-effort answer from the successful panel responses.",
     "Note the missing judge analysis when it affects confidence.",
   ]
@@ -157,7 +161,11 @@ function renderAnalysisLines(analysis: FusionAnalysis | undefined): string[] {
   if (!analysis) return [];
   const sections: Array<[string, string[]]> = [
     ["Consensus", analysis.consensus],
+    ["Contradictions", analysis.contradictions],
+    ["Partial coverage", analysis.partialCoverage],
+    ["Unique insights", analysis.uniqueInsights],
     ["Blind spots", analysis.blindSpots],
+    ["Source quality", analysis.sourceQuality],
     ["Risks", analysis.risks],
   ];
   const lines: string[] = [];

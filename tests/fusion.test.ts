@@ -478,6 +478,7 @@ describe("prompt builders", () => {
     expect(JUDGE_SYSTEM_PROMPT).not.toContain("finalAnswer");
     expect(JUDGE_SYSTEM_PROMPT).toContain("calling model");
     expect(JUDGE_SYSTEM_PROMPT).toContain("panelScores");
+    expect(JUDGE_SYSTEM_PROMPT).toContain('"contradictions": ["..."]');
     expect(JUDGE_SYSTEM_PROMPT).not.toContain('"confidence"');
   });
 });
@@ -776,6 +777,33 @@ describe("orchestrator", () => {
     });
   });
 
+  it("parses judge analysis as flat string arrays", () => {
+    const output = parseJudgeOutput(
+      JSON.stringify({
+        panelScores: {},
+        analysis: {
+          consensus: ["shared fix", { claim: "object should be dropped" }],
+          contradictions: ["different APIs proposed"],
+          partialCoverage: ["tests missing", 42],
+          uniqueInsights: ["one panel noted migration risk"],
+          blindSpots: ["no rollback plan"],
+          sourceQuality: ["official docs cited"],
+          risks: ["broad rewrite risk"],
+        },
+      }),
+    );
+
+    expect(output.analysis).toEqual({
+      consensus: ["shared fix"],
+      contradictions: ["different APIs proposed"],
+      partialCoverage: ["tests missing"],
+      uniqueInsights: ["one panel noted migration risk"],
+      blindSpots: ["no rollback plan"],
+      sourceQuality: ["official docs cited"],
+      risks: ["broad rewrite risk"],
+    });
+  });
+
   it("reports progress for model resolution, panel runs, and judge synthesis", async () => {
     const events: FusionProgressEvent[] = [];
     const { client } = scriptedClient((systemPrompt, userPrompt) => {
@@ -844,12 +872,12 @@ describe("panel message rendering", () => {
       panelScores: { "openai/gpt-5": { Quality: [true, false] } },
       analysis: {
         consensus: ["both agree"],
-        contradictions: [],
-        partialCoverage: [],
-        uniqueInsights: [],
-        blindSpots: [],
-        sourceQuality: [],
-        risks: [],
+        contradictions: ["models disagree on API shape"],
+        partialCoverage: ["only one panel covered tests"],
+        uniqueInsights: ["migration risk from openai/gpt-5"],
+        blindSpots: ["no rollout plan"],
+        sourceQuality: ["official docs cited"],
+        risks: ["breaking config migration"],
       },
     },
   };
@@ -877,6 +905,12 @@ describe("panel message rendering", () => {
     expect(expanded).toContain("anthropic/claude-opus-4-8");
     expect(expanded).toContain("openai/gpt-5");
     expect(expanded).toContain("both agree");
+    expect(expanded).toContain("models disagree on API shape");
+    expect(expanded).toContain("only one panel covered tests");
+    expect(expanded).toContain("migration risk from openai/gpt-5");
+    expect(expanded).toContain("no rollout plan");
+    expect(expanded).toContain("official docs cited");
+    expect(expanded).toContain("breaking config migration");
     expect(expanded).toContain("Quality: 2 questions");
     expect(expanded).toContain("openai/gpt-5");
     expect(expanded).toContain("Quality: 1/2");
@@ -923,6 +957,7 @@ describe("panel message rendering", () => {
     expect(message.content).toContain("Fusion recovery notice");
     expect(message.content).toContain("panel content");
     expect(message.content).toContain("judge down");
+    expect(message.content.match(/Fusion judge failed after/g)).toHaveLength(1);
     expect(message.details.error).toContain("judge down");
 
     const collapsed = renderFusionPanelMarkdown(message.details, false);

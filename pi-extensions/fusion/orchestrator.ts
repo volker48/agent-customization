@@ -19,6 +19,7 @@ import type {
   AnyPanelResponse,
   BinaryDimension,
   CompletionClient,
+  FusionAnalysis,
   FusionConfig,
   FusionJudgeOutput,
   FusionProgressEvent,
@@ -253,11 +254,34 @@ export function parseJudgeOutput(
     return {
       questions,
       panelScores: parsePanelScores(parsed.panelScores, questions, validModels),
-      analysis: { ...emptyAnalysis(), ...parsed.analysis },
+      analysis: parseAnalysis(parsed.analysis),
     };
   } catch {
     return { questions: fallbackQuestions, panelScores: {}, analysis: emptyAnalysis() };
   }
+}
+
+const ANALYSIS_KEYS = [
+  "consensus",
+  "contradictions",
+  "partialCoverage",
+  "uniqueInsights",
+  "blindSpots",
+  "sourceQuality",
+  "risks",
+] as const satisfies Array<keyof FusionAnalysis>;
+
+function parseAnalysis(value: unknown): FusionAnalysis {
+  const analysis = emptyAnalysis();
+  if (!value || typeof value !== "object" || Array.isArray(value)) return analysis;
+  const candidate = value as Partial<Record<keyof FusionAnalysis, unknown>>;
+  for (const key of ANALYSIS_KEYS) analysis[key] = parseStringArray(candidate[key]);
+  return analysis;
+}
+
+function parseStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string");
 }
 
 function parsePanelScores(

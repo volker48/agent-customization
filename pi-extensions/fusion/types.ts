@@ -67,13 +67,9 @@ export type AnyPanelResponse = PanelResponse | FailedPanelResponse;
 
 export interface FusionAnalysis {
   consensus: string[];
-  contradictions: Array<{
-    topic: string;
-    stances: Array<{ model: ModelRef; stance: string }>;
-    judgeAssessment: string;
-  }>;
-  partialCoverage: Array<{ point: string; models: ModelRef[] }>;
-  uniqueInsights: Array<{ model: ModelRef; insight: string }>;
+  contradictions: string[];
+  partialCoverage: string[];
+  uniqueInsights: string[];
   blindSpots: string[];
   sourceQuality: string[];
   risks: string[];

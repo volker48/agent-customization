@@ -117,13 +117,13 @@ Do not include a confidence field; confidence is computed by the caller from pan
     "provider/model": { "dimension": [true, false] }
   },
   "analysis": {
-    "consensus": [],
-    "contradictions": [],
-    "partialCoverage": [],
-    "uniqueInsights": [],
-    "blindSpots": [],
-    "sourceQuality": [],
-    "risks": []
+    "consensus": ["..."],
+    "contradictions": ["..."],
+    "partialCoverage": ["..."],
+    "uniqueInsights": ["..."],
+    "blindSpots": ["..."],
+    "sourceQuality": ["..."],
+    "risks": ["..."]
   }
 }`;
 
