@@ -32,6 +32,8 @@ function statusTitle(status: ClaudeReviewDetailsStatus): string {
       return "Claude Code review starting";
     case "running":
       return "Claude Code review running";
+    case "blocked":
+      return "Claude Code review needs input";
     case "review":
       return "Claude Code review";
     case "failed":
@@ -87,7 +89,7 @@ export function renderClaudeReviewMarkdown(details: ClaudeReviewDetails): string
     lines.push(`- Error: ${details.errorMessage}`);
   }
 
-  if (details.status === "running" || details.status === "queued" || details.status === "starting") {
+  if (["blocked", "running", "queued", "starting"].includes(details.status)) {
     lines.push(
       "",
       "## Next steps",
@@ -96,7 +98,7 @@ export function renderClaudeReviewMarkdown(details: ClaudeReviewDetails): string
       details.jobId ? `- Fetch result: \`/claude-review-result ${details.jobId}\`` : "- Fetch the result with `/claude-review-result`.",
     );
     if (details.claudeSessionId) {
-      lines.push(`- Inspect manually: \`claude attach ${details.claudeSessionId}\``);
+      lines.push(`- Inspect or unblock manually: \`claude attach ${details.claudeSessionId}\``);
     }
   }
 
