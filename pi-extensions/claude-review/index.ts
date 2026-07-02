@@ -7,11 +7,27 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Markdown } from "@earendil-works/pi-tui";
 
-import { buildCodeReviewPrompt, parseClaudeReviewArgs, type ClaudeReviewOptions } from "./args.js";
+import {
+  buildCodeReviewPrompt,
+  parseClaudeReviewArgs,
+  parseClaudeReviewJobArgs,
+  parseClaudeReviewResultArgs,
+  type ClaudeReviewOptions,
+} from "./args.js";
+import {
+  cancelClaudeBackgroundJob,
+  claudeBackgroundArgs,
+  readClaudeBackgroundLogs,
+  refreshClaudeBackgroundJob,
+  startClaudeBackgroundReview,
+} from "./claude-bg.js";
+import { createJob, isTerminalJobStatus, listJobs, resolveJob, writeJob } from "./jobs.js";
 import type { ClaudeReviewDetails } from "./render.js";
 import {
   buildAutoFixPrompt,
+  buildJobsListDetails,
   CLAUDE_REVIEW_MESSAGE_TYPE,
+  jobToClaudeReviewDetails,
   renderClaudeReviewMarkdown,
   toClaudeReviewMessage,
 } from "./render.js";
@@ -80,12 +96,11 @@ function handleReviewResult(
   }
 }
 
-async function handleClaudeReviewCommand(
+async function handleWaitClaudeReviewCommand(
   pi: ExtensionAPI,
-  args: string,
+  options: ClaudeReviewOptions,
   ctx: ExtensionCommandContext,
 ): Promise<void> {
-  const options = parseClaudeReviewArgs(args);
   const controller = new AbortController();
   const reviewPrompt = buildCodeReviewPrompt(options);
 
@@ -117,15 +132,193 @@ async function handleClaudeReviewCommand(
   }
 }
 
+async function handleBackgroundClaudeReviewCommand(
+  pi: ExtensionAPI,
+  options: ClaudeReviewOptions,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  const controller = new AbortController();
+  const prompt = buildCodeReviewPrompt(options, { resultMarkers: true });
+  let job = await createJob({ cwd: ctx.cwd, options, prompt });
+
+  updateLoader(ctx, `Claude review: starting background job ${job.id}…`, controller);
+  try {
+    job = await startClaudeBackgroundReview(pi, job, claudeBinary(), REVIEW_TOOLS, controller.signal);
+    sendReviewOnly(pi, jobToClaudeReviewDetails(job));
+
+    if (job.status === "running") {
+      ctx.ui.notify(`Claude review started: ${job.id}`, "info");
+    } else if (job.status === "failed" || job.status === "timeout") {
+      ctx.ui.notify(`Claude review did not start: ${job.errorMessage ?? job.status}`, "error");
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    job = await writeJob({
+      ...job,
+      status: controller.signal.aborted ? "cancelled" : "failed",
+      completedAt: new Date().toISOString(),
+      errorMessage: message,
+    });
+    sendReviewOnly(pi, jobToClaudeReviewDetails(job));
+    ctx.ui.notify(controller.signal.aborted ? "Claude review cancelled" : `Claude review failed: ${message}`, "error");
+  } finally {
+    clearLoader(ctx);
+  }
+}
+
+async function handleClaudeReviewCommand(
+  pi: ExtensionAPI,
+  args: string,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  try {
+    const options = parseClaudeReviewArgs(args);
+    if (options.mode === "wait") {
+      await handleWaitClaudeReviewCommand(pi, options, ctx);
+    } else {
+      await handleBackgroundClaudeReviewCommand(pi, options, ctx);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.ui.notify(`Claude review failed: ${message}`, "error");
+  }
+}
+
+async function handleClaudeReviewStatusCommand(
+  pi: ExtensionAPI,
+  args: string,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  try {
+    const { all, jobId } = parseClaudeReviewJobArgs(args);
+    if (all) {
+      throw new Error("--all is only supported by /claude-review-list");
+    }
+    const job = await resolveJob(jobId, ctx.cwd);
+    const refreshed = await refreshClaudeBackgroundJob(pi, job, claudeBinary());
+    sendReviewOnly(pi, jobToClaudeReviewDetails(refreshed, refreshed.lastLog || refreshed.stdout));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.ui.notify(`Claude review status failed: ${message}`, "error");
+  }
+}
+
+async function handleClaudeReviewResultCommand(
+  pi: ExtensionAPI,
+  args: string,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  try {
+    const options = parseClaudeReviewResultArgs(args);
+    const job = await resolveJob(options.jobId, ctx.cwd);
+    const refreshed = await refreshClaudeBackgroundJob(pi, job, claudeBinary());
+    const withLogs = refreshed.claudeSessionId
+      ? await readClaudeBackgroundLogs(pi, refreshed, claudeBinary())
+      : refreshed;
+    const details = jobToClaudeReviewDetails(withLogs);
+    const shouldFix = details.status === "review" && (options.fix ?? withLogs.autoFix);
+
+    sendReviewOnly(pi, details);
+    if (shouldFix) {
+      pi.sendUserMessage(buildAutoFixPrompt(details));
+    } else if (!isTerminalJobStatus(withLogs.status)) {
+      ctx.ui.notify(`Claude review is ${withLogs.status}; no auto-fix prompt sent yet`, "info");
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.ui.notify(`Claude review result failed: ${message}`, "error");
+  }
+}
+
+async function handleClaudeReviewLogsCommand(
+  pi: ExtensionAPI,
+  args: string,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  try {
+    const { all, jobId } = parseClaudeReviewJobArgs(args);
+    if (all) {
+      throw new Error("--all is only supported by /claude-review-list");
+    }
+    const job = await resolveJob(jobId, ctx.cwd);
+    const refreshed = await refreshClaudeBackgroundJob(pi, job, claudeBinary());
+    const withLogs = refreshed.claudeSessionId
+      ? await readClaudeBackgroundLogs(pi, refreshed, claudeBinary())
+      : refreshed;
+    sendReviewOnly(pi, jobToClaudeReviewDetails(withLogs, withLogs.lastLog || withLogs.stdout));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.ui.notify(`Claude review logs failed: ${message}`, "error");
+  }
+}
+
+async function handleClaudeReviewCancelCommand(
+  pi: ExtensionAPI,
+  args: string,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  try {
+    const { all, jobId } = parseClaudeReviewJobArgs(args);
+    if (all) {
+      throw new Error("--all is only supported by /claude-review-list");
+    }
+    const job = await resolveJob(jobId, ctx.cwd);
+    const cancelled = await cancelClaudeBackgroundJob(pi, job, claudeBinary());
+    sendReviewOnly(pi, jobToClaudeReviewDetails(cancelled));
+    ctx.ui.notify(`Claude review ${cancelled.status}: ${cancelled.id}`, cancelled.status === "cancelled" ? "info" : "error");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.ui.notify(`Claude review cancel failed: ${message}`, "error");
+  }
+}
+
+async function handleClaudeReviewListCommand(
+  pi: ExtensionAPI,
+  args: string,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  try {
+    const { all, jobId } = parseClaudeReviewJobArgs(args);
+    if (jobId) {
+      throw new Error("/claude-review-list does not accept a job id");
+    }
+    const jobs = await listJobs(all ? {} : { cwd: ctx.cwd });
+    sendReviewOnly(pi, buildJobsListDetails(jobs, ctx.cwd, all));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.ui.notify(`Claude review list failed: ${message}`, "error");
+  }
+}
+
 export default function claudeReviewExtension(pi: ExtensionAPI) {
   pi.registerMessageRenderer<ClaudeReviewDetails>(CLAUDE_REVIEW_MESSAGE_TYPE, (message) => {
     return new Markdown(renderClaudeReviewMarkdown(message.details), 1, 0, getMarkdownTheme());
   });
 
   pi.registerCommand("claude-review", {
-    description: "Run Claude Code /code-review and optionally ask Pi to fix findings",
+    description: "Start a durable Claude Code /code-review job; use --wait for legacy blocking mode",
     handler: (args, ctx) => handleClaudeReviewCommand(pi, args, ctx),
+  });
+  pi.registerCommand("claude-review-status", {
+    description: "Refresh and display a Claude Code review job status",
+    handler: (args, ctx) => handleClaudeReviewStatusCommand(pi, args, ctx),
+  });
+  pi.registerCommand("claude-review-result", {
+    description: "Fetch Claude Code review output and optionally ask Pi to fix findings",
+    handler: (args, ctx) => handleClaudeReviewResultCommand(pi, args, ctx),
+  });
+  pi.registerCommand("claude-review-logs", {
+    description: "Fetch recent logs for a Claude Code review job",
+    handler: (args, ctx) => handleClaudeReviewLogsCommand(pi, args, ctx),
+  });
+  pi.registerCommand("claude-review-cancel", {
+    description: "Stop a running Claude Code review job",
+    handler: (args, ctx) => handleClaudeReviewCancelCommand(pi, args, ctx),
+  });
+  pi.registerCommand("claude-review-list", {
+    description: "List durable Claude Code review jobs for this working directory",
+    handler: (args, ctx) => handleClaudeReviewListCommand(pi, args, ctx),
   });
 }
 
-export { buildCodeReviewPrompt, claudeArgs, parseClaudeReviewArgs };
+export { buildCodeReviewPrompt, claudeArgs, claudeBackgroundArgs, parseClaudeReviewArgs };
