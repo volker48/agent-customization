@@ -200,6 +200,10 @@ export async function readClaudeBackgroundLogs(
   });
 
   const markedReview = extractMarkedReview(result.stdout);
+  if (result.code !== 0 && isTerminalJobStatus(job.status)) {
+    return job;
+  }
+
   let status = job.status;
   if (result.code !== 0) {
     status = "failed";

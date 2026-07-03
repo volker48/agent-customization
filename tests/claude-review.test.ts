@@ -20,7 +20,7 @@ import {
   refreshClaudeBackgroundJob,
   startClaudeBackgroundReview,
 } from "../pi-extensions/claude-review/claude-bg.js";
-import { readJob } from "../pi-extensions/claude-review/jobs.js";
+import { readJob, writeJob } from "../pi-extensions/claude-review/jobs.js";
 import type { ClaudeReviewJob } from "../pi-extensions/claude-review/jobs.js";
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
@@ -393,6 +393,36 @@ describe("claude review command", () => {
     expect(withLogs.status).toBe("review");
     expect(withLogs.stdout).toBe("final review");
     expect(withLogs.completedAt).toEqual(expect.any(String));
+  });
+
+  it("preserves completed background reviews when later log reads fail", async () => {
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(jobDir);
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    const { pi } = createMockPi({
+      stdout: "",
+      stderr: "session not found",
+      code: 1,
+      killed: false,
+    });
+    const job = await writeJob(
+      createBackgroundJob({
+        status: "review",
+        stdout: "final review",
+        completedAt: "2026-01-01T00:05:00.000Z",
+        exitCode: 0,
+      }),
+    );
+
+    const withLogs = await readClaudeBackgroundLogs(pi as never, job, "fake-claude");
+    const stored = await readJob(job.id);
+
+    expect(withLogs).toEqual(job);
+    expect(stored.status).toBe("review");
+    expect(stored.stdout).toBe("final review");
+    expect(stored.completedAt).toBe("2026-01-01T00:05:00.000Z");
+    expect(stored.exitCode).toBe(0);
+    expect(stored.errorMessage).toBeNull();
   });
 
   it("keeps terminal background jobs terminal when refreshing agent status", async () => {
