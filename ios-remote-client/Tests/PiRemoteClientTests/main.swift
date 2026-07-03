@@ -15,6 +15,7 @@ do {
 private func runProtocolTests() throws {
   try envelopeRoundTripsTSGeneratedFixturesByteForByte()
   try jsonlFramingSplitsOnLFOnly()
+  try decodesPayloadIndependentOfEnvelopeKeyOrder()
   try controlAndPerSessionEnvelopesAreDistinctTypes()
 }
 
@@ -76,6 +77,20 @@ private func jsonlFramingSplitsOnLFOnly() throws {
   try expect(envelopes.count == 2)
   try expect(try encodeFrameString(envelopes[0]) == unicodeSeparatorFrame.frame)
   try expect(try encodeFrameString(envelopes[1]) == fixtures[0].frame)
+}
+
+private func decodesPayloadIndependentOfEnvelopeKeyOrder() throws {
+  let frame =
+    "{\"payload\":{\"text\":\"continue\"},\"type\":\"prompt\"," + "\"sessionId\":\"session-1\"}\n"
+
+  let envelope = try decodeFrame(frame)
+
+  try expect(envelope.sessionID == "session-1")
+  try expect(envelope.type == "prompt")
+  try expect(
+    try encodeFrameString(envelope)
+      == "{\"sessionId\":\"session-1\",\"type\":\"prompt\",\"payload\":{\"text\":\"continue\"}}\n"
+  )
 }
 
 private func controlAndPerSessionEnvelopesAreDistinctTypes() throws {

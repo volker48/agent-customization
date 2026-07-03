@@ -187,7 +187,10 @@ async function applyInbound(
     return;
   }
   if (envelope.type === "prompt") {
-    pi.sendUserMessage(promptText(envelope.payload), { deliverAs: "steer" });
+    const text = promptText(envelope.payload);
+    if (text.trim().length > 0) {
+      pi.sendUserMessage(text, { deliverAs: "steer" });
+    }
     return;
   }
   if (envelope.type === "abort") {

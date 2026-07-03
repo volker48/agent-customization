@@ -198,6 +198,49 @@ describe("remote daemon", () => {
     }
   }, 30_000);
 
+  it("detaches a streaming session when the remote connection closes", async () => {
+    const root = await tempRoot();
+    const daemon = await startRemoteDaemon({ remoteRoot: root, pairingCode: "123-456" });
+    const extension = await connectIpcExtension(daemon.socketPath, {
+      sessionId: "session-1",
+      name: "Work session",
+      cwd: "/repo",
+    });
+    const client = await bindEndpoint();
+
+    try {
+      await daemon.ipc.waitForSession("session-1");
+      await armPairing(daemon.socketPath);
+      const addr = EndpointTicket.fromString(daemon.ticket).endpointAddr();
+      const connection = await connectEndpoint(client, addr);
+      const stream = await openStream(connection);
+      await sendEnvelope(stream, { sessionId: null, type: "pair", payload: { code: "123-456" } });
+      await sendEnvelope(stream, {
+        sessionId: null,
+        type: "attach",
+        payload: { sessionId: "session-1", stream: true },
+      });
+      await finishSending(stream);
+
+      await expect(extension.readNext()).resolves.toEqual({
+        sessionId: "session-1",
+        type: "attach",
+        payload: {},
+      });
+      connection.close(0n, []);
+
+      await expect(extension.readNext()).resolves.toEqual({
+        sessionId: "session-1",
+        type: "detach",
+        payload: {},
+      });
+    } finally {
+      await closeEndpoint(client);
+      await extension.close();
+      await daemon.close();
+    }
+  }, 30_000);
+
   it("routes detach to a stub session over real iroh", async () => {
     const root = await tempRoot();
     const daemon = await startRemoteDaemon({ remoteRoot: root, pairingCode: "123-456" });

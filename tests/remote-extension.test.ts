@@ -296,6 +296,32 @@ describe("remote extension", () => {
     }
   });
 
+  it("ignores empty remote prompts", async () => {
+    const daemon = await startIpcDaemonServer(join(root, "daemon.sock"), {
+      getPairingInfo: () => ({ ticket: "ticket-stub", code: "123-456" }),
+    });
+    const { pi, command } = createPi();
+    const ctx = createContext();
+
+    try {
+      remoteExtension(pi as never);
+      await command("remote").handler("", ctx);
+      await daemon.waitForSession("session-1");
+
+      await daemon.sendToSession({ sessionId: "session-1", type: "prompt", payload: {} });
+      await daemon.sendToSession({
+        sessionId: "session-1",
+        type: "prompt",
+        payload: { text: "  \n\t  " },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    } finally {
+      await daemon.close();
+    }
+  });
+
   it("registers status and stop command variants through /remote args", async () => {
     const stopped = vi.fn();
     const daemon = await startIpcDaemonServer(join(root, "daemon.sock"), { onStop: stopped });

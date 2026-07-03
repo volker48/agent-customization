@@ -1,6 +1,5 @@
 import { SecretKey } from "@number0/iroh/index.js";
 import { chmod, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
-import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 
 import {
@@ -37,6 +36,11 @@ const SECRET_KEY_FILE = "iroh-secret-key.json";
 const DAEMON_SOCKET_FILE = "daemon.sock";
 const OWNER_ONLY_DIRECTORY_MODE = 0o700;
 const OWNER_ONLY_FILE_MODE = 0o600;
+const UNAUTHENTICATED_READ_TIMEOUT_MS = 30_000;
+const REMOTE_CLOSE_ERROR_CODE = 0n;
+const READ_TIMEOUT_CLOSE_REASON = Array.from(Buffer.from("read timeout", "utf8"));
+
+type AcceptedConnection = Awaited<ReturnType<typeof acceptConnection>>;
 
 export type RemoteDaemon = {
   endpoint: RemoteEndpoint;
@@ -63,14 +67,28 @@ export async function startRemoteDaemon(options: RemoteDaemonOptions): Promise<R
   const endpoint = await bindEndpoint(await loadSecretKey(remoteRoot));
   const ticket = endpointTicket(endpoint);
   const pairingWindow = new PairingWindow(pairingCodeFactory(options));
+  const streamingAttachCounts = new Map<string, number>();
   let daemon: RemoteDaemon;
-  const ipc = await startIpcDaemonServer(socketPath, {
-    onStop: () => daemon.close(),
-    getPairingInfo: () => ({ ticket, code: pairingWindow.arm() }),
-  });
+  let ipc: IpcDaemonServer;
+  try {
+    ipc = await startIpcDaemonServer(socketPath, {
+      onStop: () => daemon.close(),
+      getPairingInfo: () => ({ ticket, code: pairingWindow.arm() }),
+    });
+  } catch (error) {
+    await closeEndpoint(endpoint);
+    throw error;
+  }
   await chmod(socketPath, OWNER_ONLY_FILE_MODE);
   let closed = false;
-  void acceptConnections(endpoint, ipc, allowlist, pairingWindow, () => closed);
+  void acceptConnections(
+    endpoint,
+    ipc,
+    allowlist,
+    pairingWindow,
+    streamingAttachCounts,
+    () => closed,
+  );
 
   daemon = {
     endpoint,
@@ -93,12 +111,15 @@ async function acceptConnections(
   ipc: IpcDaemonServer,
   allowlist: FileNodeAllowlist,
   pairingWindow: PairingWindow,
+  streamingAttachCounts: Map<string, number>,
   isClosed: () => boolean,
 ): Promise<void> {
   while (!isClosed()) {
     try {
       const connection = await acceptConnection(endpoint);
-      void handleConnection(connection, ipc, allowlist, pairingWindow).catch(() => undefined);
+      void handleConnection(connection, ipc, allowlist, pairingWindow, streamingAttachCounts).catch(
+        () => undefined,
+      );
     } catch {
       if (isClosed()) return;
     }
@@ -106,15 +127,17 @@ async function acceptConnections(
 }
 
 async function handleConnection(
-  connection: Awaited<ReturnType<typeof acceptConnection>>,
+  connection: AcceptedConnection,
   ipc: IpcDaemonServer,
   allowlist: FileNodeAllowlist,
   pairingWindow: PairingWindow,
+  streamingAttachCounts: Map<string, number>,
 ): Promise<void> {
   const stream = await acceptStream(connection);
   const writer = new StreamWriter(stream);
   const attached = new Set<string>();
   const attaching = new Set<string>();
+  const retained = new Set<string>();
   const pending: IpcEnvelope[] = [];
   const unsubscribe = ipc.subscribe((frame) =>
     routeAttachedFrame(frame, { writer, attached, attaching, pending }),
@@ -123,7 +146,8 @@ async function handleConnection(
   try {
     let keepOpen = false;
     const connectionAllowlist = new CachedNodeAllowlist(allowlist);
-    for (const envelope of await receiveEnvelopes(stream)) {
+    const envelopes = await receiveEnvelopesWithTimeout(stream, connection, writer);
+    for (const envelope of envelopes) {
       const streamingAttachSessionId = streamingAttachSessionIdFrom(envelope);
       if (streamingAttachSessionId) attaching.add(streamingAttachSessionId);
 
@@ -134,6 +158,10 @@ async function handleConnection(
         pairingWindow,
         nodeId: connection.remoteId().toString(),
       });
+      if (streamingAttachSessionId && response && !retained.has(streamingAttachSessionId)) {
+        retainStreamingAttach(streamingAttachCounts, streamingAttachSessionId);
+        retained.add(streamingAttachSessionId);
+      }
       if (response) await writer.send(response);
       if (!response && isPairingEnvelope(envelope)) break;
       if (streamingAttachSessionId) {
@@ -156,8 +184,15 @@ async function handleConnection(
     } else {
       await writer.close();
     }
+  } catch {
+    closeRemoteConnection(connection);
+    await writer.close();
   } finally {
-    unsubscribe();
+    try {
+      await detachAttachedSessions(ipc, releaseStreamingAttaches(streamingAttachCounts, retained));
+    } finally {
+      unsubscribe();
+    }
   }
 }
 
@@ -354,10 +389,69 @@ function isKnownSession(sessionId: string, context: AttachedFrameContext): boole
 }
 
 async function waitForStreamingConnection(
-  connection: Awaited<ReturnType<typeof acceptConnection>>,
+  connection: AcceptedConnection,
   writer: StreamWriter,
 ): Promise<void> {
   await Promise.race([writer.waitClosed(), connection.closed().then(() => writer.close())]);
+}
+
+async function receiveEnvelopesWithTimeout(
+  stream: Awaited<ReturnType<typeof acceptStream>>,
+  connection: AcceptedConnection,
+  writer: StreamWriter,
+): Promise<Envelope[]> {
+  let timeout: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<Envelope[]>((_, reject) => {
+    timeout = setTimeout(() => {
+      closeRemoteConnection(connection);
+      void writer.close();
+      reject(new Error("remote connection timed out before authentication"));
+    }, UNAUTHENTICATED_READ_TIMEOUT_MS);
+  });
+
+  try {
+    return await Promise.race([receiveEnvelopes(stream), timeoutPromise]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function detachAttachedSessions(
+  ipc: IpcDaemonServer,
+  sessionIds: Set<string>,
+): Promise<void> {
+  for (const sessionId of sessionIds) {
+    await safeSendToSession(ipc, { sessionId, type: "detach", payload: {} });
+  }
+}
+
+function retainStreamingAttach(counts: Map<string, number>, sessionId: string): void {
+  counts.set(sessionId, (counts.get(sessionId) ?? 0) + 1);
+}
+
+function releaseStreamingAttaches(
+  counts: Map<string, number>,
+  sessionIds: Set<string>,
+): Set<string> {
+  const lastReleased = new Set<string>();
+  for (const sessionId of sessionIds) {
+    const count = counts.get(sessionId) ?? 0;
+    if (count <= 1) {
+      counts.delete(sessionId);
+      lastReleased.add(sessionId);
+    } else {
+      counts.set(sessionId, count - 1);
+    }
+  }
+  return lastReleased;
+}
+
+function closeRemoteConnection(connection: AcceptedConnection): void {
+  try {
+    connection.close(REMOTE_CLOSE_ERROR_CODE, READ_TIMEOUT_CLOSE_REASON);
+  } catch {
+    // The connection may already be closed by the peer.
+  }
 }
 
 class StreamWriter {
@@ -432,11 +526,6 @@ async function prepareSocketPath(socketPath: string): Promise<void> {
   } else {
     await chmod(socketDirectory, OWNER_ONLY_DIRECTORY_MODE);
   }
-  const active = await canConnect(socketPath);
-  if (active) {
-    throw new Error("remote daemon is already running");
-  }
-  await unlink(socketPath).catch(ignoreMissingFile);
 }
 
 async function assertOwnerOnlyDirectory(directory: string): Promise<void> {
@@ -446,26 +535,6 @@ async function assertOwnerOnlyDirectory(directory: string): Promise<void> {
       `remote daemon directory grants access to other users (mode ${mode.toString(8)}): ${directory}`,
     );
   }
-}
-
-function canConnect(socketPath: string): Promise<boolean> {
-  return new Promise((resolve, reject) => {
-    const socket = createConnection(socketPath);
-    socket.once("connect", () => {
-      socket.end();
-      resolve(true);
-    });
-    socket.once("error", (error) => {
-      if (
-        "code" in error &&
-        (error.code === "ENOENT" || error.code === "ECONNREFUSED" || error.code === "ENOTSOCK")
-      ) {
-        resolve(false);
-      } else {
-        reject(error);
-      }
-    });
-  });
 }
 
 function isSecretKeyBytes(value: unknown): value is number[] {

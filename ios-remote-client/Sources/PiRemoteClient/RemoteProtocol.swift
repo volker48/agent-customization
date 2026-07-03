@@ -170,23 +170,127 @@ private extension Envelope {
   func jsonString() throws -> String {
     let session = try sessionID.map(JSONValue.string)?.jsonString() ?? "null"
     let messageType = try JSONValue.string(type).jsonString()
-    return "{\"sessionId\":\(session),\"type\":\(messageType)," +
-      "\"payload\":\(try payload.jsonString())}"
+    return "{\"sessionId\":\(session),\"type\":\(messageType),"
+      + "\"payload\":\(try payload.jsonString())}"
   }
 }
 
 private func extractRawPayload(from json: String) throws -> String {
-  guard let payloadRange = json.range(of: "\"payload\":") else {
+  var scanner = JSONTopLevelScanner(json)
+  return try scanner.objectValue(forKey: "payload")
+}
+
+private struct JSONTopLevelScanner {
+  private let json: String
+  private var index: String.Index
+
+  init(_ json: String) {
+    self.json = json
+    self.index = json.startIndex
+  }
+
+  mutating func objectValue(forKey targetKey: String) throws -> String {
+    try skipWhitespace()
+    try consume("{")
+    while true {
+      try skipWhitespace()
+      if try consumeIfPresent("}") {
+        break
+      }
+      let key = try parseString()
+      try skipWhitespace()
+      try consume(":")
+      try skipWhitespace()
+      let valueStart = index
+      try skipValue()
+      if key == targetKey {
+        return String(json[valueStart..<index])
+      }
+      try skipWhitespace()
+      if try consumeIfPresent(",") {
+        continue
+      }
+      try consume("}")
+      break
+    }
     throw RemoteProtocolError.missingRawPayload
   }
 
-  var payload = String(json[payloadRange.upperBound...])
-  while payload.last?.isWhitespace == true {
-    payload.removeLast()
-  }
-  guard payload.last == "}" else {
+  private mutating func parseString() throws -> String {
+    try consume("\"")
+    var value = ""
+    while index < json.endIndex {
+      let character = json[index]
+      json.formIndex(after: &index)
+      if character == "\"" {
+        return value
+      }
+      if character == "\\" {
+        guard index < json.endIndex else { throw RemoteProtocolError.missingRawPayload }
+        value.append(json[index])
+        json.formIndex(after: &index)
+      } else {
+        value.append(character)
+      }
+    }
     throw RemoteProtocolError.missingRawPayload
   }
-  payload.removeLast()
-  return payload
+
+  private mutating func skipValue() throws {
+    guard index < json.endIndex else { throw RemoteProtocolError.missingRawPayload }
+    switch json[index] {
+    case "{":
+      try skipComposite(open: "{", close: "}")
+    case "[":
+      try skipComposite(open: "[", close: "]")
+    case "\"":
+      _ = try parseString()
+    default:
+      while index < json.endIndex && !",}]".contains(json[index]) {
+        json.formIndex(after: &index)
+      }
+    }
+  }
+
+  private mutating func skipComposite(open: Character, close: Character) throws {
+    var depth = 0
+    while index < json.endIndex {
+      let character = json[index]
+      if character == "\"" {
+        _ = try parseString()
+        continue
+      }
+      json.formIndex(after: &index)
+      if character == open {
+        depth += 1
+      } else if character == close {
+        depth -= 1
+        if depth == 0 {
+          return
+        }
+      }
+    }
+    throw RemoteProtocolError.missingRawPayload
+  }
+
+  private mutating func skipWhitespace() throws {
+    while index < json.endIndex && json[index].isWhitespace {
+      json.formIndex(after: &index)
+    }
+  }
+
+  private mutating func consume(_ expected: Character) throws {
+    guard index < json.endIndex && json[index] == expected else {
+      throw RemoteProtocolError.missingRawPayload
+    }
+    json.formIndex(after: &index)
+  }
+
+  private mutating func consumeIfPresent(_ expected: Character) throws -> Bool {
+    guard index < json.endIndex && json[index] == expected else {
+      return false
+    }
+    json.formIndex(after: &index)
+    return true
+  }
 }
