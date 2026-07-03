@@ -101,10 +101,8 @@ async function acceptConnections(
     try {
       const connection = await acceptConnection(endpoint);
       void handleConnection(connection, ipc, allowlist, pairingCode).catch(() => undefined);
-    } catch (error) {
-      if (!isClosed()) {
-        throw error;
-      }
+    } catch {
+      if (isClosed()) return;
     }
   }
 }
@@ -276,11 +274,12 @@ type AttachedFrameContext = {
 };
 
 function routeAttachedFrame(frame: IpcEnvelope, context: AttachedFrameContext): void {
-  if (frame.sessionId === null) return;
-  if (frame.type === "session_shutdown" && isKnownSession(frame.sessionId, context)) {
-    void context.writer.close();
+  const endedSessionId = endedSessionIdFrom(frame);
+  if (endedSessionId && isKnownSession(endedSessionId, context)) {
+    void context.writer.send(frame as Envelope).finally(() => context.writer.close());
     return;
   }
+  if (frame.sessionId === null) return;
   if (frame.type !== "event") return;
   if (context.attaching.has(frame.sessionId)) {
     context.pending.push(frame);
@@ -329,6 +328,11 @@ function isStreamingAttach(envelope: Envelope): boolean {
     "stream" in envelope.payload &&
     envelope.payload.stream === true
   );
+}
+
+function endedSessionIdFrom(frame: IpcEnvelope): string | null {
+  if (frame.sessionId !== null || frame.type !== "session_ended") return null;
+  return sessionIdFromPayload(frame.payload);
 }
 
 function isKnownSession(sessionId: string, context: AttachedFrameContext): boolean {

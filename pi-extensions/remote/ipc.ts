@@ -187,8 +187,9 @@ async function handleReceivedEnvelope(
   options: IpcDaemonOptions,
 ): Promise<void> {
   options.onFrame?.(envelope);
-  await handleDaemonFrame(envelope, socket, state.registry, options);
+  const emitted = await handleDaemonFrame(envelope, socket, state.registry, options);
   state.listeners.forEach((listener) => listener(envelope));
+  emitted.forEach((frame) => state.listeners.forEach((listener) => listener(frame)));
   resolveSessionWaiters(envelope, state.registry, state.sessionWaiters);
   resolveEndWaiters(envelope, state.endWaiters);
 }
@@ -198,7 +199,8 @@ async function handleDaemonFrame(
   socket: Socket,
   registry: Map<string, SessionRegistryEntry>,
   options: IpcDaemonOptions,
-): Promise<void> {
+): Promise<IpcEnvelope[]> {
+  const emitted: IpcEnvelope[] = [];
   if (isRegisterEnvelope(envelope)) {
     registry.set(envelope.payload.sessionId, {
       name: envelope.payload.name,
@@ -221,11 +223,13 @@ async function handleDaemonFrame(
 
   if (envelope.type === "session_shutdown" && envelope.sessionId !== null) {
     registry.delete(envelope.sessionId);
-    options.onControlFrame?.({
+    const frame: IpcEnvelope = {
       sessionId: null,
       type: "session_ended",
       payload: { sessionId: envelope.sessionId },
-    });
+    };
+    options.onControlFrame?.(frame);
+    emitted.push(frame);
   }
 
   if (envelope.type === "sync") {
@@ -248,6 +252,8 @@ async function handleDaemonFrame(
       payload: options.getPairingInfo?.() ?? null,
     });
   }
+
+  return emitted;
 }
 
 function parseBufferedFrames(input: string): { envelopes: IpcEnvelope[]; remaining: string } {

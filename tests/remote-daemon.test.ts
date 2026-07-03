@@ -200,6 +200,67 @@ describe("remote daemon", () => {
     }
   }, 30_000);
 
+  it("keeps accepting after a malformed iroh connection", async () => {
+    const root = await tempRoot();
+    const daemon = await startRemoteDaemon({ remoteRoot: root, pairingCode: "123-456" });
+    const badClient = await bindEndpoint();
+    const goodClient = await bindEndpoint();
+
+    try {
+      await dialWrongAlpn(badClient, daemon.ticket);
+
+      await expect(
+        exchange(goodClient, daemon.ticket, [
+          { sessionId: null, type: "pair", payload: { code: "123-456" } },
+          { sessionId: null, type: "list", payload: {} },
+        ]),
+      ).resolves.toEqual([
+        { sessionId: null, type: "pair", payload: { paired: true } },
+        { sessionId: null, type: "list", payload: [] },
+      ]);
+    } finally {
+      await closeEndpoint(goodClient);
+      await closeEndpoint(badClient);
+      await daemon.close();
+    }
+  }, 30_000);
+
+  it("forwards session_ended to streaming attaches before closing", async () => {
+    const root = await tempRoot();
+    const daemon = await startRemoteDaemon({ remoteRoot: root, pairingCode: "123-456" });
+    const extension = await connectIpcExtension(daemon.socketPath, {
+      sessionId: "session-1",
+      name: "Work session",
+      cwd: "/repo",
+    });
+    const client = await bindEndpoint();
+
+    try {
+      await daemon.ipc.waitForSession("session-1");
+      const responses = exchange(client, daemon.ticket, [
+        { sessionId: null, type: "pair", payload: { code: "123-456" } },
+        { sessionId: null, type: "attach", payload: { sessionId: "session-1", stream: true } },
+      ]);
+
+      await expect(extension.readNext()).resolves.toEqual({
+        sessionId: "session-1",
+        type: "attach",
+        payload: {},
+      });
+      await extension.send({ sessionId: "session-1", type: "session_shutdown", payload: {} });
+
+      await expect(responses).resolves.toEqual([
+        { sessionId: null, type: "pair", payload: { paired: true } },
+        { sessionId: null, type: "attach", payload: { attached: true, sessionId: "session-1" } },
+        { sessionId: null, type: "session_ended", payload: { sessionId: "session-1" } },
+      ]);
+    } finally {
+      await closeEndpoint(client);
+      await extension.close();
+      await daemon.close();
+    }
+  }, 30_000);
+
   it("ignores attach and session frames for unknown sessions without crashing", async () => {
     const root = await tempRoot();
     const daemon = await startRemoteDaemon({ remoteRoot: root, pairingCode: "123-456" });
@@ -337,6 +398,16 @@ async function exchange(
   }
   await finishSending(stream);
   return receiveEnvelopes(stream);
+}
+
+async function dialWrongAlpn(
+  client: Awaited<ReturnType<typeof bindEndpoint>>,
+  ticket: string,
+): Promise<void> {
+  const addr = EndpointTicket.fromString(ticket).endpointAddr();
+  const wrongAlpn = Array.from(Buffer.from("pi/remote/wrong", "utf8"));
+  await client.connect(addr, wrongAlpn).catch(() => undefined);
+  await new Promise((resolve) => setTimeout(resolve, 100));
 }
 
 async function leaveStaleSocket(socketPath: string): Promise<void> {
