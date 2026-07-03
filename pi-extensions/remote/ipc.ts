@@ -1,3 +1,4 @@
+import { unlink } from "node:fs/promises";
 import { createServer, createConnection, type Server, type Socket } from "node:net";
 
 import { decodeFrames, type MessageType } from "./protocol.js";
@@ -334,7 +335,32 @@ function writeEnvelope(socket: Socket, envelope: IpcEnvelope): Promise<void> {
   });
 }
 
-function listen(server: Server, socketPath: string): Promise<void> {
+async function listen(server: Server, socketPath: string): Promise<void> {
+  try {
+    await listenOnce(server, socketPath);
+    return;
+  } catch (error) {
+    if (!isAddressInUse(error)) {
+      throw error;
+    }
+  }
+
+  if (await canConnect(socketPath)) {
+    throw new Error("remote daemon is already running");
+  }
+
+  await unlink(socketPath).catch(ignoreMissingFile);
+  try {
+    await listenOnce(server, socketPath);
+  } catch (error) {
+    if (isAddressInUse(error)) {
+      throw new Error("remote daemon is already running");
+    }
+    throw error;
+  }
+}
+
+function listenOnce(server: Server, socketPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(socketPath, () => {
@@ -342,6 +368,36 @@ function listen(server: Server, socketPath: string): Promise<void> {
       resolve();
     });
   });
+}
+
+function isAddressInUse(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "EADDRINUSE";
+}
+
+function canConnect(socketPath: string): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(socketPath);
+    socket.once("connect", () => {
+      socket.end();
+      resolve(true);
+    });
+    socket.once("error", (error) => {
+      if (
+        "code" in error &&
+        (error.code === "ENOENT" || error.code === "ECONNREFUSED" || error.code === "ENOTSOCK")
+      ) {
+        resolve(false);
+      } else {
+        reject(error);
+      }
+    });
+  });
+}
+
+function ignoreMissingFile(error: unknown): void {
+  if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+    throw error;
+  }
 }
 
 function closeServer(server: Server): Promise<void> {
