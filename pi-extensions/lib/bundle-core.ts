@@ -8,7 +8,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { glob, readFile, stat } from "node:fs/promises";
+import { glob, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 export interface BundleFile {
@@ -103,9 +103,11 @@ export async function collectFiles(
     throw new BundleError("No files matched the provided patterns.");
   }
 
-  const accepted = await enforceSizeLimit([...candidates], cwd, maxBytes);
+  const rootRealPath = await realpath(cwd);
+  const accepted = await enforceSizeLimit([...candidates], cwd, rootRealPath, maxBytes);
   const files: BundleFile[] = [];
   for (const rel of accepted) {
+    await assertRealPathWithinRoot(rel, cwd, rootRealPath);
     const content = await readFile(path.resolve(cwd, rel), "utf8");
     files.push({ displayPath: rel, content });
   }
@@ -185,10 +187,16 @@ async function resolveLiteral(pattern: string, cwd: string): Promise<string> {
   return toPosix(relative);
 }
 
-async function enforceSizeLimit(rels: string[], cwd: string, maxBytes: number): Promise<string[]> {
+async function enforceSizeLimit(
+  rels: string[],
+  cwd: string,
+  rootRealPath: string,
+  maxBytes: number,
+): Promise<string[]> {
   const accepted: string[] = [];
   const oversized: string[] = [];
   for (const rel of rels) {
+    await assertRealPathWithinRoot(rel, cwd, rootRealPath);
     const stats = await stat(path.resolve(cwd, rel));
     if (!stats.isFile()) continue;
     if (maxBytes && stats.size > maxBytes) {
@@ -203,6 +211,18 @@ async function enforceSizeLimit(rels: string[], cwd: string, maxBytes: number): 
     );
   }
   return accepted;
+}
+
+async function assertRealPathWithinRoot(
+  rel: string,
+  cwd: string,
+  rootRealPath: string,
+): Promise<void> {
+  const targetRealPath = await realpath(path.resolve(cwd, rel));
+  const relative = path.relative(rootRealPath, targetRealPath);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new BundleError(`Paths must stay within root: ${rel}`);
+  }
 }
 
 function renderSection(index: number, file: BundleFile, lineNumbers: boolean): string {

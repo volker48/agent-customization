@@ -174,6 +174,18 @@ describe("config validation", () => {
     expect(() =>
       validateFusionConfig({ judge: "a/b", models: ["c/d"], webSearch: { type: "fast" } }),
     ).toThrow(/webSearch.*unknown field: type/);
+    expect(() =>
+      validateFusionConfig({ judge: "a/b", models: ["c/d"], webfetch: { mode: "probe" } }),
+    ).toThrow(/webfetch.*unknown field: mode/);
+  });
+
+  it("rejects malformed web policy objects", () => {
+    expect(() => validateFusionConfig({ judge: "a/b", models: ["c/d"], webSearch: [] })).toThrow(
+      /webSearch must be a JSON object/,
+    );
+    expect(() =>
+      validateFusionConfig({ judge: "a/b", models: ["c/d"], webfetch: "smart" }),
+    ).toThrow(/webfetch must be a JSON object/);
   });
 
   it("validates web search policy fields", () => {
