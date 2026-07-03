@@ -13,7 +13,10 @@ import {
   CLAUDE_REVIEW_RESULT_END,
   CLAUDE_REVIEW_RESULT_START,
 } from "../pi-extensions/claude-review/args.js";
-import { readClaudeBackgroundLogs } from "../pi-extensions/claude-review/claude-bg.js";
+import {
+  extractMarkedReview,
+  readClaudeBackgroundLogs,
+} from "../pi-extensions/claude-review/claude-bg.js";
 import type { ClaudeReviewJob } from "../pi-extensions/claude-review/jobs.js";
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
@@ -285,5 +288,18 @@ describe("claude review command", () => {
     expect(withLogs.stdout).toBe("partial review");
     expect(withLogs.errorMessage).toBe("Claude background session failed");
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
+  });
+
+  it("ignores echoed prompt result markers when extracting review output", () => {
+    const promptedPlaceholder = `${CLAUDE_REVIEW_RESULT_START}
+<your concise, actionable review or no-findings summary>
+${CLAUDE_REVIEW_RESULT_END}`;
+    const realReview = `${CLAUDE_REVIEW_RESULT_START}
+Finding: fix the edge case
+${CLAUDE_REVIEW_RESULT_END}`;
+
+    expect(
+      extractMarkedReview(`user prompt:\n${promptedPlaceholder}\nassistant:\n${realReview}`),
+    ).toBe("Finding: fix the edge case");
   });
 });

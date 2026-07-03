@@ -393,8 +393,8 @@ function pickNumber(record: ClaudeAgentRecord, keys: string[]): number | undefin
 }
 
 export function extractMarkedReview(output: string): string | undefined {
-  const start = output.indexOf(CLAUDE_REVIEW_RESULT_START);
-  const end = output.indexOf(CLAUDE_REVIEW_RESULT_END);
+  const start = output.lastIndexOf(CLAUDE_REVIEW_RESULT_START);
+  const end = output.indexOf(CLAUDE_REVIEW_RESULT_END, start + CLAUDE_REVIEW_RESULT_START.length);
   if (start === -1 || end === -1 || end <= start) {
     return undefined;
   }
