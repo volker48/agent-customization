@@ -1,24 +1,61 @@
 export const DEFAULT_REVIEW_LEVEL = "medium";
 export const REVIEW_LEVELS = ["low", "medium", "high", "max"] as const;
+export const CLAUDE_REVIEW_RESULT_START = "<CLAUDE_REVIEW_RESULT>";
+export const CLAUDE_REVIEW_RESULT_END = "</CLAUDE_REVIEW_RESULT>";
 
 export type ReviewLevel = (typeof REVIEW_LEVELS)[number];
+export type ClaudeReviewMode = "background" | "wait";
 
 export interface ClaudeReviewOptions {
   autoFix: boolean;
   level: ReviewLevel;
   contextMessage: string;
+  mode: ClaudeReviewMode;
+}
+
+export interface ClaudeReviewResultArgs {
+  jobId?: string;
+  fix?: boolean;
+}
+
+export interface ClaudeReviewJobArgs {
+  all: boolean;
+  jobId?: string;
 }
 
 const LEVELS = new Set<string>(REVIEW_LEVELS);
 
+function tokenize(args: string): string[] {
+  return args.trim().split(/\s+/).filter(Boolean);
+}
+
 export function parseClaudeReviewArgs(args: string): ClaudeReviewOptions {
-  const tokens = args.trim().split(/\s+/).filter(Boolean);
+  const tokens = tokenize(args);
   const remaining: string[] = [];
   let autoFix = true;
+  let mode: ClaudeReviewMode | undefined;
 
   for (const token of tokens) {
     if (token === "--no-fix") {
       autoFix = false;
+      continue;
+    }
+    if (token === "--fix") {
+      autoFix = true;
+      continue;
+    }
+    if (token === "--wait") {
+      if (mode === "background") {
+        throw new Error("Use either --wait or --background, not both");
+      }
+      mode = "wait";
+      continue;
+    }
+    if (token === "--background" || token === "--bg") {
+      if (mode === "wait") {
+        throw new Error("Use either --wait or --background, not both");
+      }
+      mode = "background";
       continue;
     }
     if (token.startsWith("--")) {
@@ -39,10 +76,77 @@ export function parseClaudeReviewArgs(args: string): ClaudeReviewOptions {
     autoFix,
     level,
     contextMessage: remaining.join(" "),
+    mode: mode ?? "background",
   };
 }
 
-export function buildCodeReviewPrompt(options: ClaudeReviewOptions): string {
+export function parseClaudeReviewResultArgs(args: string): ClaudeReviewResultArgs {
+  const tokens = tokenize(args);
+  let fix: boolean | undefined;
+  const remaining: string[] = [];
+
+  for (const token of tokens) {
+    if (token === "--fix") {
+      fix = true;
+      continue;
+    }
+    if (token === "--no-fix") {
+      fix = false;
+      continue;
+    }
+    if (token.startsWith("--")) {
+      throw new Error(`Unknown option: ${token}`);
+    }
+    remaining.push(token);
+  }
+
+  if (remaining.length > 1) {
+    throw new Error("Expected at most one Claude review job id");
+  }
+
+  return { fix, jobId: remaining[0] };
+}
+
+export function parseClaudeReviewJobArgs(args: string): ClaudeReviewJobArgs {
+  const tokens = tokenize(args);
+  const remaining: string[] = [];
+  let all = false;
+
+  for (const token of tokens) {
+    if (token === "--all") {
+      all = true;
+      continue;
+    }
+    if (token.startsWith("--")) {
+      throw new Error(`Unknown option: ${token}`);
+    }
+    remaining.push(token);
+  }
+
+  if (remaining.length > 1) {
+    throw new Error("Expected at most one Claude review job id");
+  }
+
+  return { all, jobId: remaining[0] };
+}
+
+export function buildCodeReviewPrompt(
+  options: Pick<ClaudeReviewOptions, "contextMessage" | "level">,
+  format: { resultMarkers?: boolean } = {},
+): string {
   const suffix = options.contextMessage ? ` ${options.contextMessage}` : "";
-  return `/code-review ${options.level}${suffix}`;
+  const prompt = `/code-review ${options.level}${suffix}`;
+
+  if (!format.resultMarkers) {
+    return prompt;
+  }
+
+  return [
+    prompt,
+    "",
+    "When you finish, print the final review between these exact tags so another process can retrieve it later:",
+    CLAUDE_REVIEW_RESULT_START,
+    "<your concise, actionable review or no-findings summary>",
+    CLAUDE_REVIEW_RESULT_END,
+  ].join("\n");
 }
