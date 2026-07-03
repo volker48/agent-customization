@@ -17,6 +17,7 @@ import {
   cancelClaudeBackgroundJob,
   extractMarkedReview,
   readClaudeBackgroundLogs,
+  startClaudeBackgroundReview,
 } from "../pi-extensions/claude-review/claude-bg.js";
 import type { ClaudeReviewJob } from "../pi-extensions/claude-review/jobs.js";
 
@@ -264,6 +265,29 @@ describe("claude review command", () => {
       expect.arrayContaining(["--bg", expect.stringContaining("/code-review low")]),
       expect.objectContaining({ cwd: "/repo" }),
     );
+  });
+
+  it("fails background starts that do not report a session id", async () => {
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(jobDir);
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    const { pi } = createMockPi({
+      stdout: "background session started",
+      stderr: "",
+      code: 0,
+      killed: false,
+    });
+    const job = createBackgroundJob({
+      claudeSessionId: undefined,
+      status: "queued",
+    });
+
+    const started = await startClaudeBackgroundReview(pi as never, job, "fake-claude", "Read");
+
+    expect(started.status).toBe("failed");
+    expect(started.claudeSessionId).toBeUndefined();
+    expect(started.errorMessage).toBe("Claude background session did not report a session id");
+    expect(started.rawStartOutput).toBe("background session started");
   });
 
   it("does not cancel completed background jobs", async () => {

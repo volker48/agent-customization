@@ -93,6 +93,19 @@ export async function startClaudeBackgroundReview(
     });
   }
 
+  if (!claudeSessionId) {
+    return writeJob({
+      ...next,
+      status: "failed",
+      stdout: result.stdout,
+      stderr: result.stderr,
+      exitCode: result.code,
+      completedAt: new Date().toISOString(),
+      errorMessage: "Claude background session did not report a session id",
+      rawStartOutput,
+    });
+  }
+
   next = await writeJob({
     ...next,
     status: "running",
