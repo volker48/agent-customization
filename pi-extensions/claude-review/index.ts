@@ -22,6 +22,7 @@ import {
   startClaudeBackgroundReview,
 } from "./claude-bg.js";
 import { createJob, isTerminalJobStatus, listJobs, resolveJob, writeJob } from "./jobs.js";
+import type { ClaudeReviewJob } from "./jobs.js";
 import type { ClaudeReviewDetails } from "./render.js";
 import {
   buildAutoFixPrompt,
@@ -147,12 +148,21 @@ async function handleBackgroundClaudeReviewCommand(
   ctx: ExtensionCommandContext,
 ): Promise<void> {
   const controller = new AbortController();
-  const prompt = buildCodeReviewPrompt(options, { resultMarkers: true });
-  let job = await createJob({ cwd: ctx.cwd, options, prompt });
+  let job: ClaudeReviewJob | undefined;
 
-  updateLoader(ctx, `Claude review: starting background job ${job.id}…`, controller);
+  updateLoader(ctx, "Claude review: waiting for Pi to become idle…", controller);
   try {
-    job = await startClaudeBackgroundReview(pi, job, claudeBinary(), REVIEW_TOOLS, controller.signal);
+    await ctx.waitForIdle();
+    const prompt = buildCodeReviewPrompt(options, { resultMarkers: true });
+    job = await createJob({ cwd: ctx.cwd, options, prompt });
+    updateLoader(ctx, `Claude review: starting background job ${job.id}…`, controller);
+    job = await startClaudeBackgroundReview(
+      pi,
+      job,
+      claudeBinary(),
+      REVIEW_TOOLS,
+      controller.signal,
+    );
     sendReviewOnly(pi, jobToClaudeReviewDetails(job));
 
     if (job.status === "running") {
@@ -162,14 +172,19 @@ async function handleBackgroundClaudeReviewCommand(
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    job = await writeJob({
-      ...job,
-      status: controller.signal.aborted ? "cancelled" : "failed",
-      completedAt: new Date().toISOString(),
-      errorMessage: message,
-    });
-    sendReviewOnly(pi, jobToClaudeReviewDetails(job));
-    ctx.ui.notify(controller.signal.aborted ? "Claude review cancelled" : `Claude review failed: ${message}`, "error");
+    if (job) {
+      job = await writeJob({
+        ...job,
+        status: controller.signal.aborted ? "cancelled" : "failed",
+        completedAt: new Date().toISOString(),
+        errorMessage: message,
+      });
+      sendReviewOnly(pi, jobToClaudeReviewDetails(job));
+    }
+    ctx.ui.notify(
+      controller.signal.aborted ? "Claude review cancelled" : `Claude review failed: ${message}`,
+      "error",
+    );
   } finally {
     clearLoader(ctx);
   }
@@ -274,7 +289,10 @@ async function handleClaudeReviewCancelCommand(
     const job = await resolveJob(jobId, ctx.cwd);
     const cancelled = await cancelClaudeBackgroundJob(pi, job, claudeBinary());
     sendReviewOnly(pi, jobToClaudeReviewDetails(cancelled));
-    ctx.ui.notify(`Claude review ${cancelled.status}: ${cancelled.id}`, cancelled.status === "cancelled" ? "info" : "error");
+    ctx.ui.notify(
+      `Claude review ${cancelled.status}: ${cancelled.id}`,
+      cancelled.status === "cancelled" ? "info" : "error",
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     ctx.ui.notify(`Claude review cancel failed: ${message}`, "error");
@@ -305,7 +323,8 @@ export default function claudeReviewExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("claude-review", {
-    description: "Start a durable Claude Code /code-review job; use --wait for legacy blocking mode",
+    description:
+      "Start a durable Claude Code /code-review job; use --wait for legacy blocking mode",
     handler: (args, ctx) => handleClaudeReviewCommand(pi, args, ctx),
   });
   pi.registerCommand("claude-review-status", {

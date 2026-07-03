@@ -1,3 +1,7 @@
+import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import claudeReviewExtension, {
@@ -39,18 +43,19 @@ type MockCommandContext = {
 };
 
 function createMockPi(execResult = { stdout: "review", stderr: "", code: 0, killed: false }) {
-  let command: RegisteredCommand | undefined;
+  const commands = new Map<string, RegisteredCommand>();
   return {
     pi: {
       registerMessageRenderer: vi.fn(),
       registerCommand: vi.fn((_name: string, registered: RegisteredCommand) => {
-        command = registered;
+        commands.set(_name, registered);
       }),
       exec: vi.fn(async () => execResult),
       sendUserMessage: vi.fn(),
       sendMessage: vi.fn(),
     },
-    command() {
+    command(name = "claude-review") {
+      const command = commands.get(name);
       if (!command) throw new Error("missing command");
       return command;
     },
@@ -75,6 +80,7 @@ describe("claude review arguments", () => {
       autoFix: true,
       level: "medium",
       contextMessage: "",
+      mode: "background",
     });
   });
 
@@ -83,6 +89,7 @@ describe("claude review arguments", () => {
       autoFix: false,
       level: "high",
       contextMessage: "read issue #23",
+      mode: "background",
     });
   });
 
@@ -98,13 +105,21 @@ describe("claude review arguments", () => {
 
 describe("claude review command", () => {
   const originalBin = process.env.PI_CLAUDE_REVIEW_BIN;
+  const originalJobDir = process.env.PI_CLAUDE_REVIEW_JOB_DIR;
+  const tempDirs: string[] = [];
 
-  afterEach(() => {
+  afterEach(async () => {
     if (originalBin === undefined) {
       delete process.env.PI_CLAUDE_REVIEW_BIN;
     } else {
       process.env.PI_CLAUDE_REVIEW_BIN = originalBin;
     }
+    if (originalJobDir === undefined) {
+      delete process.env.PI_CLAUDE_REVIEW_JOB_DIR;
+    } else {
+      process.env.PI_CLAUDE_REVIEW_JOB_DIR = originalJobDir;
+    }
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { force: true, recursive: true })));
   });
 
   it("runs Claude Code and asks Pi to fix successful review findings", async () => {
@@ -118,7 +133,7 @@ describe("claude review command", () => {
     claudeReviewExtension(pi as never);
     const ctx = createContext();
 
-    await command().handler("high read issue #23", ctx);
+    await command().handler("--wait high read issue #23", ctx);
 
     expect(ctx.waitForIdle).toHaveBeenCalledOnce();
     expect(pi.exec).toHaveBeenCalledWith(
@@ -142,7 +157,7 @@ describe("claude review command", () => {
     claudeReviewExtension(pi as never);
     const ctx = createContext();
 
-    await command().handler("--no-fix low", ctx);
+    await command().handler("--wait --no-fix low", ctx);
 
     expect(pi.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -165,7 +180,7 @@ describe("claude review command", () => {
     claudeReviewExtension(pi as never);
     const ctx = createContext();
 
-    await command().handler("medium", ctx);
+    await command().handler("--wait medium", ctx);
 
     expect(pi.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -175,5 +190,44 @@ describe("claude review command", () => {
     );
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
     expect(ctx.ui.notify).toHaveBeenCalledWith("Claude review failed with exit code 2", "error");
+  });
+
+  it("waits for Pi to become idle before creating and starting a background job", async () => {
+    process.env.PI_CLAUDE_REVIEW_BIN = "fake-claude";
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(jobDir);
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    const events: string[] = [];
+    const { pi, command } = createMockPi({
+      stdout: "backgrounded · session-123456",
+      stderr: "",
+      code: 0,
+      killed: false,
+    });
+    pi.exec.mockImplementation(async () => {
+      events.push("exec");
+      return {
+        stdout: "backgrounded · session-123456",
+        stderr: "",
+        code: 0,
+        killed: false,
+      };
+    });
+    claudeReviewExtension(pi as never);
+    const ctx = createContext();
+    ctx.waitForIdle = vi.fn(async () => {
+      events.push("wait");
+      await expect(readdir(jobDir)).resolves.toEqual([]);
+    });
+
+    await command().handler("--no-fix low", ctx);
+
+    expect(events).toEqual(["wait", "exec"]);
+    await expect(readdir(jobDir)).resolves.toHaveLength(1);
+    expect(pi.exec).toHaveBeenCalledWith(
+      "fake-claude",
+      expect.arrayContaining(["--bg", expect.stringContaining("/code-review low")]),
+      expect.objectContaining({ cwd: "/repo" }),
+    );
   });
 });
