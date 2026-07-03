@@ -151,6 +151,14 @@ export async function refreshClaudeBackgroundJob(
     });
   }
 
+  if (isTerminalJobStatus(job.status)) {
+    return writeJob({
+      ...job,
+      claudeSessionId: pickAgentId(agent) ?? job.claudeSessionId,
+      rawAgentsEntry: agent,
+    });
+  }
+
   const status = normalizeAgentStatus(agent, job.status);
   const exitCode = pickNumber(agent, ["exitCode", "exit_code", "code"]);
   const completedAt = isTerminalJobStatus(status)

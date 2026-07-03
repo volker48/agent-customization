@@ -17,6 +17,7 @@ import {
   cancelClaudeBackgroundJob,
   extractMarkedReview,
   readClaudeBackgroundLogs,
+  refreshClaudeBackgroundJob,
   startClaudeBackgroundReview,
 } from "../pi-extensions/claude-review/claude-bg.js";
 import { readJob } from "../pi-extensions/claude-review/jobs.js";
@@ -392,6 +393,31 @@ describe("claude review command", () => {
     expect(withLogs.status).toBe("review");
     expect(withLogs.stdout).toBe("final review");
     expect(withLogs.completedAt).toEqual(expect.any(String));
+  });
+
+  it("keeps terminal background jobs terminal when refreshing agent status", async () => {
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(jobDir);
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    const { pi } = createMockPi({
+      stdout: JSON.stringify([{ id: "session-123", status: "running" }]),
+      stderr: "",
+      code: 0,
+      killed: false,
+    });
+    const job = createBackgroundJob({
+      status: "review",
+      stdout: "final review",
+      completedAt: "2026-01-01T00:05:00.000Z",
+      exitCode: 0,
+    });
+
+    const refreshed = await refreshClaudeBackgroundJob(pi as never, job, "fake-claude");
+
+    expect(refreshed.status).toBe("review");
+    expect(refreshed.stdout).toBe("final review");
+    expect(refreshed.completedAt).toBe("2026-01-01T00:05:00.000Z");
+    expect(refreshed.rawAgentsEntry).toEqual({ id: "session-123", status: "running" });
   });
 
   it("ignores echoed prompt result markers when extracting review output", () => {
