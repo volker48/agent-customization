@@ -100,13 +100,10 @@ Do not commit rule-breaking code. Never push unless explicitly asked. PRs and is
 
 ## Testing
 
-Mock boundaries, not logic.
-
-Mock only slow, non-deterministic, or external things: network, filesystem, databases, time, randomness, and services you do not control.
-
-Do not mock the code under test. If a test passes with the implementation removed, it is over-mocked.
-
-When practical, verify new tests fail before the fix and pass after it. Prefer integration tests when unit tests would miss the real interaction.
+- Mock boundaries, not logic.
+- Mock only slow, non-deterministic, or external things: network, filesystem, databases, time, randomness, and services you do not control.
+- Do not mock the code under test. If a test passes with the implementation removed, it is over-mocked.
+- When practical, verify new tests fail before the fix and pass after it. Prefer integration tests when unit tests would miss the real interaction.
 
 ## Dependencies, Versions, and Security
 
