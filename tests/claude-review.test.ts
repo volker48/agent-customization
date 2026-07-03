@@ -14,6 +14,7 @@ import {
   CLAUDE_REVIEW_RESULT_START,
 } from "../pi-extensions/claude-review/args.js";
 import {
+  cancelClaudeBackgroundJob,
   extractMarkedReview,
   readClaudeBackgroundLogs,
 } from "../pi-extensions/claude-review/claude-bg.js";
@@ -263,6 +264,29 @@ describe("claude review command", () => {
       expect.arrayContaining(["--bg", expect.stringContaining("/code-review low")]),
       expect.objectContaining({ cwd: "/repo" }),
     );
+  });
+
+  it("does not cancel completed background jobs", async () => {
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(jobDir);
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    const { pi } = createMockPi({
+      stdout: "stopped",
+      stderr: "",
+      code: 0,
+      killed: false,
+    });
+    const job = createBackgroundJob({
+      status: "review",
+      stdout: "finished review",
+      completedAt: "2026-01-01T00:05:00.000Z",
+      exitCode: 0,
+    });
+
+    const cancelled = await cancelClaudeBackgroundJob(pi as never, job, "fake-claude");
+
+    expect(cancelled).toEqual(job);
+    expect(pi.exec).not.toHaveBeenCalled();
   });
 
   it("keeps a failed background status when logs contain review markers", async () => {

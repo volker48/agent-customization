@@ -202,6 +202,10 @@ export async function cancelClaudeBackgroundJob(
   job: ClaudeReviewJob,
   claudeBinary: string,
 ): Promise<ClaudeReviewJob> {
+  if (isTerminalJobStatus(job.status)) {
+    return job;
+  }
+
   if (!job.claudeSessionId) {
     throw new Error("Claude session id is not known yet; run /claude-review-status and try again");
   }
