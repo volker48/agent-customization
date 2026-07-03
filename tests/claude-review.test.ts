@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -19,6 +19,7 @@ import {
   readClaudeBackgroundLogs,
   startClaudeBackgroundReview,
 } from "../pi-extensions/claude-review/claude-bg.js";
+import { readJob } from "../pi-extensions/claude-review/jobs.js";
 import type { ClaudeReviewJob } from "../pi-extensions/claude-review/jobs.js";
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
@@ -88,7 +89,7 @@ function createContext(): MockCommandContext {
 function createBackgroundJob(overrides: Partial<ClaudeReviewJob> = {}): ClaudeReviewJob {
   const now = new Date("2026-01-01T00:00:00.000Z").toISOString();
   return {
-    id: "claude-review-test",
+    id: "claude-review-20260101000000-abcdef12",
     backend: "claude-bg",
     cwd: "/repo",
     level: "medium",
@@ -96,7 +97,7 @@ function createBackgroundJob(overrides: Partial<ClaudeReviewJob> = {}): ClaudeRe
     autoFix: true,
     prompt: "/code-review medium",
     claudeSessionId: "session-123",
-    claudeSessionName: "pi-claude-review:claude-review-test",
+    claudeSessionName: "pi-claude-review:claude-review-20260101000000-abcdef12",
     status: "running",
     startedAt: now,
     updatedAt: now,
@@ -288,6 +289,37 @@ describe("claude review command", () => {
     expect(started.claudeSessionId).toBeUndefined();
     expect(started.errorMessage).toBe("Claude background session did not report a session id");
     expect(started.rawStartOutput).toBe("background session started");
+  });
+
+  it("rejects job ids that resolve outside the job store", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(rootDir);
+    const jobDir = join(rootDir, "jobs");
+    const outsideDir = join(rootDir, "outside");
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    await mkdir(outsideDir, { recursive: true });
+    await writeFile(
+      join(outsideDir, "fake.json"),
+      `${JSON.stringify(createBackgroundJob({ id: "claude-review-20260101000000-feedface" }))}\n`,
+      "utf8",
+    );
+
+    await expect(readJob("../outside/fake")).rejects.toThrow(/Invalid Claude review job id/);
+  });
+
+  it("rejects job files with mismatched embedded ids", async () => {
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(jobDir);
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    const requestedId = "claude-review-20260101000000-feedface";
+    await mkdir(jobDir, { recursive: true });
+    await writeFile(
+      join(jobDir, `${requestedId}.json`),
+      `${JSON.stringify(createBackgroundJob({ id: "claude-review-20260101000000-deadbeef" }))}\n`,
+      "utf8",
+    );
+
+    await expect(readJob(requestedId)).rejects.toThrow(/Claude review job id mismatch/);
   });
 
   it("does not cancel completed background jobs", async () => {

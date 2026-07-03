@@ -69,11 +69,18 @@ export function createJobId(now = new Date()): string {
   return `claude-review-${timestamp}-${randomBytes(4).toString("hex")}`;
 }
 
+function assertValidJobId(id: string): void {
+  if (!/^claude-review-\d{14}-[a-f0-9]{8}$/.test(id)) {
+    throw new Error(`Invalid Claude review job id: ${id}`);
+  }
+}
+
 export function createSessionName(jobId: string): string {
   return `${JOB_SESSION_NAME_PREFIX}${jobId}`;
 }
 
 function jobPath(id: string): string {
+  assertValidJobId(id);
   return join(jobStoreDir(), `${id}.json`);
 }
 
@@ -109,7 +116,12 @@ export async function createJob(input: CreateClaudeReviewJobInput): Promise<Clau
 
 export async function readJob(id: string): Promise<ClaudeReviewJob> {
   const content = await readFile(jobPath(id), "utf8");
-  return JSON.parse(content) as ClaudeReviewJob;
+  const job = JSON.parse(content) as ClaudeReviewJob;
+  assertValidJobId(job.id);
+  if (job.id !== id) {
+    throw new Error(`Claude review job id mismatch: expected ${id}, got ${job.id}`);
+  }
+  return job;
 }
 
 export async function writeJob(job: ClaudeReviewJob): Promise<ClaudeReviewJob> {
@@ -131,6 +143,10 @@ export async function listJobs(options: { cwd?: string } = {}): Promise<ClaudeRe
     try {
       const content = await readFile(join(jobStoreDir(), file), "utf8");
       const job = JSON.parse(content) as ClaudeReviewJob;
+      assertValidJobId(job.id);
+      if (file !== `${job.id}.json`) {
+        continue;
+      }
       if (!options.cwd || job.cwd === options.cwd) {
         jobs.push(job);
       }
