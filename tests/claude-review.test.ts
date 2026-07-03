@@ -339,6 +339,29 @@ describe("claude review command", () => {
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
   });
 
+  it("marks running background jobs as reviewed when logs contain review markers", async () => {
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(jobDir);
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    const markedReview = `${CLAUDE_REVIEW_RESULT_START}\nfinal review\n${CLAUDE_REVIEW_RESULT_END}`;
+    const { pi } = createMockPi({
+      stdout: markedReview,
+      stderr: "",
+      code: 0,
+      killed: false,
+    });
+    const job = createBackgroundJob({
+      status: "running",
+      completedAt: null,
+    });
+
+    const withLogs = await readClaudeBackgroundLogs(pi as never, job, "fake-claude");
+
+    expect(withLogs.status).toBe("review");
+    expect(withLogs.stdout).toBe("final review");
+    expect(withLogs.completedAt).toEqual(expect.any(String));
+  });
+
   it("ignores echoed prompt result markers when extracting review output", () => {
     const promptedPlaceholder = `${CLAUDE_REVIEW_RESULT_START}
 <your concise, actionable review or no-findings summary>

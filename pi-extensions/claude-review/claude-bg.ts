@@ -192,7 +192,12 @@ export async function readClaudeBackgroundLogs(
   });
 
   const markedReview = extractMarkedReview(result.stdout);
-  const status = result.code !== 0 ? "failed" : job.status;
+  let status = job.status;
+  if (result.code !== 0) {
+    status = "failed";
+  } else if (markedReview && !isTerminalJobStatus(job.status)) {
+    status = "review";
+  }
 
   return writeJob({
     ...job,
