@@ -5,7 +5,9 @@ import { startRemoteDaemon } from "./daemon.js";
 
 const daemon = await startRemoteDaemon({
   remoteRoot: process.env.PI_REMOTE_ROOT ?? defaultRemoteRoot(),
-  pairingCode: process.env.PI_REMOTE_PAIRING_CODE ?? createPairingCode(),
+  ...(process.env.PI_REMOTE_PAIRING_CODE
+    ? { pairingCode: process.env.PI_REMOTE_PAIRING_CODE }
+    : { createPairingCode }),
 });
 
 process.once("SIGTERM", () => {

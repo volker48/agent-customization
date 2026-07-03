@@ -25,13 +25,15 @@ export type AuthorizationRequest = {
   nodeId: string;
   envelope: Envelope;
   allowlist: NodeAllowlist;
-  pairingCode?: string;
+  pairingWindow?: PairingWindow;
 };
 
 const PAIRING_CODE_MODULUS = 1_000_000;
 const PAIRING_CODE_SAMPLE_SPACE = 0x1_00_00_00;
 const PAIRING_CODE_UNBIASED_LIMIT =
   Math.floor(PAIRING_CODE_SAMPLE_SPACE / PAIRING_CODE_MODULUS) * PAIRING_CODE_MODULUS;
+export const DEFAULT_PAIRING_WINDOW_MS = 5 * 60 * 1000;
+
 const ALLOWLIST_FILE = "allowed-node-ids.json";
 const require = createRequire(import.meta.url);
 
@@ -53,6 +55,45 @@ export function verifyPairingCode(expected: string, received: string): boolean {
   const left = Buffer.from(normalizePairingCode(expected));
   const right = Buffer.from(normalizePairingCode(received));
   return left.length === right.length && timingSafeEqual(left, right);
+}
+
+export class PairingWindow {
+  #code: string | undefined;
+  #expiresAt = 0;
+
+  constructor(
+    readonly createCode: () => string = createPairingCode,
+    readonly now: () => number = Date.now,
+    readonly ttlMs: number = DEFAULT_PAIRING_WINDOW_MS,
+  ) {}
+
+  arm(): string {
+    this.#code = this.createCode();
+    this.#expiresAt = this.now() + this.ttlMs;
+    return this.#code;
+  }
+
+  verify(receivedCode: string): boolean {
+    const code = this.currentCode();
+    if (!code || !verifyPairingCode(code, receivedCode)) {
+      return false;
+    }
+    this.close();
+    return true;
+  }
+
+  currentCode(): string | undefined {
+    if (this.#code && this.now() <= this.#expiresAt) {
+      return this.#code;
+    }
+    this.close();
+    return undefined;
+  }
+
+  close(): void {
+    this.#code = undefined;
+    this.#expiresAt = 0;
+  }
 }
 
 export class FileNodeAllowlist implements NodeAllowlist {
@@ -126,11 +167,8 @@ export async function authorizeRemoteEnvelope(
   }
 
   if (isPairingEnvelope(request.envelope)) {
-    if (
-      !request.pairingCode ||
-      !verifyPairingCode(request.pairingCode, request.envelope.payload.code)
-    ) {
-      return { accepted: false, reason: "invalid pairing code" };
+    if (!request.pairingWindow?.verify(request.envelope.payload.code)) {
+      return { accepted: false, reason: "invalid or expired pairing code" };
     }
 
     await request.allowlist.add(request.nodeId);

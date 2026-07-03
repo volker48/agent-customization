@@ -84,9 +84,10 @@ Phone ──iroh QUIC (ALPN pi/remote/1)── Remote daemon ──unix socket�
 
 - **Authorization: node-id allowlist after coded pairing (ADR-0003).** iroh secures
   transport and verifies the peer's node id cryptographically but provides no
-  authorization. Pairing code guards the pairing window; the allowlist
-  (`~/.pi/agent/remote/`) authorizes thereafter. Remote prompts execute tools
-  unattended by design.
+  authorization. Requesting pairing info arms a fresh five-minute pairing window;
+  a successful code consumes the window, and a failed pairing attempt ends that
+  connection. The allowlist (`~/.pi/agent/remote/`) authorizes thereafter. Remote
+  prompts execute tools unattended by design.
 
 - **Transport: one iroh connection per phone, single multiplexed stream, JSON
   envelope.** Every frame is `{ sessionId, type, payload }`; `sessionId: null` is the
@@ -167,10 +168,10 @@ Phone ──iroh QUIC (ALPN pi/remote/1)── Remote daemon ──unix socket�
 ```
 First device (pairing):
   /remote               → extension ensures daemon up, registers session
-  daemon                → prints QR(ticket) + pairing code in terminal
+  daemon                → arms 5-minute window; prints QR(ticket) + fresh code
   phone                 → scans ticket, connects (ALPN pi/remote/1)
   phone  → daemon       → control: pair { code, nodeId }
-  daemon                → verify code; persist nodeId to allowlist; ack
+  daemon                → verify code; close window; persist nodeId to allowlist; ack
 Paired device (normal):
   phone  → daemon       → connect; daemon authorizes by nodeId (no code)
   phone  → daemon       → control: list

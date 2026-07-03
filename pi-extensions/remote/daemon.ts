@@ -6,16 +6,13 @@ import { dirname, join } from "node:path";
 import {
   CachedNodeAllowlist,
   FileNodeAllowlist,
+  PairingWindow,
   authorizeRemoteEnvelope,
+  createPairingCode,
   defaultRemoteRoot,
   type NodeAllowlist,
 } from "./authorization.js";
-import {
-  startIpcDaemonServer,
-  type IpcDaemonServer,
-  type IpcEnvelope,
-  type PairingInfo,
-} from "./ipc.js";
+import { startIpcDaemonServer, type IpcDaemonServer, type IpcEnvelope } from "./ipc.js";
 import {
   acceptConnection,
   acceptStream,
@@ -52,7 +49,8 @@ export type RemoteDaemon = {
 
 export type RemoteDaemonOptions = {
   remoteRoot?: string;
-  pairingCode: string;
+  pairingCode?: string;
+  createPairingCode?: () => string;
   socketPath?: string;
 };
 
@@ -64,15 +62,15 @@ export async function startRemoteDaemon(options: RemoteDaemonOptions): Promise<R
   const allowlist = new FileNodeAllowlist(remoteRoot);
   const endpoint = await bindEndpoint(await loadSecretKey(remoteRoot));
   const ticket = endpointTicket(endpoint);
-  const pairingInfo: PairingInfo = { ticket, code: options.pairingCode };
+  const pairingWindow = new PairingWindow(pairingCodeFactory(options));
   let daemon: RemoteDaemon;
   const ipc = await startIpcDaemonServer(socketPath, {
     onStop: () => daemon.close(),
-    getPairingInfo: () => pairingInfo,
+    getPairingInfo: () => ({ ticket, code: pairingWindow.arm() }),
   });
   await chmod(socketPath, OWNER_ONLY_FILE_MODE);
   let closed = false;
-  void acceptConnections(endpoint, ipc, allowlist, options.pairingCode, () => closed);
+  void acceptConnections(endpoint, ipc, allowlist, pairingWindow, () => closed);
 
   daemon = {
     endpoint,
@@ -94,13 +92,13 @@ async function acceptConnections(
   endpoint: RemoteEndpoint,
   ipc: IpcDaemonServer,
   allowlist: FileNodeAllowlist,
-  pairingCode: string,
+  pairingWindow: PairingWindow,
   isClosed: () => boolean,
 ): Promise<void> {
   while (!isClosed()) {
     try {
       const connection = await acceptConnection(endpoint);
-      void handleConnection(connection, ipc, allowlist, pairingCode).catch(() => undefined);
+      void handleConnection(connection, ipc, allowlist, pairingWindow).catch(() => undefined);
     } catch {
       if (isClosed()) return;
     }
@@ -111,7 +109,7 @@ async function handleConnection(
   connection: Awaited<ReturnType<typeof acceptConnection>>,
   ipc: IpcDaemonServer,
   allowlist: FileNodeAllowlist,
-  pairingCode: string,
+  pairingWindow: PairingWindow,
 ): Promise<void> {
   const stream = await acceptStream(connection);
   const writer = new StreamWriter(stream);
@@ -133,10 +131,11 @@ async function handleConnection(
         envelope,
         ipc,
         allowlist: connectionAllowlist,
-        pairingCode,
+        pairingWindow,
         nodeId: connection.remoteId().toString(),
       });
       if (response) await writer.send(response);
+      if (!response && isPairingEnvelope(envelope)) break;
       if (streamingAttachSessionId) {
         if (response) {
           keepOpen = true;
@@ -166,7 +165,7 @@ type RemoteEnvelopeContext = {
   envelope: Envelope;
   ipc: IpcDaemonServer;
   allowlist: NodeAllowlist;
-  pairingCode: string;
+  pairingWindow: PairingWindow;
   nodeId: string;
 };
 
@@ -180,7 +179,7 @@ async function handleRemoteEnvelope(context: RemoteEnvelopeContext): Promise<Env
     nodeId: context.nodeId,
     envelope: context.envelope,
     allowlist: context.allowlist,
-    pairingCode: context.pairingCode,
+    pairingWindow: context.pairingWindow,
   });
   if (!authorization.accepted) {
     return null;
@@ -257,6 +256,17 @@ function listSessions(ipc: IpcDaemonServer): { sessionId: string; name: string; 
   }));
 }
 
+function pairingCodeFactory(options: RemoteDaemonOptions): () => string {
+  if (options.createPairingCode) {
+    return options.createPairingCode;
+  }
+  if (options.pairingCode) {
+    const pairingCode = options.pairingCode;
+    return () => pairingCode;
+  }
+  return createPairingCode;
+}
+
 function sessionIdFromPayload(payload: unknown): string | null {
   return typeof payload === "object" &&
     payload !== null &&
@@ -328,6 +338,10 @@ function isStreamingAttach(envelope: Envelope): boolean {
     "stream" in envelope.payload &&
     envelope.payload.stream === true
   );
+}
+
+function isPairingEnvelope(envelope: Envelope): boolean {
+  return envelope.sessionId === null && envelope.type === "pair";
 }
 
 function endedSessionIdFrom(frame: IpcEnvelope): string | null {

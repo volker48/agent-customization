@@ -45,31 +45,30 @@ describe("remote daemon entry pairing code default", () => {
     }
   });
 
-  it("defaults to a freshly generated, non-constant pairing code", async () => {
+  it("passes the generated-code factory without creating an always-valid code", async () => {
     delete process.env.PI_REMOTE_PAIRING_CODE;
 
     const { createPairingCode, startRemoteDaemon } = await importDaemonEntry();
 
-    expect(createPairingCode).toHaveBeenCalledTimes(1);
+    expect(createPairingCode).not.toHaveBeenCalled();
     expect(startRemoteDaemon).toHaveBeenCalledTimes(1);
-    expect(startRemoteDaemon).toHaveBeenCalledWith(
-      expect.objectContaining({ pairingCode: "123-456" }),
-    );
+    const options = startRemoteDaemon.mock.calls[0]?.[0];
+    expect(options).toMatchObject({ remoteRoot: expect.any(String) });
+    expect(options.createPairingCode()).toBe("123-456");
+    expect(createPairingCode).toHaveBeenCalledTimes(1);
   });
 
-  it("requests a fresh generated code on each run", async () => {
+  it("requests a fresh generated code whenever the daemon arms pairing", async () => {
     delete process.env.PI_REMOTE_PAIRING_CODE;
 
     const first = await importDaemonEntry("111-111");
     vi.resetModules();
     const second = await importDaemonEntry("222-222");
 
-    expect(first.startRemoteDaemon).toHaveBeenCalledWith(
-      expect.objectContaining({ pairingCode: "111-111" }),
-    );
-    expect(second.startRemoteDaemon).toHaveBeenCalledWith(
-      expect.objectContaining({ pairingCode: "222-222" }),
-    );
+    const firstOptions = first.startRemoteDaemon.mock.calls[0]?.[0];
+    const secondOptions = second.startRemoteDaemon.mock.calls[0]?.[0];
+    expect(firstOptions.createPairingCode()).toBe("111-111");
+    expect(secondOptions.createPairingCode()).toBe("222-222");
   });
 
   it("honors an explicit PI_REMOTE_PAIRING_CODE override", async () => {

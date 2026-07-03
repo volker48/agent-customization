@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   CachedNodeAllowlist,
   FileNodeAllowlist,
+  PairingWindow,
   authorizeRemoteEnvelope,
   createPairingCode,
   defaultRemoteRoot,
@@ -58,7 +59,6 @@ describe("remote authorization", () => {
         nodeId: "node-a",
         envelope,
         allowlist,
-        pairingCode: "123-456",
       }),
     ).resolves.toEqual({ accepted: false, reason: "node is not paired" });
   });
@@ -77,9 +77,9 @@ describe("remote authorization", () => {
         nodeId: "node-a",
         envelope,
         allowlist,
-        pairingCode: "123-456",
+        pairingWindow: armedPairingWindow("123-456"),
       }),
-    ).resolves.toEqual({ accepted: false, reason: "invalid pairing code" });
+    ).resolves.toEqual({ accepted: false, reason: "invalid or expired pairing code" });
     await expect(allowlist.has("node-a")).resolves.toBe(false);
   });
 
@@ -97,7 +97,7 @@ describe("remote authorization", () => {
         nodeId: "node-a",
         envelope,
         allowlist,
-        pairingCode: "123-456",
+        pairingWindow: armedPairingWindow("123-456"),
       }),
     ).resolves.toEqual({ accepted: true, mode: "pairing" });
     await expect(allowlist.has("node-a")).resolves.toBe(true);
@@ -112,6 +112,33 @@ describe("remote authorization", () => {
     await expect(
       authorizeRemoteEnvelope({ nodeId: "node-a", envelope, allowlist }),
     ).resolves.toEqual({ accepted: true, mode: "paired" });
+  });
+
+  it("only accepts pairing codes while the pairing window is open", () => {
+    let now = 1000;
+    const window = new PairingWindow(
+      () => "123-456",
+      () => now,
+      100,
+    );
+
+    expect(window.verify("123-456")).toBe(false);
+    expect(window.arm()).toBe("123-456");
+    expect(window.verify("123-456")).toBe(true);
+
+    window.arm();
+    now = 1101;
+    expect(window.verify("123-456")).toBe(false);
+  });
+
+  it("rotates the pairing code whenever the pairing window is armed", () => {
+    const codes = ["111-111", "222-222"];
+    const window = new PairingWindow(() => codes.shift() ?? "333-333");
+
+    expect(window.arm()).toBe("111-111");
+    expect(window.arm()).toBe("222-222");
+    expect(window.verify("111-111")).toBe(false);
+    expect(window.verify("222-222")).toBe(true);
   });
 
   it("renders the endpoint ticket with generated QR output and a pairing code", () => {
@@ -141,6 +168,12 @@ describe("remote authorization", () => {
     expect(defaultRemoteRoot()).toMatch(/\.pi\/agent\/remote$/u);
   });
 });
+
+function armedPairingWindow(code: string): PairingWindow {
+  const window = new PairingWindow(() => code);
+  window.arm();
+  return window;
+}
 
 describe("CachedNodeAllowlist", () => {
   function countingAllowlist(present: Set<string>): NodeAllowlist & { reads: number } {

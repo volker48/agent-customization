@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { EndpointTicket } from "@number0/iroh/index.js";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { connectIpcExtension } from "../pi-extensions/remote/ipc.js";
+import { connectIpcExtension, type PairingInfo } from "../pi-extensions/remote/ipc.js";
 import { startRemoteDaemon } from "../pi-extensions/remote/daemon.js";
 import type { Envelope } from "../pi-extensions/remote/protocol.js";
 import {
@@ -45,6 +45,7 @@ describe("remote daemon", () => {
 
     try {
       await daemon.ipc.waitForSession("session-1");
+      await armPairing(daemon.socketPath);
 
       const responses = await exchange(client, daemon.ticket, [
         { sessionId: null, type: "pair", payload: { code: "123-456" } },
@@ -78,6 +79,37 @@ describe("remote daemon", () => {
     } finally {
       await closeEndpoint(client);
       await extension.close();
+      await daemon.close();
+    }
+  }, 30_000);
+
+  it("rejects pairing unless the window is armed and limits attempts per connection", async () => {
+    const root = await tempRoot();
+    const daemon = await startRemoteDaemon({ remoteRoot: root, pairingCode: "123-456" });
+    const client = await bindEndpoint();
+
+    try {
+      await expect(
+        exchange(client, daemon.ticket, [
+          { sessionId: null, type: "pair", payload: { code: "123-456" } },
+        ]),
+      ).resolves.toEqual([]);
+
+      await armPairing(daemon.socketPath);
+      await expect(
+        exchange(client, daemon.ticket, [
+          { sessionId: null, type: "pair", payload: { code: "000-000" } },
+          { sessionId: null, type: "pair", payload: { code: "123-456" } },
+        ]),
+      ).resolves.toEqual([]);
+
+      await expect(
+        exchange(client, daemon.ticket, [
+          { sessionId: null, type: "pair", payload: { code: "123-456" } },
+        ]),
+      ).resolves.toEqual([{ sessionId: null, type: "pair", payload: { paired: true } }]);
+    } finally {
+      await closeEndpoint(client);
       await daemon.close();
     }
   }, 30_000);
@@ -178,6 +210,7 @@ describe("remote daemon", () => {
 
     try {
       await daemon.ipc.waitForSession("session-1");
+      await armPairing(daemon.socketPath);
 
       const responses = await exchange(client, daemon.ticket, [
         { sessionId: null, type: "pair", payload: { code: "123-456" } },
@@ -208,6 +241,7 @@ describe("remote daemon", () => {
 
     try {
       await dialWrongAlpn(badClient, daemon.ticket);
+      await armPairing(daemon.socketPath);
 
       await expect(
         exchange(goodClient, daemon.ticket, [
@@ -237,6 +271,7 @@ describe("remote daemon", () => {
 
     try {
       await daemon.ipc.waitForSession("session-1");
+      await armPairing(daemon.socketPath);
       const responses = exchange(client, daemon.ticket, [
         { sessionId: null, type: "pair", payload: { code: "123-456" } },
         { sessionId: null, type: "attach", payload: { sessionId: "session-1", stream: true } },
@@ -267,6 +302,7 @@ describe("remote daemon", () => {
     const client = await bindEndpoint();
 
     try {
+      await armPairing(daemon.socketPath);
       const responses = await exchange(client, daemon.ticket, [
         { sessionId: null, type: "pair", payload: { code: "123-456" } },
         { sessionId: null, type: "attach", payload: { sessionId: "missing" } },
@@ -297,6 +333,7 @@ describe("remote daemon", () => {
       await daemon.ipc.waitForSession("session-1");
       await extension.send({ sessionId: "session-1", type: "session_shutdown", payload: {} });
       await daemon.ipc.waitForSessionEnd("session-1");
+      await armPairing(daemon.socketPath);
       await exchange(client, daemon.ticket, [
         { sessionId: null, type: "pair", payload: { code: "123-456" } },
       ]);
@@ -342,6 +379,7 @@ describe("remote daemon", () => {
     const client = await bindEndpoint();
 
     try {
+      await armPairing(daemon.socketPath);
       await exchange(client, daemon.ticket, [
         { sessionId: null, type: "pair", payload: { code: "123-456" } },
       ]);
@@ -366,6 +404,7 @@ describe("remote daemon", () => {
 
     try {
       await daemon.ipc.waitForSession("session-1");
+      await armPairing(daemon.socketPath);
       await exchange(client, daemon.ticket, [
         { sessionId: null, type: "pair", payload: { code: "123-456" } },
       ]);
@@ -384,6 +423,48 @@ describe("remote daemon", () => {
     }
   }, 30_000);
 });
+
+async function armPairing(socketPath: string): Promise<PairingInfo> {
+  const socket = await connectSocket(socketPath);
+  try {
+    socket.write(`${JSON.stringify({ sessionId: null, type: "pairing_info", payload: {} })}\n`);
+    return await readPairingInfo(socket);
+  } finally {
+    socket.destroy();
+  }
+}
+
+function readPairingInfo(socket: Socket): Promise<PairingInfo> {
+  return new Promise((resolve, reject) => {
+    let buffered = "";
+    const timeout = setTimeout(() => reject(new Error("timed out reading pairing info")), 2000);
+    socket.on("data", (chunk) => {
+      buffered += chunk.toString("utf8");
+      const newline = buffered.indexOf("\n");
+      if (newline === -1) return;
+      clearTimeout(timeout);
+      resolve(pairingInfoFromLine(buffered.slice(0, newline)));
+    });
+    socket.once("error", reject);
+  });
+}
+
+function pairingInfoFromLine(line: string): PairingInfo {
+  const envelope = JSON.parse(line) as { payload: unknown };
+  if (isPairingInfo(envelope.payload)) return envelope.payload;
+  throw new Error(`daemon returned invalid pairing info: ${line}`);
+}
+
+function isPairingInfo(payload: unknown): payload is PairingInfo {
+  return (
+    typeof payload === "object" &&
+    payload !== null &&
+    "ticket" in payload &&
+    "code" in payload &&
+    typeof payload.ticket === "string" &&
+    typeof payload.code === "string"
+  );
+}
 
 async function exchange(
   client: Awaited<ReturnType<typeof bindEndpoint>>,
