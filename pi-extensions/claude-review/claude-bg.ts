@@ -187,7 +187,7 @@ export async function readClaudeBackgroundLogs(
     stdout: markedReview ?? result.stdout,
     stderr: result.stderr,
     lastLog: result.stdout,
-    exitCode: result.code,
+    exitCode: job.exitCode,
     completedAt:
       status === "review" && !job.completedAt ? new Date().toISOString() : job.completedAt,
     errorMessage:

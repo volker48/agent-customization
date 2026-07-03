@@ -285,6 +285,7 @@ describe("claude review command", () => {
     const withLogs = await readClaudeBackgroundLogs(pi as never, job, "fake-claude");
 
     expect(withLogs.status).toBe("failed");
+    expect(withLogs.exitCode).toBe(1);
     expect(withLogs.stdout).toBe("partial review");
     expect(withLogs.errorMessage).toBe("Claude background session failed");
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
