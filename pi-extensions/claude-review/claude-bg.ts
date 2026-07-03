@@ -15,7 +15,11 @@ interface ClaudeAgentRecord {
   [key: string]: unknown;
 }
 
-export function claudeBackgroundArgs(prompt: string, sessionName: string, reviewTools: string): string[] {
+export function claudeBackgroundArgs(
+  prompt: string,
+  sessionName: string,
+  reviewTools: string,
+): string[] {
   return [
     "--bg",
     "--name",
@@ -50,11 +54,15 @@ export async function startClaudeBackgroundReview(
   signal?: AbortSignal,
 ): Promise<ClaudeReviewJob> {
   let next = await writeJob({ ...job, status: "starting", errorMessage: null });
-  const result = await pi.exec(claudeBinary, claudeBackgroundArgs(next.prompt, next.claudeSessionName, reviewTools), {
-    cwd: next.cwd,
-    signal,
-    timeout: BACKGROUND_START_TIMEOUT_MS,
-  });
+  const result = await pi.exec(
+    claudeBinary,
+    claudeBackgroundArgs(next.prompt, next.claudeSessionName, reviewTools),
+    {
+      cwd: next.cwd,
+      signal,
+      timeout: BACKGROUND_START_TIMEOUT_MS,
+    },
+  );
 
   const rawStartOutput = joinOutput(result);
   const claudeSessionId = parseBackgroundSessionId(rawStartOutput);
@@ -133,7 +141,14 @@ export async function refreshClaudeBackgroundJob(
   const status = normalizeAgentStatus(agent, job.status);
   const exitCode = pickNumber(agent, ["exitCode", "exit_code", "code"]);
   const completedAt = isTerminalJobStatus(status)
-    ? (pickString(agent, ["completedAt", "completed_at", "endedAt", "ended_at", "stoppedAt", "stopped_at"]) ??
+    ? (pickString(agent, [
+        "completedAt",
+        "completed_at",
+        "endedAt",
+        "ended_at",
+        "stoppedAt",
+        "stopped_at",
+      ]) ??
       job.completedAt ??
       new Date().toISOString())
     : job.completedAt;
@@ -164,7 +179,7 @@ export async function readClaudeBackgroundLogs(
   });
 
   const markedReview = extractMarkedReview(result.stdout);
-  const status = result.code !== 0 ? "failed" : markedReview ? "review" : job.status;
+  const status = result.code !== 0 ? "failed" : job.status;
 
   return writeJob({
     ...job,
@@ -173,8 +188,12 @@ export async function readClaudeBackgroundLogs(
     stderr: result.stderr,
     lastLog: result.stdout,
     exitCode: result.code,
-    completedAt: status === "review" && !job.completedAt ? new Date().toISOString() : job.completedAt,
-    errorMessage: result.code !== 0 ? `Failed to read Claude logs with exit code ${result.code}` : job.errorMessage,
+    completedAt:
+      status === "review" && !job.completedAt ? new Date().toISOString() : job.completedAt,
+    errorMessage:
+      result.code !== 0
+        ? `Failed to read Claude logs with exit code ${result.code}`
+        : job.errorMessage,
   });
 }
 
@@ -199,7 +218,10 @@ export async function cancelClaudeBackgroundJob(
     stderr: result.stderr || job.stderr,
     exitCode: result.code,
     completedAt: new Date().toISOString(),
-    errorMessage: result.code === 0 ? null : `Failed to stop Claude background session with exit code ${result.code}`,
+    errorMessage:
+      result.code === 0
+        ? null
+        : `Failed to stop Claude background session with exit code ${result.code}`,
   });
 }
 
@@ -208,7 +230,10 @@ function joinOutput(result: ExecResult): string {
 }
 
 export function parseBackgroundSessionId(output: string): string | undefined {
-  const lines = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const lines = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
   const commandPrefixes = ["claude attach ", "claude logs ", "claude stop "];
 
   for (const line of lines) {
@@ -242,7 +267,9 @@ function parseAgentsJson(output: string): ClaudeAgentRecord[] {
     return [];
   }
 
-  const parsed = parseJson(trimmed) ?? parseJson(trimmed.slice(trimmed.indexOf("["), trimmed.lastIndexOf("]") + 1));
+  const parsed =
+    parseJson(trimmed) ??
+    parseJson(trimmed.slice(trimmed.indexOf("["), trimmed.lastIndexOf("]") + 1));
   if (Array.isArray(parsed)) {
     return parsed.filter(isRecord);
   }
@@ -264,7 +291,10 @@ function isRecord(value: unknown): value is ClaudeAgentRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function findMatchingAgent(job: ClaudeReviewJob, agents: ClaudeAgentRecord[]): ClaudeAgentRecord | undefined {
+function findMatchingAgent(
+  job: ClaudeReviewJob,
+  agents: ClaudeAgentRecord[],
+): ClaudeAgentRecord | undefined {
   return agents.find((agent) => {
     const id = pickAgentId(agent);
     if (id && job.claudeSessionId && id === job.claudeSessionId) {
@@ -284,20 +314,30 @@ function pickAgentId(agent: ClaudeAgentRecord): string | undefined {
   return pickString(agent, ["id", "sessionId", "session_id", "session"]);
 }
 
-function normalizeAgentStatus(agent: ClaudeAgentRecord, fallback: ClaudeReviewJobStatus): ClaudeReviewJobStatus {
+function normalizeAgentStatus(
+  agent: ClaudeAgentRecord,
+  fallback: ClaudeReviewJobStatus,
+): ClaudeReviewJobStatus {
   const exitCode = pickNumber(agent, ["exitCode", "exit_code", "code"]);
   if (exitCode !== undefined && exitCode !== 0) {
     return "failed";
   }
 
-  const raw = String(pickString(agent, ["state", "status", "lifecycle", "phase"]) ?? "").toLowerCase();
+  const raw = String(
+    pickString(agent, ["state", "status", "lifecycle", "phase"]) ?? "",
+  ).toLowerCase();
   if (!raw) {
     return fallback === "queued" || fallback === "starting" ? "running" : fallback;
   }
   if (raw.includes("fail") || raw.includes("error")) {
     return "failed";
   }
-  if (raw.includes("cancel") || raw.includes("killed") || raw.includes("stopped") || raw.includes("stop")) {
+  if (
+    raw.includes("cancel") ||
+    raw.includes("killed") ||
+    raw.includes("stopped") ||
+    raw.includes("stop")
+  ) {
     return "cancelled";
   }
   if (raw.includes("blocked") || raw.includes("waiting") || raw.includes("needs input")) {
@@ -318,7 +358,12 @@ function normalizeAgentStatus(agent: ClaudeAgentRecord, fallback: ClaudeReviewJo
   if (raw.includes("start")) {
     return "starting";
   }
-  if (raw.includes("run") || raw.includes("active") || raw.includes("progress") || raw.includes("work")) {
+  if (
+    raw.includes("run") ||
+    raw.includes("active") ||
+    raw.includes("progress") ||
+    raw.includes("work")
+  ) {
     return "running";
   }
   return fallback === "queued" || fallback === "starting" ? "running" : fallback;

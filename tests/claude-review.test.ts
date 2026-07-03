@@ -9,6 +9,12 @@ import claudeReviewExtension, {
   claudeArgs,
   parseClaudeReviewArgs,
 } from "../pi-extensions/claude-review/index.js";
+import {
+  CLAUDE_REVIEW_RESULT_END,
+  CLAUDE_REVIEW_RESULT_START,
+} from "../pi-extensions/claude-review/args.js";
+import { readClaudeBackgroundLogs } from "../pi-extensions/claude-review/claude-bg.js";
+import type { ClaudeReviewJob } from "../pi-extensions/claude-review/jobs.js";
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
   BorderedLoader: class {
@@ -71,6 +77,31 @@ function createContext(): MockCommandContext {
       setStatus: vi.fn(),
       setWidget: vi.fn(),
     },
+  };
+}
+
+function createBackgroundJob(overrides: Partial<ClaudeReviewJob> = {}): ClaudeReviewJob {
+  const now = new Date("2026-01-01T00:00:00.000Z").toISOString();
+  return {
+    id: "claude-review-test",
+    backend: "claude-bg",
+    cwd: "/repo",
+    level: "medium",
+    contextMessage: "",
+    autoFix: true,
+    prompt: "/code-review medium",
+    claudeSessionId: "session-123",
+    claudeSessionName: "pi-claude-review:claude-review-test",
+    status: "running",
+    startedAt: now,
+    updatedAt: now,
+    completedAt: null,
+    exitCode: null,
+    stdout: "",
+    stderr: "",
+    lastLog: "",
+    errorMessage: null,
+    ...overrides,
   };
 }
 
@@ -229,5 +260,30 @@ describe("claude review command", () => {
       expect.arrayContaining(["--bg", expect.stringContaining("/code-review low")]),
       expect.objectContaining({ cwd: "/repo" }),
     );
+  });
+
+  it("keeps a failed background status when logs contain review markers", async () => {
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(jobDir);
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    const markedReview = `${CLAUDE_REVIEW_RESULT_START}\npartial review\n${CLAUDE_REVIEW_RESULT_END}`;
+    const { pi } = createMockPi({
+      stdout: markedReview,
+      stderr: "",
+      code: 0,
+      killed: false,
+    });
+    const job = createBackgroundJob({
+      status: "failed",
+      exitCode: 1,
+      errorMessage: "Claude background session failed",
+    });
+
+    const withLogs = await readClaudeBackgroundLogs(pi as never, job, "fake-claude");
+
+    expect(withLogs.status).toBe("failed");
+    expect(withLogs.stdout).toBe("partial review");
+    expect(withLogs.errorMessage).toBe("Claude background session failed");
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
   });
 });
