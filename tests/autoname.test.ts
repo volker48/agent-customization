@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { complete } from "@earendil-works/pi-ai/compat";
 import autonameExtension, {
   buildAutonameTranscript,
+  DEFAULT_AUTONAME_FALLBACK_MODEL,
   sanitizeSessionName,
 } from "../pi-extensions/autoname.js";
 
@@ -181,12 +182,13 @@ describe("autoname extension", () => {
   });
 
   it("uses the fallback model when the primary model is unavailable", async () => {
+    const [fallbackProvider, fallbackModelId] = DEFAULT_AUTONAME_FALLBACK_MODEL.split("/");
     vi.mocked(complete).mockResolvedValue(textResponse("Pi Autoname Command") as never);
     const { pi, getCommand, getSessionName } = createMockPi();
     const context = createContext({
       modelRegistry: {
         find: vi.fn((provider: string, modelId: string) => {
-          if (provider === "openai" && modelId === "gpt-5-mini") {
+          if (provider === fallbackProvider && modelId === fallbackModelId) {
             return { provider, id: modelId };
           }
           return undefined;
@@ -199,7 +201,7 @@ describe("autoname extension", () => {
     await getCommand().handler("", context);
 
     expect(complete).toHaveBeenCalledTimes(1);
-    expect(context.modelRegistry.find).toHaveBeenCalledWith("openai", "gpt-5-mini");
+    expect(context.modelRegistry.find).toHaveBeenCalledWith(fallbackProvider, fallbackModelId);
     expect(getSessionName()).toBe("Pi Autoname Command");
   });
 
