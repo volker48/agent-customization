@@ -1,0 +1,9 @@
+{
+  "name": "pi",
+  "displayName": "Pi Companion",
+  "version": "0.1.0",
+  "description": "Delegate Claude Code implementation work to Pi Coding Agent.",
+  "author": {
+    "name": "Marcus McCurdy"
+  }
+}
