@@ -14,6 +14,7 @@
     "format:check": "oxfmt --check pi-extensions opencode-plugins package.json tsconfig.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:unit": "vitest run --config vitest.unit.config.mjs",
     "baseline:webfetch": "WEBFETCH_BASELINE=1 vitest run tests/webfetch.baseline.test.ts --reporter=verbose",
     "test:rtk": "vitest run tests/rtk.test.ts",
     "test:rtk:e2e": "RTK_E2E=1 vitest run tests/rtk.e2e.test.ts",
