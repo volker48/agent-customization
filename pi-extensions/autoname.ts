@@ -9,7 +9,7 @@ import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 
 export const DEFAULT_AUTONAME_MODEL = "anthropic/claude-haiku-4-5";
-export const DEFAULT_AUTONAME_FALLBACK_MODEL = "openai/gpt-5-mini";
+export const DEFAULT_AUTONAME_FALLBACK_MODEL = "openai-codex/gpt-5.5";
 export const MAX_NAME_LENGTH = 60;
 const MAX_TRANSCRIPT_LENGTH = 30_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 80;
