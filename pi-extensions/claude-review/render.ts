@@ -94,8 +94,12 @@ export function renderClaudeReviewMarkdown(details: ClaudeReviewDetails): string
       "",
       "## Next steps",
       "",
-      details.jobId ? `- Check status: \`/claude-review-status ${details.jobId}\`` : "- Check status with `/claude-review-status`.",
-      details.jobId ? `- Fetch result: \`/claude-review-result ${details.jobId}\`` : "- Fetch the result with `/claude-review-result`.",
+      details.jobId
+        ? `- Check status: \`/claude-review-status ${details.jobId}\``
+        : "- Check status with `/claude-review-status`.",
+      details.jobId
+        ? `- Fetch result: \`/claude-review-result ${details.jobId}\``
+        : "- Fetch the result with `/claude-review-result`.",
     );
     if (details.claudeSessionId) {
       lines.push(`- Inspect or unblock manually: \`claude attach ${details.claudeSessionId}\``);
@@ -120,7 +124,10 @@ export function toClaudeReviewMessage(details: ClaudeReviewDetails) {
   };
 }
 
-export function jobToClaudeReviewDetails(job: ClaudeReviewJob, output = job.stdout): ClaudeReviewDetails {
+export function jobToClaudeReviewDetails(
+  job: ClaudeReviewJob,
+  output = job.stdout,
+): ClaudeReviewDetails {
   return {
     status: job.status,
     level: job.level,
@@ -141,7 +148,11 @@ export function jobToClaudeReviewDetails(job: ClaudeReviewJob, output = job.stdo
   };
 }
 
-export function buildJobsListDetails(jobs: ClaudeReviewJob[], cwd: string, all: boolean): ClaudeReviewDetails {
+export function buildJobsListDetails(
+  jobs: ClaudeReviewJob[],
+  cwd: string,
+  all: boolean,
+): ClaudeReviewDetails {
   const scope = all ? "all working directories" : `\`${cwd}\``;
   const output = jobs.length
     ? jobs

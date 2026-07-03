@@ -62,7 +62,10 @@ export function isTerminalJobStatus(status: ClaudeReviewJobStatus): boolean {
 }
 
 export function createJobId(now = new Date()): string {
-  const timestamp = now.toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
+  const timestamp = now
+    .toISOString()
+    .replace(/[-:.TZ]/g, "")
+    .slice(0, 14);
   return `claude-review-${timestamp}-${randomBytes(4).toString("hex")}`;
 }
 
