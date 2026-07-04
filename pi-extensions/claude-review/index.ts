@@ -86,6 +86,17 @@ function toReviewDetails(result: ExecResult, options: ClaudeReviewOptions): Clau
   };
 }
 
+function reviewHasFindings(details: ClaudeReviewDetails): boolean {
+  const review = details.stdout.trim().toLowerCase();
+  return !["", "(none)", "none", "no findings", "no findings."].includes(review);
+}
+
+function maybeNotifyNoFindings(ctx: ExtensionCommandContext, details: ClaudeReviewDetails): void {
+  if (!reviewHasFindings(details)) {
+    ctx.ui.notify("Claude review returned no findings; no auto-fix prompt sent", "info");
+  }
+}
+
 function handleReviewResult(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
@@ -99,10 +110,13 @@ function handleReviewResult(
   } else if (result.code !== 0) {
     sendReviewOnly(pi, details);
     ctx.ui.notify(`Claude review failed with exit code ${result.code}`, "error");
-  } else if (autoFix) {
+  } else if (autoFix && reviewHasFindings(details)) {
     pi.sendUserMessage(buildAutoFixPrompt(details));
   } else {
     sendReviewOnly(pi, details);
+    if (autoFix) {
+      maybeNotifyNoFindings(ctx, details);
+    }
   }
 }
 
@@ -240,11 +254,14 @@ async function handleClaudeReviewResultCommand(
       ? await readClaudeBackgroundLogs(pi, refreshed, claudeBinary())
       : refreshed;
     const details = jobToClaudeReviewDetails(withLogs);
-    const shouldFix = details.status === "review" && (options.fix ?? withLogs.autoFix);
+    const autoFix = options.fix ?? withLogs.autoFix;
+    const shouldFix = details.status === "review" && autoFix && reviewHasFindings(details);
 
     sendReviewOnly(pi, details);
     if (shouldFix) {
       pi.sendUserMessage(buildAutoFixPrompt(details));
+    } else if (details.status === "review" && autoFix) {
+      maybeNotifyNoFindings(ctx, details);
     } else if (!isTerminalJobStatus(withLogs.status)) {
       ctx.ui.notify(`Claude review is ${withLogs.status}; no auto-fix prompt sent yet`, "info");
     }

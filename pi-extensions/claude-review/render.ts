@@ -1,3 +1,4 @@
+import { sanitizeClaudeLog } from "./claude-bg.js";
 import type { ReviewLevel } from "./args.js";
 import type { ClaudeReviewJob, ClaudeReviewJobStatus } from "./jobs.js";
 
@@ -49,78 +50,91 @@ function statusTitle(status: ClaudeReviewDetailsStatus): string {
   }
 }
 
+function sanitizeDetails(details: ClaudeReviewDetails): ClaudeReviewDetails {
+  return {
+    ...details,
+    stdout: sanitizeClaudeLog(details.stdout),
+    stderr: sanitizeClaudeLog(details.stderr),
+  };
+}
+
 export function renderClaudeReviewMarkdown(details: ClaudeReviewDetails): string {
-  const autoFix = details.autoFix ? "on" : "off";
+  return renderSafeClaudeReviewMarkdown(sanitizeDetails(details));
+}
+
+function renderSafeClaudeReviewMarkdown(safeDetails: ClaudeReviewDetails): string {
+  const autoFix = safeDetails.autoFix ? "on" : "off";
   const lines = [
-    `# ${statusTitle(details.status)}`,
+    `# ${statusTitle(safeDetails.status)}`,
     "",
-    `- Review level: \`${details.level}\``,
+    `- Review level: \`${safeDetails.level}\``,
     `- Auto-fix: \`${autoFix}\``,
   ];
 
-  if (details.jobId) {
-    lines.push(`- Job: \`${details.jobId}\``);
+  if (safeDetails.jobId) {
+    lines.push(`- Job: \`${safeDetails.jobId}\``);
   }
-  if (details.status !== "list") {
-    lines.push(`- Status: \`${details.status}\``);
+  if (safeDetails.status !== "list") {
+    lines.push(`- Status: \`${safeDetails.status}\``);
   }
-  if (details.claudeSessionId) {
-    lines.push(`- Claude session: \`${details.claudeSessionId}\``);
+  if (safeDetails.claudeSessionId) {
+    lines.push(`- Claude session: \`${safeDetails.claudeSessionId}\``);
   }
-  if (details.claudeSessionName) {
-    lines.push(`- Claude session name: \`${details.claudeSessionName}\``);
+  if (safeDetails.claudeSessionName) {
+    lines.push(`- Claude session name: \`${safeDetails.claudeSessionName}\``);
   }
-  if (details.cwd) {
-    lines.push(`- Working directory: \`${details.cwd}\``);
+  if (safeDetails.cwd) {
+    lines.push(`- Working directory: \`${safeDetails.cwd}\``);
   }
-  if (details.contextMessage) {
-    lines.push(`- Review context: ${details.contextMessage}`);
+  if (safeDetails.contextMessage) {
+    lines.push(`- Review context: ${safeDetails.contextMessage}`);
   }
-  if (details.startedAt) {
-    lines.push(`- Started: \`${details.startedAt}\``);
+  if (safeDetails.startedAt) {
+    lines.push(`- Started: \`${safeDetails.startedAt}\``);
   }
-  if (details.completedAt) {
-    lines.push(`- Completed: \`${details.completedAt}\``);
+  if (safeDetails.completedAt) {
+    lines.push(`- Completed: \`${safeDetails.completedAt}\``);
   }
-  if (details.exitCode !== undefined && details.exitCode !== null) {
-    lines.push(`- Exit code: \`${details.exitCode}\``);
+  if (safeDetails.exitCode !== undefined && safeDetails.exitCode !== null) {
+    lines.push(`- Exit code: \`${safeDetails.exitCode}\``);
   }
-  if (details.errorMessage) {
-    lines.push(`- Error: ${details.errorMessage}`);
+  if (safeDetails.errorMessage) {
+    lines.push(`- Error: ${safeDetails.errorMessage}`);
   }
 
-  if (["blocked", "running", "queued", "starting"].includes(details.status)) {
+  if (["blocked", "running", "queued", "starting"].includes(safeDetails.status)) {
     lines.push(
       "",
       "## Next steps",
       "",
-      details.jobId
-        ? `- Check status: \`/claude-review-status ${details.jobId}\``
+      safeDetails.jobId
+        ? `- Check status: \`/claude-review-status ${safeDetails.jobId}\``
         : "- Check status with `/claude-review-status`.",
-      details.jobId
-        ? `- Fetch result: \`/claude-review-result ${details.jobId}\``
+      safeDetails.jobId
+        ? `- Fetch result: \`/claude-review-result ${safeDetails.jobId}\``
         : "- Fetch the result with `/claude-review-result`.",
     );
-    if (details.claudeSessionId) {
-      lines.push(`- Inspect or unblock manually: \`claude attach ${details.claudeSessionId}\``);
+    if (safeDetails.claudeSessionId) {
+      lines.push(`- Inspect or unblock manually: \`claude attach ${safeDetails.claudeSessionId}\``);
     }
   }
 
-  lines.push("", "## Output", "", details.stdout.trim() || "_Claude returned no output._");
+  lines.push("", "## Output", "", safeDetails.stdout.trim() || "_Claude returned no output._");
 
-  if (details.stderr.trim()) {
-    lines.push("", "## stderr", "", "```text", details.stderr.trim(), "```");
+  if (safeDetails.stderr.trim()) {
+    lines.push("", "## stderr", "", "```text", safeDetails.stderr.trim(), "```");
   }
 
   return lines.join("\n");
 }
 
 export function toClaudeReviewMessage(details: ClaudeReviewDetails) {
+  const safeDetails = sanitizeDetails(details);
   return {
     customType: CLAUDE_REVIEW_MESSAGE_TYPE,
-    content: renderClaudeReviewMarkdown(details),
+    content: renderSafeClaudeReviewMarkdown(safeDetails),
     display: true,
-    details,
+    details: safeDetails,
   };
 }
 
@@ -174,7 +188,8 @@ export function buildJobsListDetails(
 }
 
 export function buildAutoFixPrompt(details: ClaudeReviewDetails): string {
-  const review = details.stdout.trim() || "Claude Code review completed with no output.";
+  const review =
+    sanitizeClaudeLog(details.stdout).trim() || "Claude Code review completed with no output.";
   const context = details.contextMessage ? `\nReview context: ${details.contextMessage}` : "";
   const job = details.jobId ? `\nClaude review job: ${details.jobId}` : "";
   const header = `Claude Code review completed.\n\nReview level: ${details.level}${context}${job}`;
