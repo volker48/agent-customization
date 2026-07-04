@@ -29,6 +29,7 @@ export async function runImplement(options = {}) {
     const state = await requestData(client, { type: "get_state" });
     updateJobFromState(job, state);
     agentEnd = client.waitForEvent("agent_end", {
+      predicate: isFinalAgentEndEvent,
       timeoutMs: options.agentEndTimeoutMs ?? DEFAULT_AGENT_END_TIMEOUT_MS,
     });
     await requestOk(client, { type: "prompt", message: buildImplementationPrompt(brief) });
@@ -113,6 +114,10 @@ function updateJobFromState(job, state) {
   job.piSessionFile = state?.sessionFile;
   job.model = modelRef(state?.model);
   job.updatedAt = new Date().toISOString();
+}
+
+function isFinalAgentEndEvent(event) {
+  return event?.willRetry !== true;
 }
 
 function buildImplementationPrompt(brief) {

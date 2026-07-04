@@ -88,6 +88,30 @@ function slowAgentEndFakePi(logPath: string): string {
   );
 }
 
+function retryingAgentEndFakePi(logPath: string): string {
+  return fakePiScript(
+    logPath,
+    `    globalThis.retryCompleted ??= false;
+    if (command.type === "prompt") {
+      emit({ id: command.id, type: "response", command: "prompt", success: true });
+      emit({ type: "agent_end", willRetry: true, messages: [
+        { role: "assistant", content: "Transient provider error." }
+      ] });
+      setTimeout(() => {
+        globalThis.retryCompleted = true;
+        emit({ type: "agent_end", messages: [] });
+      }, 20);
+    }
+    if (command.type === "get_last_assistant_text") {
+      const text = globalThis.retryCompleted
+        ? "Retried implementation complete."
+        : "Transient provider error.";
+      emit({ id: command.id, type: "response", command: "get_last_assistant_text",
+        success: true, data: { text } });
+    }`,
+  );
+}
+
 function delayedTerminationFakePi(logPath: string): string {
   return fakePiScript(
     logPath,
@@ -200,6 +224,29 @@ describe("Claude Code Pi implementation delegation", () => {
     expect(prompt).not.toContain("--model anthropic/claude-opus-4-20250514");
   });
 
+  it("rejects missing model values from argv and stdin flags", async () => {
+    const env = { ...process.env, PI_CLI: "/definitely/missing/pi" };
+
+    await expect(
+      runCompanion(["implement", "--wait", "--model"], "fix bug", env),
+    ).resolves.toMatchObject({
+      status: 1,
+      stderr: expect.stringContaining("Usage: pi-companion.mjs implement --wait"),
+    });
+    await expect(
+      runCompanion(["implement", "--model", "--wait"], "fix bug", env),
+    ).resolves.toMatchObject({
+      status: 1,
+      stderr: expect.stringContaining("Usage: pi-companion.mjs implement --wait"),
+    });
+    await expect(
+      runCompanion(["implement", "--wait"], "--model --wait fix bug", env),
+    ).resolves.toMatchObject({
+      status: 1,
+      stderr: expect.stringContaining("Usage: pi-companion.mjs implement --wait"),
+    });
+  });
+
   it("fails fast when the implementation brief is empty", async () => {
     await expect(
       runImplement({
@@ -226,6 +273,25 @@ describe("Claude Code Pi implementation delegation", () => {
 
     expect(result.ok).toBe(true);
     expect(result.finalText).toBe("Slow implementation complete.");
+  });
+
+  it("waits for the final agent_end when Pi retries automatically", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-impl-data-"));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(retryingAgentEndFakePi(logPath));
+
+    const result = await runImplement({
+      agentEndTimeoutMs: 200,
+      brief: "Implement after a retryable provider error.",
+      dataDir,
+      piCommand: process.execPath,
+      piPrefixArgs: [fakePi],
+      timeoutMs: 50,
+      workspaceRoot: "/repo-under-test",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.finalText).toBe("Retried implementation complete.");
   });
 
   it("waits long enough for Pi to flush session state during graceful termination", async () => {

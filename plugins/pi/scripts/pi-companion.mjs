@@ -2,6 +2,9 @@
 import { runImplement } from "./lib/implement.mjs";
 import { runSetup } from "./lib/setup.mjs";
 
+const IMPLEMENT_COMMAND_USAGE = "pi-companion.mjs implement --wait [--model provider/model]";
+const IMPLEMENT_USAGE = `Usage: ${IMPLEMENT_COMMAND_USAGE}`;
+
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   if (command === "setup") {
@@ -12,7 +15,7 @@ async function main() {
     await runImplementCommand(args);
     return;
   }
-  console.error("Usage: pi-companion.mjs setup | implement --wait [--model provider/model]");
+  console.error(`Usage: pi-companion.mjs setup | ${IMPLEMENT_COMMAND_USAGE}`);
   process.exitCode = 2;
 }
 
@@ -20,7 +23,7 @@ async function runImplementCommand(args) {
   const parsedArgs = parseImplementArgs(args);
   const parsedInput = parseBriefInput(await readStdin());
   if (!parsedArgs.wait && !parsedInput.wait) {
-    throw new Error("Usage: pi-companion.mjs implement --wait [--model provider/model]");
+    throw new Error(IMPLEMENT_USAGE);
   }
   await printResult(
     await runImplement({ brief: parsedInput.brief, model: parsedArgs.model ?? parsedInput.model }),
@@ -35,7 +38,7 @@ function parseImplementArgs(args) {
     if (arg === "--wait") {
       wait = true;
     } else if (arg === "--model") {
-      model = args[++index];
+      model = parseModelValue(args[++index]);
     } else {
       throw new Error(`Unknown implement option: ${arg}`);
     }
@@ -54,12 +57,19 @@ function parseBriefInput(input) {
       remaining = remaining.slice(waitMatch[0].length).trimStart();
       continue;
     }
-    const modelMatch = remaining.match(/^--model\s+(\S+)(?:\s+|$)/);
-    if (!modelMatch) break;
-    model = modelMatch[1];
-    remaining = remaining.slice(modelMatch[0].length).trimStart();
+    const modelFlagMatch = remaining.match(/^--model(?:\s+|$)/);
+    if (!modelFlagMatch) break;
+    remaining = remaining.slice(modelFlagMatch[0].length).trimStart();
+    const valueMatch = remaining.match(/^(\S+)(?:\s+|$)/);
+    model = parseModelValue(valueMatch?.[1]);
+    remaining = remaining.slice(valueMatch[0].length).trimStart();
   }
   return { brief: remaining, model, wait };
+}
+
+function parseModelValue(value) {
+  if (!value || value.startsWith("--")) throw new Error(IMPLEMENT_USAGE);
+  return value;
 }
 
 async function readStdin() {

@@ -38,12 +38,13 @@ export class PiRpcClient {
 
   waitForEvent(type, options = {}) {
     const timeoutMs = options.timeoutMs ?? this.timeoutMs;
+    const predicate = options.predicate ?? (() => true);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.removeEventWaiter(waiter);
         reject(new Error(`Timed out waiting for Pi RPC ${type} event`));
       }, timeoutMs);
-      const waiter = { reject, resolve, timer, type };
+      const waiter = { predicate, reject, resolve, timer, type };
       this.eventWaiters.push(waiter);
     });
   }
@@ -99,7 +100,9 @@ export class PiRpcClient {
   }
 
   resolveEvent(message) {
-    const waiter = this.eventWaiters.find((candidate) => candidate.type === message.type);
+    const waiter = this.eventWaiters.find(
+      (candidate) => candidate.type === message.type && candidate.predicate(message),
+    );
     if (!waiter) return;
     this.removeEventWaiter(waiter);
     clearTimeout(waiter.timer);
