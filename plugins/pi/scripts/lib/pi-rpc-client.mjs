@@ -13,16 +13,21 @@ export class PiRpcClient {
     this.stderr = "";
     this.terminated = false;
     this.protocolError = null;
+    this.detached = options.detached === true;
   }
 
   start() {
-    this.process = spawn(this.command, this.args, { stdio: ["pipe", "pipe", "pipe"] });
+    this.process = spawn(this.command, this.args, {
+      detached: this.detached,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
     attachJsonlReader(this.process.stdout, (line) => this.handleLine(line));
     this.process.stderr.on("data", (chunk) => {
       this.appendStderr(chunk.toString());
     });
     this.process.once("exit", () => {
       this.terminated = true;
+      this.failPending(new Error("Pi RPC process exited before completing the request"));
     });
   }
 
@@ -60,6 +65,10 @@ export class PiRpcClient {
       },
       promise,
     };
+  }
+
+  async abort() {
+    return this.request({ type: "abort" });
   }
 
   async terminate(timeoutMs = 10_000) {
