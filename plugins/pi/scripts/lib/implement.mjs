@@ -1,20 +1,19 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 
+import { createImplementationJob, appendJobLog, persistJob } from "./jobs.mjs";
 import { PiRpcClient } from "./pi-rpc-client.mjs";
 import { DEFAULT_INTENDED_MODEL, modelRef } from "./setup.mjs";
 
 const WRITE_CAPABLE_TOOLS = "read,grep,find,ls,bash,edit,write";
 const DEFAULT_AGENT_END_TIMEOUT_MS = 30 * 60 * 1000;
-const DEFAULT_DATA_DIR = join(homedir(), ".local", "state", "claude-pi-companion");
 const DEFAULT_TERMINATE_TIMEOUT_MS = 10_000;
+const execFileAsync = promisify(execFile);
 
 export async function runImplement(options = {}) {
   const brief = normalizeBrief(options.brief);
-  const job = createJob(options);
-  await persistJob(job);
+  const job = createImplementationJob(options);
+  await startJob(job, brief, options);
   const client = new PiRpcClient({
     command: options.piCommand ?? process.env.PI_CLI ?? "pi",
     args: buildPiArgs(job, options),
@@ -22,54 +21,88 @@ export async function runImplement(options = {}) {
     timeoutMs: options.timeoutMs,
   });
 
+  const outcome = await executeImplementation(client, job, brief, options);
+  const piTerminated = await client.terminate(
+    options.terminateTimeoutMs ?? DEFAULT_TERMINATE_TIMEOUT_MS,
+  );
+  await finishJob(job, piTerminated);
+  const ok = job.status === "completed";
+  return buildImplementResult({ client, ...outcome, job, ok, piTerminated });
+}
+
+async function startJob(job, brief, options) {
+  await updateJob(job, { phase: "starting" });
+  await appendJobLog(job, "started", {
+    briefLength: brief.length,
+    model: options.model ?? process.env.PI_IMPLEMENT_MODEL ?? DEFAULT_INTENDED_MODEL,
+  });
+}
+
+async function executeImplementation(client, job, brief, options) {
   let agentEnd = null;
   let finalText = null;
   let errorMessage = null;
   try {
-    const state = await requestData(client, { type: "get_state" });
-    updateJobFromState(job, state);
-    agentEnd = client.waitForEvent("agent_end", {
-      predicate: isFinalAgentEndEvent,
-      timeoutMs: options.agentEndTimeoutMs ?? DEFAULT_AGENT_END_TIMEOUT_MS,
-    });
-    await requestOk(client, { type: "prompt", message: buildImplementationPrompt(brief) });
-    const agentEndEvent = await agentEnd;
-    finalText = await getFinalText(client, agentEndEvent);
-    job.status = "completed";
-    job.result = finalText;
-    job.summary = firstNonEmptyLine(finalText);
+    agentEnd = await promptPi(client, job, brief, options);
+    finalText = await getFinalText(client, agentEnd);
+    await completeJob(job, finalText);
   } catch (error) {
     if (agentEnd) void agentEnd.catch(() => {});
     errorMessage = error instanceof Error ? error.message : String(error);
-    job.status = "failed";
-    job.errorMessage = errorMessage;
+    await failJob(job, errorMessage);
   }
-
-  const piTerminated = await client.terminate(
-    options.terminateTimeoutMs ?? DEFAULT_TERMINATE_TIMEOUT_MS,
-  );
-  job.completedAt = new Date().toISOString();
-  job.updatedAt = job.completedAt;
-  await persistJob(job);
-  const ok = job.status === "completed";
-  return buildImplementResult({ client, errorMessage, finalText, job, ok, piTerminated });
+  return { errorMessage, finalText };
 }
 
-function createJob(options) {
-  const dataDir = options.dataDir ?? process.env.PI_COMPANION_DATA_DIR ?? DEFAULT_DATA_DIR;
-  const id = `impl-${randomUUID()}`;
-  const now = new Date().toISOString();
-  return {
-    id,
-    kind: "implement",
-    status: "running",
-    phase: "delegating",
-    workspaceRoot: options.workspaceRoot ?? process.cwd(),
-    sessionRoot: join(dataDir, "pi-sessions"),
-    jobFile: join(dataDir, "jobs", `${id}.json`),
-    createdAt: now,
-    updatedAt: now,
-  };
+async function promptPi(client, job, brief, options) {
+  const state = await requestData(client, { type: "get_state" });
+  await updateJobFromState(job, state);
+  await appendJobLog(job, "state", {
+    model: job.model,
+    sessionId: job.sessionId,
+    piSessionFile: job.piSessionFile,
+  });
+  const agentEnd = client.waitForEvent("agent_end", {
+    predicate: isFinalAgentEndEvent,
+    timeoutMs: options.agentEndTimeoutMs ?? DEFAULT_AGENT_END_TIMEOUT_MS,
+  });
+  await updateJob(job, { phase: "prompting" });
+  await requestOk(client, { type: "prompt", message: buildImplementationPrompt(brief) });
+  await updateJob(job, { phase: "running" });
+  return agentEnd;
+}
+
+async function completeJob(job, finalText) {
+  await updateJob(job, {
+    status: "completed",
+    phase: "completed",
+    result: finalText,
+    summary: firstNonEmptyLine(finalText),
+    testsRun: extractTestEvidence(finalText),
+  });
+}
+
+async function failJob(job, errorMessage) {
+  await updateJob(job, {
+    status: "failed",
+    phase: "failed",
+    errorMessage,
+    summary: `Failed: ${errorMessage}`,
+  });
+}
+
+async function finishJob(job, piTerminated) {
+  const changedFiles = await detectChangedFiles(job.workspaceRoot);
+  await updateJob(job, {
+    changedFiles: changedFiles.files,
+    completedAt: new Date().toISOString(),
+  });
+  await appendJobLog(job, "finished", {
+    status: job.status,
+    changedFileCount: job.changedFiles.length,
+    changedFilesError: changedFiles.errorMessage,
+    piTerminated,
+  });
 }
 
 function normalizeBrief(brief) {
@@ -109,11 +142,13 @@ async function requestOk(client, command) {
   throw new Error(`Pi RPC ${command.type} failed: ${response.error ?? "unknown error"}`);
 }
 
-function updateJobFromState(job, state) {
-  job.sessionId = state?.sessionId;
-  job.piSessionFile = state?.sessionFile;
-  job.model = modelRef(state?.model);
-  job.updatedAt = new Date().toISOString();
+async function updateJobFromState(job, state) {
+  await updateJob(job, {
+    phase: "delegating",
+    sessionId: state?.sessionId,
+    piSessionFile: state?.sessionFile,
+    model: modelRef(state?.model),
+  });
 }
 
 function isFinalAgentEndEvent(event) {
@@ -168,10 +203,49 @@ function firstNonEmptyLine(text) {
   );
 }
 
-async function persistJob(job) {
-  await mkdir(dirname(job.jobFile), { recursive: true });
-  await mkdir(job.sessionRoot, { recursive: true });
-  await writeFile(job.jobFile, `${JSON.stringify(job, null, 2)}\n`);
+function extractTestEvidence(text) {
+  const evidence = [];
+  for (const line of text.split("\n")) {
+    const match = line.match(/(?:^|[.;])\s*Tests?(?: run)?:\s*(.+)$/i);
+    if (match?.[1]) evidence.push(testEvidenceFromText(match[1]));
+  }
+  return evidence;
+}
+
+function testEvidenceFromText(text) {
+  const command = text.trim().replace(/[.]$/, "");
+  if (/not run|not-run|skipped/i.test(command)) return { command, status: "not-run" };
+  if (/fail/i.test(command)) return { command, status: "failed" };
+  if (/pass/i.test(command)) return { command, status: "passed" };
+  return { command, status: "reported" };
+}
+
+async function updateJob(job, changes) {
+  Object.assign(job, changes, { updatedAt: new Date().toISOString() });
+  await persistJob(job);
+}
+
+async function detectChangedFiles(workspaceRoot) {
+  try {
+    const { stdout } = await execFileAsync("git", ["status", "--short"], {
+      cwd: workspaceRoot,
+      maxBuffer: 1024 * 1024,
+    });
+    return { files: parseGitStatus(stdout) };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { errorMessage: `git status failed in ${workspaceRoot}: ${message}`, files: [] };
+  }
+}
+
+function parseGitStatus(output) {
+  return output
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .map((line) => line.slice(3).trim())
+    .map((path) => path.split(" -> ").pop())
+    .filter(Boolean);
 }
 
 function buildImplementResult(input) {
