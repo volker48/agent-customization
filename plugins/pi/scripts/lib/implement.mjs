@@ -31,9 +31,12 @@ export async function runImplement(options = {}) {
 }
 
 async function startJob(job, brief, options) {
-  await updateJob(job, { phase: "starting" });
+  const initialChanges = await detectChangedFiles(job.workspaceRoot);
+  await updateJob(job, { phase: "starting", initialChangedFiles: initialChanges.files });
   await appendJobLog(job, "started", {
     briefLength: brief.length,
+    changedFilesError: initialChanges.errorMessage,
+    initialChangedFileCount: initialChanges.files.length,
     model: options.model ?? process.env.PI_IMPLEMENT_MODEL ?? DEFAULT_INTENDED_MODEL,
   });
 }
@@ -100,7 +103,7 @@ async function failJob(job, errorMessage) {
 async function finishJob(job, piTerminated) {
   const changedFiles = await detectChangedFiles(job.workspaceRoot);
   await updateJob(job, {
-    changedFiles: changedFiles.files,
+    changedFiles: changedFilesDelta(changedFiles.files, job.initialChangedFiles),
     completedAt: new Date().toISOString(),
   });
   await appendJobLog(job, "finished", {
@@ -212,7 +215,7 @@ function firstNonEmptyLine(text) {
 function extractTestEvidence(text) {
   const evidence = [];
   for (const line of text.split("\n")) {
-    const match = line.match(/(?:^|[.;])\s*Tests?(?: run)?:\s*(.+)$/i);
+    const match = line.match(/(?:^|[.;])\s*(?:[-*+]\s*)?Tests?(?: run)?:\s*(.+)$/i);
     if (match?.[1]) evidence.push(testEvidenceFromText(match[1]));
   }
   return evidence;
@@ -252,6 +255,11 @@ function parseGitStatus(output) {
     .map((line) => line.slice(3).trim())
     .map((path) => path.split(" -> ").pop())
     .filter(Boolean);
+}
+
+function changedFilesDelta(files, initialFiles = []) {
+  const initial = new Set(initialFiles);
+  return files.filter((file) => !initial.has(file));
 }
 
 function buildImplementResult(input) {
