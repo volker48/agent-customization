@@ -157,6 +157,20 @@ function promptFailureFakePi(logPath: string): string {
   );
 }
 
+function emptyFinalTextFakePi(logPath: string): string {
+  return fakePiScript(
+    logPath,
+    `    if (command.type === "prompt") {
+      emit({ id: command.id, type: "response", command: "prompt", success: true });
+      emit({ type: "agent_end", messages: [] });
+    }
+    if (command.type === "get_last_assistant_text") {
+      emit({ id: command.id, type: "response", command: "get_last_assistant_text",
+        success: true, data: { text: null } });
+    }`,
+  );
+}
+
 function finalTextFallbackFakePi(logPath: string): string {
   return fakePiScript(
     logPath,
@@ -411,12 +425,39 @@ describe("Claude Code Pi implementation delegation", () => {
     expect(result.report).toContain("Fallback implementation report.");
   });
 
+  it("fails the job when Pi has no final assistant text", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-impl-data-"));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(emptyFinalTextFakePi(logPath));
+
+    const result = await runImplement({
+      brief: "Implement without final text.",
+      dataDir,
+      piCommand: process.execPath,
+      piPrefixArgs: [fakePi],
+      timeoutMs: 1_000,
+      workspaceRoot: "/repo-under-test",
+    });
+
+    const job = JSON.parse(await readFile(result.jobFile, "utf8"));
+
+    expect(result.ok).toBe(false);
+    expect(result.errorMessage).toBe("Pi completed without a final assistant response");
+    expect(result.piTerminated).toBe(true);
+    expect(job).toMatchObject({
+      kind: "implement",
+      status: "failed",
+      errorMessage: "Pi completed without a final assistant response",
+    });
+  });
+
   it("reports Pi RPC prompt failures and still terminates the process", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "pi-impl-data-"));
     const logPath = join(dataDir, "fake-pi.jsonl");
     const fakePi = await writeFakePi(promptFailureFakePi(logPath));
 
     const result = await runImplement({
+      agentEndTimeoutMs: 50,
       brief: "Implement a failing request.",
       dataDir,
       piCommand: process.execPath,
@@ -424,6 +465,7 @@ describe("Claude Code Pi implementation delegation", () => {
       timeoutMs: 1_000,
       workspaceRoot: "/repo-under-test",
     });
+    await new Promise((resolve) => setTimeout(resolve, 75));
 
     const records = (await readFile(logPath, "utf8"))
       .trim()

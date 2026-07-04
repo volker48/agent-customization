@@ -39,15 +39,16 @@ async function startJob(job, brief, options) {
 }
 
 async function executeImplementation(client, job, brief, options) {
-  let agentEnd = null;
+  let agentEndWaiter = null;
   let finalText = null;
   let errorMessage = null;
   try {
-    agentEnd = await promptPi(client, job, brief, options);
-    finalText = await getFinalText(client, agentEnd);
+    agentEndWaiter = await promptPi(client, job, brief, options);
+    const agentEndEvent = await agentEndWaiter.promise;
+    finalText = await getFinalText(client, agentEndEvent);
     await completeJob(job, finalText);
   } catch (error) {
-    if (agentEnd) void agentEnd.catch(() => {});
+    agentEndWaiter?.cancel();
     errorMessage = error instanceof Error ? error.message : String(error);
     await failJob(job, errorMessage);
   }
@@ -62,14 +63,19 @@ async function promptPi(client, job, brief, options) {
     sessionId: job.sessionId,
     piSessionFile: job.piSessionFile,
   });
-  const agentEnd = client.waitForEvent("agent_end", {
+  const agentEndWaiter = client.waitForEventHandle("agent_end", {
     predicate: isFinalAgentEndEvent,
     timeoutMs: options.agentEndTimeoutMs ?? DEFAULT_AGENT_END_TIMEOUT_MS,
   });
-  await updateJob(job, { phase: "prompting" });
-  await requestOk(client, { type: "prompt", message: buildImplementationPrompt(brief) });
-  await updateJob(job, { phase: "running" });
-  return agentEnd;
+  try {
+    await updateJob(job, { phase: "prompting" });
+    await requestOk(client, { type: "prompt", message: buildImplementationPrompt(brief) });
+    await updateJob(job, { phase: "running" });
+    return agentEndWaiter;
+  } catch (error) {
+    agentEndWaiter.cancel();
+    throw error;
+  }
 }
 
 async function completeJob(job, finalText) {
