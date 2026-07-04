@@ -1,7 +1,13 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { createImplementationJob, appendJobLog, persistJob } from "./jobs.mjs";
+import {
+  createContinuationJob,
+  createImplementationJob,
+  appendJobLog,
+  findResumableImplementationJob,
+  persistJob,
+} from "./jobs.mjs";
 import { PiRpcClient } from "./pi-rpc-client.mjs";
 import { DEFAULT_INTENDED_MODEL, modelRef } from "./setup.mjs";
 
@@ -13,6 +19,18 @@ const execFileAsync = promisify(execFile);
 export async function runImplement(options = {}) {
   const brief = normalizeBrief(options.brief);
   const job = createImplementationJob(options);
+  return runJobWithPi(job, brief, options);
+}
+
+export async function runContinue(selector = "latest", options = {}) {
+  const instruction = normalizeInstruction(options.instruction);
+  const parent = await resolveContinuationParent(selector, options);
+  validateContinuationParent(parent.job, selector);
+  const job = createContinuationJob(parent.job, options);
+  return runJobWithPi(job, instruction, { ...options, parentJob: parent.job });
+}
+
+async function runJobWithPi(job, brief, options) {
   await startJob(job, brief, options);
   const client = new PiRpcClient({
     command: options.piCommand ?? process.env.PI_CLI ?? "pi",
@@ -37,7 +55,8 @@ async function startJob(job, brief, options) {
     briefLength: brief.length,
     changedFilesError: initialChanges.errorMessage,
     initialChangedFileCount: initialChanges.files.length,
-    model: options.model ?? process.env.PI_IMPLEMENT_MODEL ?? DEFAULT_INTENDED_MODEL,
+    model: selectedModel(options),
+    parentJobId: options.parentJob?.id,
   });
 }
 
@@ -125,15 +144,26 @@ function buildPiArgs(job, options) {
     ...(options.piPrefixArgs ?? []),
     "--mode",
     "rpc",
-    ...modelArgs(options.model ?? process.env.PI_IMPLEMENT_MODEL ?? DEFAULT_INTENDED_MODEL),
+    ...modelArgs(selectedModel(options)),
     "--session-dir",
     job.sessionRoot,
+    ...sessionArgs(options.parentJob),
     "--no-extensions",
     "--no-prompt-templates",
     "--no-skills",
     "--tools",
     WRITE_CAPABLE_TOOLS,
   ];
+}
+
+function selectedModel(options) {
+  return (
+    options.model ?? options.parentJob?.model ?? process.env.PI_IMPLEMENT_MODEL ?? DEFAULT_INTENDED_MODEL
+  );
+}
+
+function sessionArgs(parentJob) {
+  return parentJob ? ["--session", parentJob.piSessionFile] : [];
 }
 
 function modelArgs(model) {
@@ -173,6 +203,26 @@ function buildImplementationPrompt(brief) {
     "Implementation brief:",
     brief?.trim() ?? "",
   ].join("\n");
+}
+
+async function resolveContinuationParent(selector, options) {
+  return findResumableImplementationJob(selector, options);
+}
+
+function validateContinuationParent(job, selector) {
+  if (!job) throw new Error(`No resumable implementation job found for selector: ${selector}`);
+  if (typeof job.piSessionFile !== "string" || !job.piSessionFile.trim()) {
+    throw new Error(`Implementation job ${job.id} has no usable Pi session file metadata`);
+  }
+  if (typeof job.sessionId !== "string" || !job.sessionId.trim()) {
+    throw new Error(`Implementation job ${job.id} has no usable Pi session id metadata`);
+  }
+}
+
+function normalizeInstruction(instruction) {
+  const normalized = typeof instruction === "string" ? instruction.trim() : "";
+  if (!normalized) throw new Error("Continuation instruction is required");
+  return normalized;
 }
 
 async function getFinalText(client, agentEndEvent) {
@@ -280,6 +330,8 @@ function renderImplementReport({ errorMessage, finalText, job, ok, piTerminated 
     "# Pi implementation result",
     `Status: ${ok ? "completed" : "failed"}`,
     `Job: ${job.id}`,
+    ...(job.parentJobId ? [`Parent job: ${job.parentJobId}`] : []),
+    ...(job.rootJobId ? [`Root job: ${job.rootJobId}`] : []),
     `Model: ${job.model ?? "unknown"}`,
     `Session: ${job.sessionId ?? "unknown"}`,
     `Session file: ${job.piSessionFile ?? "unknown"}`,

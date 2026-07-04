@@ -26,6 +26,8 @@ export function renderResultReport({ job, selector, ledgerPath, warnings = [] })
   lines.push(
     `Job: ${job.id}`,
     `Kind: ${job.kind}`,
+    ...(job.parentJobId ? [`Parent job: ${job.parentJobId}`] : []),
+    ...(job.rootJobId ? [`Root job: ${job.rootJobId}`] : []),
     `Status: ${job.status}`,
     `Phase: ${job.phase}`,
     `Model: ${job.model ?? "unknown"}`,
