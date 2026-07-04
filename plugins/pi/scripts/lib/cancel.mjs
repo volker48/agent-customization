@@ -36,6 +36,7 @@ export async function cleanupActiveJobs(options = {}) {
 
 async function killActiveProcesses(job) {
   const latest = await readJob(job.jobFile);
+  if (latest.status !== "cancelling") return;
   await appendJobLog(latest, "cancel-timeout-kill", {
     piPid: latest.piPid,
     workerPid: latest.workerPid,
@@ -43,7 +44,9 @@ async function killActiveProcesses(job) {
   if (isProcessAlive(latest.piPid)) await terminateProcessTree(latest.piPid, { timeoutMs: 500 });
   if (isProcessAlive(latest.workerPid))
     await terminateProcessTree(latest.workerPid, { timeoutMs: 500 });
-  await updateJobRecord(latest, {
+  const current = await readJob(job.jobFile);
+  if (current.status !== "cancelling") return;
+  await updateJobRecord(current, {
     status: "cancelled",
     phase: "cancelled",
     cancelledAt: new Date().toISOString(),

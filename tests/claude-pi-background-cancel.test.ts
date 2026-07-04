@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { cleanupActiveJobs } from "../plugins/pi/scripts/lib/cancel.mjs";
+import { cleanupActiveJobs, runCancel } from "../plugins/pi/scripts/lib/cancel.mjs";
+import {
+  createImplementationJob,
+  persistJob,
+  updateJobRecord,
+} from "../plugins/pi/scripts/lib/jobs.mjs";
 import { runResult, runStatus } from "../plugins/pi/scripts/lib/inspect.mjs";
 
 const COMPANION = join(process.cwd(), "plugins/pi/scripts/pi-companion.mjs");
@@ -138,6 +143,34 @@ describe("Pi background implementation cancellation", () => {
     expect(cancelled.status).toBe(0);
     expect(job.phase).toBe("cancelled");
     expect(commands.map((command) => command.type)).toContain("abort");
+  });
+
+  it("keeps a real completion that wins the cancel race", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-bg-data-"));
+    const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-bg-workspace-")));
+    const job = createImplementationJob({
+      dataDir,
+      workspaceRoot,
+      id: "impl-completes-during-cancel",
+      status: "running",
+      phase: "running",
+    });
+    await persistJob(job);
+
+    const cancel = runCancel(job.id, { dataDir, workspaceRoot, timeoutMs: 1_000 });
+    const cancellingJob = await waitForStatus(dataDir, workspaceRoot, job.id, "cancelling");
+    await updateJobRecord(cancellingJob, {
+      status: "completed",
+      phase: "completed",
+      result: "real completion",
+      summary: "real completion",
+    });
+    const cancelled = await cancel;
+    const result = await runResult(job.id, { dataDir, workspaceRoot });
+
+    expect(cancelled.job.status).toBe("completed");
+    expect(result.job?.status).toBe("completed");
+    expect(result.job?.summary).toBe("real completion");
   });
 
   it("falls back to process-tree termination when abort does not finish", async () => {

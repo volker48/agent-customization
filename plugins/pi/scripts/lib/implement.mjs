@@ -201,9 +201,12 @@ function watchCancellation(client, job, options) {
   let aborting = false;
   const timer = setInterval(async () => {
     if (stopped || aborting || job.status === "cancelled") return;
-    const latest = await readJob(job.jobFile).catch(() => null);
-    if (latest?.status !== "cancelling") return;
     aborting = true;
+    const latest = await readJob(job.jobFile).catch(() => null);
+    if (latest?.status !== "cancelling") {
+      aborting = false;
+      return;
+    }
     await updateJob(job, { status: "cancelling", phase: "aborting" });
     await appendJobLog(job, "abort-requested", { piPid: job.piPid });
     client.abort().catch((error) =>

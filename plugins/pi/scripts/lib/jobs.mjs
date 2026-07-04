@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -76,14 +76,6 @@ export async function updateJobRecord(job, changes) {
   Object.assign(job, changes, { updatedAt: new Date().toISOString() });
   await persistJob(job);
   return job;
-}
-
-export async function removeFileIfExists(path) {
-  try {
-    await unlink(path);
-  } catch (error) {
-    if (!isMissingFileError(error)) throw error;
-  }
 }
 
 export async function appendJobLog(job, event, details = {}) {
