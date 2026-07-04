@@ -6,8 +6,10 @@ export class PiRpcClient {
     this.command = options.command;
     this.args = options.args ?? [];
     this.timeoutMs = options.timeoutMs ?? 10_000;
+    this.stderrMaxBytes = options.stderrMaxBytes ?? 64 * 1024;
     this.nextId = 1;
     this.pending = new Map();
+    this.eventWaiters = [];
     this.stderr = "";
     this.terminated = false;
     this.protocolError = null;
@@ -17,7 +19,7 @@ export class PiRpcClient {
     this.process = spawn(this.command, this.args, { stdio: ["pipe", "pipe", "pipe"] });
     attachJsonlReader(this.process.stdout, (line) => this.handleLine(line));
     this.process.stderr.on("data", (chunk) => {
-      this.stderr += chunk.toString();
+      this.appendStderr(chunk.toString());
     });
     this.process.once("exit", () => {
       this.terminated = true;
@@ -34,10 +36,31 @@ export class PiRpcClient {
     return responsePromise;
   }
 
-  async terminate() {
+  waitForEvent(type, options = {}) {
+    const timeoutMs = options.timeoutMs ?? this.timeoutMs;
+    const predicate = options.predicate ?? (() => true);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.removeEventWaiter(waiter);
+        reject(new Error(`Timed out waiting for Pi RPC ${type} event`));
+      }, timeoutMs);
+      const waiter = { predicate, reject, resolve, timer, type };
+      this.eventWaiters.push(waiter);
+    });
+  }
+
+  async terminate(timeoutMs = 10_000) {
     if (!this.process || this.process.exitCode !== null) return true;
     this.process.kill("SIGTERM");
-    return this.waitForExit(1_000);
+    return this.waitForExit(timeoutMs);
+  }
+
+  appendStderr(text) {
+    if (this.stderrMaxBytes <= 0) {
+      this.stderr = "";
+      return;
+    }
+    this.stderr = `${this.stderr}${text}`.slice(-this.stderrMaxBytes);
   }
 
   handleLine(line) {
@@ -50,7 +73,14 @@ export class PiRpcClient {
       this.failPending(new Error(`Malformed Pi RPC JSON: ${cause}`));
       return;
     }
-    if (message.type !== "response" || typeof message.id !== "string") return;
+    if (message.type === "extension_ui_request" && typeof message.id === "string") {
+      this.sendExtensionUICancellation(message.id);
+      return;
+    }
+    if (message.type !== "response" || typeof message.id !== "string") {
+      this.resolveEvent(message);
+      return;
+    }
     const waiter = this.pending.get(message.id);
     if (!waiter) return;
     this.pending.delete(message.id);
@@ -63,6 +93,30 @@ export class PiRpcClient {
       this.pending.delete(id);
       waiter.reject(error);
     }
+    for (const waiter of this.eventWaiters.splice(0)) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+  }
+
+  resolveEvent(message) {
+    const waiter = this.eventWaiters.find(
+      (candidate) => candidate.type === message.type && candidate.predicate(message),
+    );
+    if (!waiter) return;
+    this.removeEventWaiter(waiter);
+    clearTimeout(waiter.timer);
+    waiter.resolve(message);
+  }
+
+  removeEventWaiter(waiter) {
+    this.eventWaiters = this.eventWaiters.filter((candidate) => candidate !== waiter);
+  }
+
+  sendExtensionUICancellation(id) {
+    if (!this.process?.stdin?.writable) return;
+    const payload = JSON.stringify({ type: "extension_ui_response", id, cancelled: true }) + "\n";
+    this.process.stdin.write(payload);
   }
 
   waitForResponse(id, commandType) {
