@@ -7,15 +7,23 @@ export const DEFAULT_DATA_DIR = join(homedir(), ".local", "state", "claude-pi-co
 export const RECENT_JOBS_LIMIT = 20;
 
 export function createImplementationJob(options = {}) {
+  return createPiJob({ ...options, idPrefix: "impl", kind: "implement" });
+}
+
+export function createReviewJob(options = {}) {
+  return createPiJob({ ...options, idPrefix: "review", kind: "review" });
+}
+
+function createPiJob(options = {}) {
   const workspaceRoot = options.workspaceRoot ?? process.cwd();
   const dataDir = resolveDataDir(options.dataDir);
   const workspaceId = workspaceIdForRoot(workspaceRoot);
   const workspaceRootPath = workspaceStateRoot(dataDir, workspaceRoot);
-  const id = options.id ?? `impl-${randomUUID()}`;
+  const id = options.id ?? `${options.idPrefix}-${randomUUID()}`;
   const now = new Date().toISOString();
   return {
     id,
-    kind: "implement",
+    kind: options.kind,
     status: "running",
     phase: "starting",
     workspaceRoot,
