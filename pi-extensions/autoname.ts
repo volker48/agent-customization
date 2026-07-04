@@ -8,8 +8,8 @@ import {
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 
-export const DEFAULT_AUTONAME_MODEL = "anthropic/claude-haiku-4-5";
-export const DEFAULT_AUTONAME_FALLBACK_MODEL = "openai-codex/gpt-5.5";
+export const DEFAULT_AUTONAME_MODEL = "openai-codex/gpt-5.5";
+export const DEFAULT_AUTONAME_FALLBACK_MODEL = "anthropic/claude-haiku-4-5";
 export const MAX_NAME_LENGTH = 60;
 const MAX_TRANSCRIPT_LENGTH = 30_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 80;
@@ -268,14 +268,16 @@ async function readPrompt(pi: ExtensionAPI): Promise<string> {
   return readFile(promptFile, "utf8");
 }
 
-function buildNamingRequest(systemPrompt: string, transcript: string): Message[] {
+function buildNamingRequest(namingPrompt: string, transcript: string): Message[] {
+  // Intentionally no Pi system prompt here: /autoname should stay lightweight and avoid
+  // project context files such as AGENTS.md.
   return [
     {
       role: "user",
       content: [
         {
           type: "text",
-          text: [systemPrompt, "", "<session_history>", transcript, "</session_history>"].join(
+          text: [namingPrompt, "", "<session_history>", transcript, "</session_history>"].join(
             "\n",
           ),
         },

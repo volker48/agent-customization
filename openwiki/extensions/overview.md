@@ -76,8 +76,8 @@ Intercepts `bash` tool calls and delegates command rewriting to `rtk rewrite <co
 
 Auto-titles Pi sessions by feeding the transcript to a small LLM so sessions are retrievable later.
 
-- Default model: `anthropic/claude-haiku-4-5` (override via `PI_AUTONAME_MODEL`)
-- Fallback model: `openai/gpt-5-mini` (override via `PI_AUTONAME_FALLBACK_MODEL`)
+- Default model: `openai-codex/gpt-5.5` (override via `PI_AUTONAME_MODEL`)
+- Fallback model: `anthropic/claude-haiku-4-5` (override via `PI_AUTONAME_FALLBACK_MODEL`)
 - Max transcript length: 30,000 chars; max output tokens: 80; max name length: 60 chars
 - Custom prompt file via `PI_AUTONAME_PROMPT_FILE`
 - Names must be 3–8 words, concrete, searchable, no "Session" prefix
