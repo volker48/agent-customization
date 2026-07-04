@@ -60,7 +60,7 @@ ${handlers}
 });
 function emitState(id) {
   emit({ id, type: "response", command: "get_state", success: true, data: {
-    model: { provider: "openai", id: "gpt-5.5", name: "GPT 5.5" },
+    model: { provider: "openai-codex", id: "gpt-5.5", name: "GPT 5.5" },
     thinkingLevel: "high",
     isStreaming: false,
     sessionId: "impl-session",
@@ -373,13 +373,13 @@ describe("Claude Code Pi implementation delegation", () => {
     expect(result.finalText).toContain("Implemented the requested change");
     expect(result.piTerminated).toBe(true);
     expect(result.report).toContain("Status: completed");
-    expect(result.report).toContain("Model: openai/gpt-5.5");
+    expect(result.report).toContain("Model: openai-codex/gpt-5.5");
     expect(argv).toEqual([
       fakePi,
       "--mode",
       "rpc",
       "--model",
-      "openai/gpt-5.5",
+      "openai-codex/gpt-5.5",
       "--session-dir",
       join(dataDir, "pi-sessions"),
       "--no-extensions",
@@ -401,7 +401,7 @@ describe("Claude Code Pi implementation delegation", () => {
       workspaceRoot: "/repo-under-test",
       sessionId: "impl-session",
       piSessionFile: "/tmp/impl-session.jsonl",
-      model: "openai/gpt-5.5",
+      model: "openai-codex/gpt-5.5",
       result: result.finalText,
     });
   });
