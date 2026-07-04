@@ -83,43 +83,40 @@ export async function startClaudeBackgroundReview(
   const rawStartOutput = joinOutput(result);
   const claudeSessionId = parseBackgroundSessionId(rawStartOutput);
 
-  if (result.killed) {
-    return writeJob({
+  const writeStartFailure = (
+    status: Extract<ClaudeReviewJobStatus, "failed" | "timeout">,
+    errorMessage: string,
+  ): Promise<ClaudeReviewJob> =>
+    writeJob({
       ...next,
-      status: "timeout",
+      status,
       stdout: result.stdout,
       stderr: result.stderr,
       exitCode: result.code,
       completedAt: new Date().toISOString(),
-      errorMessage: "Claude background session did not start before the startup timeout",
+      errorMessage,
       rawStartOutput,
     });
+
+  if (result.killed) {
+    return writeStartFailure(
+      "timeout",
+      "Claude background session did not start before the startup timeout",
+    );
   }
 
   if (result.code !== 0) {
-    return writeJob({
-      ...next,
-      status: "failed",
-      stdout: result.stdout,
-      stderr: result.stderr,
-      exitCode: result.code,
-      completedAt: new Date().toISOString(),
-      errorMessage: `Claude background session failed to start with exit code ${result.code}`,
-      rawStartOutput,
-    });
+    return writeStartFailure(
+      "failed",
+      `Claude background session failed to start with exit code ${result.code}`,
+    );
   }
 
   if (!claudeSessionId) {
-    return writeJob({
-      ...next,
-      status: "failed",
-      stdout: result.stdout,
-      stderr: result.stderr,
-      exitCode: result.code,
-      completedAt: new Date().toISOString(),
-      errorMessage: "Claude background session did not report a session id",
-      rawStartOutput,
-    });
+    return writeStartFailure(
+      "failed",
+      "Claude background session did not report a session id",
+    );
   }
 
   next = await writeJob({
