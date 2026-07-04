@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { runImplement } from "./lib/implement.mjs";
+import { runResult, runStatus } from "./lib/inspect.mjs";
 import { runSetup } from "./lib/setup.mjs";
 
 const IMPLEMENT_COMMAND_USAGE = "pi-companion.mjs implement --wait [--model provider/model]";
 const IMPLEMENT_USAGE = `Usage: ${IMPLEMENT_COMMAND_USAGE}`;
+const RESULT_USAGE = "Usage: pi-companion.mjs result [job-id|latest]";
 
 async function main() {
   const [command, ...args] = process.argv.slice(2);
@@ -15,7 +17,15 @@ async function main() {
     await runImplementCommand(args);
     return;
   }
-  console.error(`Usage: pi-companion.mjs setup | ${IMPLEMENT_COMMAND_USAGE}`);
+  if (command === "status") {
+    await printResult(await runStatus());
+    return;
+  }
+  if (command === "result") {
+    await runResultCommand(args);
+    return;
+  }
+  console.error(`Usage: pi-companion.mjs setup | ${IMPLEMENT_COMMAND_USAGE} | status | result`);
   process.exitCode = 2;
 }
 
@@ -72,6 +82,19 @@ function parseModelValue(value) {
   return value;
 }
 
+async function runResultCommand(args) {
+  if (args.length > 1) throw new Error(RESULT_USAGE);
+  const inputSelector = args[0] ?? (await readStdin()).trim();
+  const selector = parseResultSelector(inputSelector);
+  await printResult(await runResult(selector));
+}
+
+function parseResultSelector(value) {
+  if (!value) return "latest";
+  if (/\s/.test(value)) throw new Error(RESULT_USAGE);
+  return value;
+}
+
 async function readStdin() {
   let data = "";
   process.stdin.setEncoding("utf8");
@@ -81,7 +104,7 @@ async function readStdin() {
 
 async function printResult(result) {
   console.log(result.report);
-  if (!result.ok || !result.piTerminated) process.exitCode = 1;
+  if (!result.ok || result.piTerminated === false) process.exitCode = 1;
 }
 
 main().catch((error) => {

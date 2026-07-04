@@ -60,7 +60,7 @@ ${handlers}
 });
 function emitState(id) {
   emit({ id, type: "response", command: "get_state", success: true, data: {
-    model: { provider: "openai", id: "gpt-5.5", name: "GPT 5.5" },
+    model: { provider: "openai-codex", id: "gpt-5.5", name: "GPT 5.5" },
     thinkingLevel: "high",
     isStreaming: false,
     sessionId: "impl-session",
@@ -153,6 +153,20 @@ function promptFailureFakePi(logPath: string): string {
     `    if (command.type === "prompt") {
       emit({ id: command.id, type: "response", command: "prompt", success: false,
         error: "model quota exceeded" });
+    }`,
+  );
+}
+
+function emptyFinalTextFakePi(logPath: string): string {
+  return fakePiScript(
+    logPath,
+    `    if (command.type === "prompt") {
+      emit({ id: command.id, type: "response", command: "prompt", success: true });
+      emit({ type: "agent_end", messages: [] });
+    }
+    if (command.type === "get_last_assistant_text") {
+      emit({ id: command.id, type: "response", command: "get_last_assistant_text",
+        success: true, data: { text: null } });
     }`,
   );
 }
@@ -359,13 +373,13 @@ describe("Claude Code Pi implementation delegation", () => {
     expect(result.finalText).toContain("Implemented the requested change");
     expect(result.piTerminated).toBe(true);
     expect(result.report).toContain("Status: completed");
-    expect(result.report).toContain("Model: openai/gpt-5.5");
+    expect(result.report).toContain("Model: openai-codex/gpt-5.5");
     expect(argv).toEqual([
       fakePi,
       "--mode",
       "rpc",
       "--model",
-      "openai/gpt-5.5",
+      "openai-codex/gpt-5.5",
       "--session-dir",
       join(dataDir, "pi-sessions"),
       "--no-extensions",
@@ -387,7 +401,7 @@ describe("Claude Code Pi implementation delegation", () => {
       workspaceRoot: "/repo-under-test",
       sessionId: "impl-session",
       piSessionFile: "/tmp/impl-session.jsonl",
-      model: "openai/gpt-5.5",
+      model: "openai-codex/gpt-5.5",
       result: result.finalText,
     });
   });
@@ -411,12 +425,39 @@ describe("Claude Code Pi implementation delegation", () => {
     expect(result.report).toContain("Fallback implementation report.");
   });
 
+  it("fails the job when Pi has no final assistant text", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-impl-data-"));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(emptyFinalTextFakePi(logPath));
+
+    const result = await runImplement({
+      brief: "Implement without final text.",
+      dataDir,
+      piCommand: process.execPath,
+      piPrefixArgs: [fakePi],
+      timeoutMs: 1_000,
+      workspaceRoot: "/repo-under-test",
+    });
+
+    const job = JSON.parse(await readFile(result.jobFile, "utf8"));
+
+    expect(result.ok).toBe(false);
+    expect(result.errorMessage).toBe("Pi completed without a final assistant response");
+    expect(result.piTerminated).toBe(true);
+    expect(job).toMatchObject({
+      kind: "implement",
+      status: "failed",
+      errorMessage: "Pi completed without a final assistant response",
+    });
+  });
+
   it("reports Pi RPC prompt failures and still terminates the process", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "pi-impl-data-"));
     const logPath = join(dataDir, "fake-pi.jsonl");
     const fakePi = await writeFakePi(promptFailureFakePi(logPath));
 
     const result = await runImplement({
+      agentEndTimeoutMs: 50,
       brief: "Implement a failing request.",
       dataDir,
       piCommand: process.execPath,
@@ -424,6 +465,7 @@ describe("Claude Code Pi implementation delegation", () => {
       timeoutMs: 1_000,
       workspaceRoot: "/repo-under-test",
     });
+    await new Promise((resolve) => setTimeout(resolve, 75));
 
     const records = (await readFile(logPath, "utf8"))
       .trim()

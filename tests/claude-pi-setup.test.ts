@@ -59,7 +59,7 @@ process.on("SIGTERM", () => {
 `;
 }
 
-const successFakePi = fakePiScript("openai", "gpt-5.5", "GPT 5.5");
+const successFakePi = fakePiScript("openai-codex", "gpt-5.5", "GPT 5.5");
 
 const malformedRpcFakePi = `
 process.stdin.setEncoding("utf8");
@@ -119,33 +119,35 @@ describe("Claude Code Pi setup", () => {
       nodeCommand: process.execPath,
       piCommand: process.execPath,
       piArgs: [fakePi],
-      intendedModel: "openai/gpt-5.5",
+      intendedModel: "openai-codex/gpt-5.5",
       timeoutMs: 1_000,
     });
 
     expect(result.ok).toBe(true);
-    expect(result.activeModel).toEqual("openai/gpt-5.5");
+    expect(result.activeModel).toEqual("openai-codex/gpt-5.5");
     expect(result.intendedModelAvailable).toBe(true);
     expect(result.piTerminated).toBe(true);
     expect(result.stderr).toContain("terminated");
     expect(result.report).toContain("Pi RPC startup: ok");
-    expect(result.report).toContain("Active model: openai/gpt-5.5 (GPT 5.5)");
+    expect(result.report).toContain("Active model: openai-codex/gpt-5.5 (GPT 5.5)");
   });
 
-  it("accepts an intended model when the model id matches under another provider", async () => {
-    const fakePi = await writeFakePi(fakePiScript("openai-codex", "gpt-5.5", "GPT-5.5"));
+  it("requires the intended provider to match, not just the model id", async () => {
+    const fakePi = await writeFakePi(fakePiScript("openrouter", "openai/gpt-5.5", "GPT-5.5"));
 
     const result = await runSetup({
       nodeCommand: process.execPath,
       piCommand: process.execPath,
       piArgs: [fakePi],
-      intendedModel: "openai/gpt-5.5",
+      intendedModel: "openai-codex/gpt-5.5",
       timeoutMs: 1_000,
     });
 
-    expect(result.activeModel).toEqual("openai-codex/gpt-5.5");
-    expect(result.intendedModelAvailable).toBe(true);
-    expect(result.report).toContain("Intended implementation model available: openai/gpt-5.5");
+    expect(result.activeModel).toEqual("openrouter/openai/gpt-5.5");
+    expect(result.intendedModelAvailable).toBe(false);
+    expect(result.report).toContain(
+      "Intended implementation model unavailable: openai-codex/gpt-5.5",
+    );
   });
 
   it("gives actionable guidance when the intended implementation model is unavailable", async () => {

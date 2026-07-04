@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 
 import { PiRpcClient } from "./pi-rpc-client.mjs";
 
-export const DEFAULT_INTENDED_MODEL = "openai/gpt-5.5";
+export const DEFAULT_INTENDED_MODEL = "openai-codex/gpt-5.5";
 const DEFAULT_PI_ARGS = [
   "--mode",
   "rpc",
@@ -120,8 +120,5 @@ export function modelRef(model) {
 }
 
 function modelMatches(model, intendedModel) {
-  const ref = modelRef(model);
-  if (ref === intendedModel) return true;
-  if (typeof model?.id !== "string") return false;
-  return model.id === intendedModel.slice(intendedModel.indexOf("/") + 1);
+  return modelRef(model) === intendedModel;
 }
