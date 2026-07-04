@@ -412,19 +412,11 @@ function truncateClaudeLog(output: string): string {
 
 function hasPersistedReview(job: ClaudeReviewJob): boolean {
   if (job.reviewSource === "marked-output") {
-    return true;
+    return Boolean(job.stdout.trim());
   }
-  if (!job.stdout.trim() || job.stdout === job.lastLog) {
-    return false;
-  }
-  if (job.rawStartOutput && job.stdout === job.rawStartOutput) {
-    return false;
-  }
-  return !isClaudeStartupOutput(job.stdout);
-}
 
-function isClaudeStartupOutput(output: string): boolean {
-  return output.includes("claude attach ") && output.includes("claude logs ");
+  const markedReview = extractMarkedReview(job.lastLog);
+  return Boolean(markedReview && markedReview === job.stdout.trim());
 }
 
 function stripUnsafeControls(output: string): string {

@@ -514,6 +514,51 @@ describe("claude review command", () => {
     );
   });
 
+  it("rejects markerless completed jobs whose stdout is only the startup session banner", async () => {
+    process.env.PI_CLAUDE_REVIEW_BIN = "fake-claude";
+    const homeDir = await mkdtemp(join(tmpdir(), "claude-home-"));
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(homeDir, jobDir);
+    process.env.HOME = homeDir;
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    const startupOutput = "backgrounded · session-123";
+    const job = await writeJob(
+      createBackgroundJob({
+        status: "running",
+        stdout: startupOutput,
+        lastLog: "",
+        autoFix: true,
+      }),
+    );
+    const { pi, command } = createMockPi();
+    pi.exec.mockImplementation(async (_bin: string, args: string[]) => {
+      if (args[0] === "agents") {
+        return {
+          stdout: JSON.stringify([{ id: "session-123", status: "completed", exitCode: 0 }]),
+          stderr: "",
+          code: 0,
+          killed: false,
+        };
+      }
+      return { stdout: "markerless completed output", stderr: "", code: 0, killed: false };
+    });
+    claudeReviewExtension(pi as never);
+    const ctx = createContext();
+
+    await command("claude-review-result").handler(job.id, ctx);
+    const stored = await readJob(job.id);
+
+    expect(stored.status).toBe("failed");
+    expect(stored.stdout).toBe("");
+    expect(stored.errorMessage).toMatch(/did not contain review result markers/);
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(pi.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        details: expect.objectContaining({ status: "failed", stdout: "" }),
+      }),
+    );
+  });
+
   it("does not treat startup stdout as a persisted review", async () => {
     process.env.PI_CLAUDE_REVIEW_BIN = "fake-claude";
     const homeDir = await mkdtemp(join(tmpdir(), "claude-home-"));
@@ -558,7 +603,9 @@ describe("claude review command", () => {
     expect(stored.errorMessage).toMatch(/did not contain review result markers/);
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
     expect(pi.sendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ details: expect.objectContaining({ status: "failed", stdout: "" }) }),
+      expect.objectContaining({
+        details: expect.objectContaining({ status: "failed", stdout: "" }),
+      }),
     );
   });
 
