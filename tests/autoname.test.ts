@@ -42,6 +42,10 @@ type MockCommandContext = {
     notify: (message: string, type?: "info" | "warning" | "error") => void;
     custom?: <T>(factory: (...args: never[]) => unknown) => Promise<T>;
   };
+  getSystemPrompt?: () => string;
+  getSystemPromptOptions?: () => {
+    contextFiles?: Array<{ path: string; content: string }>;
+  };
 };
 
 function textResponse(text: string) {
@@ -88,7 +92,7 @@ function createMockPi(flags: Record<string, string | undefined> = {}) {
 function createContext(overrides: Partial<MockCommandContext> = {}): MockCommandContext {
   const models = new Map([
     ["anthropic/claude-haiku-4-5", { provider: "anthropic", id: "claude-haiku-4-5" }],
-    ["openai/gpt-5-mini", { provider: "openai", id: "gpt-5-mini" }],
+    ["openai-codex/gpt-5.5", { provider: "openai-codex", id: "gpt-5.5" }],
   ]);
 
   return {
@@ -215,6 +219,34 @@ describe("autoname extension", () => {
 
     expect(getSessionName()).toBe("Search API Refactor");
     expect(context.ui.notify).toHaveBeenCalledWith("Session named: Search API Refactor", "info");
+  });
+
+  it("does not include Pi system prompt context in the naming request", async () => {
+    vi.mocked(complete).mockResolvedValue(textResponse("Lightweight Naming Request") as never);
+    const { pi, getCommand } = createMockPi();
+    const context = createContext({
+      getSystemPrompt: vi.fn(() => "system prompt with AGENTS.md content"),
+      getSystemPromptOptions: vi.fn(() => ({
+        contextFiles: [
+          {
+            path: "/tmp/example-project/AGENTS.md",
+            content: "heavy project instructions",
+          },
+        ],
+      })),
+    });
+
+    autonameExtension(pi as never);
+    await getCommand().handler("", context);
+
+    const request = vi.mocked(complete).mock.calls[0]?.[1] as unknown as Record<string, unknown>;
+    const serializedRequest = JSON.stringify(request);
+
+    expect(request).not.toHaveProperty("systemPrompt");
+    expect(serializedRequest).not.toContain("AGENTS.md");
+    expect(serializedRequest).not.toContain("heavy project instructions");
+    expect(context.getSystemPrompt).not.toHaveBeenCalled();
+    expect(context.getSystemPromptOptions).not.toHaveBeenCalled();
   });
 
   it("supports model registries that resolve API keys with headers", async () => {
