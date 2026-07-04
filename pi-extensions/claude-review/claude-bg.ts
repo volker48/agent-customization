@@ -19,8 +19,18 @@ const RAW_LOG_PREVIEW_CHARS = 20_000;
 const ESCAPE_CHAR = String.fromCharCode(27);
 const BELL_CHAR = String.fromCharCode(7);
 const C1_CSI_CHAR = String.fromCharCode(0x9b);
+const ANSI_OSC_SEQUENCE = `${ESCAPE_CHAR}\\][^${BELL_CHAR}]*`;
+const ANSI_OSC_TERMINATOR = `(?:${BELL_CHAR}|${ESCAPE_CHAR}\\\\)`;
+const ANSI_CSI_SEQUENCE = `${ESCAPE_CHAR}\\[[0-?]*[ -/]*[@-~]`;
+const ANSI_FE_SEQUENCE = `${ESCAPE_CHAR}[@-Z\\\\^_]`;
+const C1_CSI_SEQUENCE = `${C1_CSI_CHAR}[0-?]*[ -/]*[@-~]`;
 const ANSI_ESCAPE_PATTERN = new RegExp(
-  `${ESCAPE_CHAR}(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~]|\\][^${BELL_CHAR}]*(?:${BELL_CHAR}|${ESCAPE_CHAR}\\\\))|${C1_CSI_CHAR}[0-?]*[ -/]*[@-~]`,
+  [
+    `${ANSI_OSC_SEQUENCE}${ANSI_OSC_TERMINATOR}`,
+    ANSI_CSI_SEQUENCE,
+    ANSI_FE_SEQUENCE,
+    C1_CSI_SEQUENCE,
+  ].join("|"),
   "g",
 );
 const MISSING_MARKERS_ERROR =
@@ -113,10 +123,7 @@ export async function startClaudeBackgroundReview(
   }
 
   if (!claudeSessionId) {
-    return writeStartFailure(
-      "failed",
-      "Claude background session did not report a session id",
-    );
+    return writeStartFailure("failed", "Claude background session did not report a session id");
   }
 
   next = await writeJob({
@@ -233,7 +240,8 @@ async function applyClaudeLogOutput(
   job: ClaudeReviewJob,
   result: ClaudeLogOutput,
 ): Promise<ClaudeReviewJob> {
-  const markedReview = extractMarkedReview(result.stdout);
+  const normalizedStdout = normalizeClaudeOutput(result.stdout);
+  const markedReview = extractMarkedReviewFromNormalized(normalizedStdout);
   let status = job.status;
   let stdout = job.stdout;
   let completedAt = job.completedAt;
@@ -245,10 +253,15 @@ async function applyClaudeLogOutput(
     reviewSource = null;
     errorMessage = `Failed to read Claude logs with exit code ${result.code}`;
   } else if (markedReview) {
-    status = isTerminalJobStatus(job.status) ? job.status : "review";
-    stdout = markedReview;
-    reviewSource = "marked-output";
-    completedAt = status === "review" && !completedAt ? new Date().toISOString() : completedAt;
+    if (!isTerminalJobStatus(job.status)) {
+      status = "review";
+      stdout = markedReview;
+      reviewSource = "marked-output";
+      completedAt = completedAt ?? new Date().toISOString();
+    } else if (!stdout.trim()) {
+      stdout = markedReview;
+      reviewSource = "marked-output";
+    }
   } else if (job.status === "review" && !hasPersistedReview(job)) {
     status = "failed";
     stdout = "";
@@ -262,7 +275,7 @@ async function applyClaudeLogOutput(
     status,
     stdout,
     stderr: result.stderr,
-    lastLog: sanitizeClaudeLog(result.stdout),
+    lastLog: truncateClaudeLog(normalizedStdout),
     reviewSource,
     exitCode: job.exitCode,
     completedAt,
@@ -389,7 +402,11 @@ function joinOutput(result: ExecResult): string {
 }
 
 export function sanitizeClaudeLog(output: string): string {
-  return stripUnsafeControls(truncateClaudeLog(stripAnsiControls(output).replace(/\r/g, "\n")));
+  return truncateClaudeLog(normalizeClaudeOutput(output));
+}
+
+function normalizeClaudeOutput(output: string): string {
+  return stripUnsafeControls(stripAnsiControls(output).replace(/\r/g, "\n"));
 }
 
 function stripAnsiControls(output: string): string {
@@ -408,12 +425,36 @@ function truncateClaudeLog(output: string): string {
 }
 
 function hasPersistedReview(job: ClaudeReviewJob): boolean {
-  if (job.reviewSource === "marked-output") {
-    return Boolean(job.stdout.trim());
+  const stdout = normalizeClaudeOutput(job.stdout).trim();
+  if (!stdout) {
+    return false;
   }
+  if (job.reviewSource === "marked-output") {
+    return true;
+  }
+  if (job.reviewSource !== undefined) {
+    return false;
+  }
+  return !isClaudeStartupOutput(job.stdout, job) && !isMarkerlessRawStdout(job, stdout);
+}
 
-  const markedReview = extractMarkedReview(job.lastLog);
-  return Boolean(markedReview && markedReview === job.stdout.trim());
+function isMarkerlessRawStdout(job: ClaudeReviewJob, stdout: string): boolean {
+  const lastLog = normalizeClaudeOutput(job.lastLog).trim();
+  return Boolean(lastLog && lastLog === stdout);
+}
+
+function isClaudeStartupOutput(output: string, job: ClaudeReviewJob): boolean {
+  const trimmed = output.trim();
+  if (job.rawStartOutput && trimmed === job.rawStartOutput.trim()) {
+    return true;
+  }
+  if (!trimmed.startsWith("backgrounded ·")) {
+    return false;
+  }
+  return Boolean(
+    (job.claudeSessionId && trimmed.includes(job.claudeSessionId)) ||
+    trimmed.includes(job.claudeSessionName),
+  );
 }
 
 function stripUnsafeControls(output: string): string {
@@ -595,15 +636,15 @@ function pickNumber(record: ClaudeAgentRecord, keys: string[]): number | undefin
 }
 
 export function extractMarkedReview(output: string): string | undefined {
-  const strippedOutput = stripUnsafeControls(stripAnsiControls(output).replace(/\r/g, "\n"));
-  const start = strippedOutput.lastIndexOf(CLAUDE_REVIEW_RESULT_START);
-  const end = strippedOutput.indexOf(
-    CLAUDE_REVIEW_RESULT_END,
-    start + CLAUDE_REVIEW_RESULT_START.length,
-  );
+  return extractMarkedReviewFromNormalized(normalizeClaudeOutput(output));
+}
+
+function extractMarkedReviewFromNormalized(output: string): string | undefined {
+  const start = output.lastIndexOf(CLAUDE_REVIEW_RESULT_START);
+  const end = output.indexOf(CLAUDE_REVIEW_RESULT_END, start + CLAUDE_REVIEW_RESULT_START.length);
   if (start === -1 || end === -1 || end <= start) {
     return undefined;
   }
 
-  return strippedOutput.slice(start + CLAUDE_REVIEW_RESULT_START.length, end).trim();
+  return output.slice(start + CLAUDE_REVIEW_RESULT_START.length, end).trim();
 }

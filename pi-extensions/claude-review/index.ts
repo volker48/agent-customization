@@ -86,15 +86,37 @@ function toReviewDetails(result: ExecResult, options: ClaudeReviewOptions): Clau
   };
 }
 
+const NO_FINDINGS_SUMMARIES = new Set([
+  "",
+  "(none)",
+  "none",
+  "no findings",
+  "no findings reported",
+  "review complete - no findings",
+]);
+
 function reviewHasFindings(details: ClaudeReviewDetails): boolean {
-  const review = details.stdout.trim().toLowerCase();
-  return !["", "(none)", "none", "no findings", "no findings."].includes(review);
+  return !NO_FINDINGS_SUMMARIES.has(normalizeReviewSummary(details.stdout));
+}
+
+function normalizeReviewSummary(review: string): string {
+  return review
+    .trim()
+    .toLowerCase()
+    .replace(/[—–]/g, "-")
+    .replace(/\s*-\s*/g, " - ")
+    .replace(/[.!]+$/g, "")
+    .replace(/\s+/g, " ");
 }
 
 function maybeNotifyNoFindings(ctx: ExtensionCommandContext, details: ClaudeReviewDetails): void {
   if (!reviewHasFindings(details)) {
     ctx.ui.notify("Claude review returned no findings; no auto-fix prompt sent", "info");
   }
+}
+
+function logReadFailureOutput(job: ClaudeReviewJob): string {
+  return job.errorMessage?.startsWith("Failed to read Claude logs") ? job.lastLog : "";
 }
 
 function handleReviewResult(
@@ -253,7 +275,8 @@ async function handleClaudeReviewResultCommand(
     const withLogs = refreshed.claudeSessionId
       ? await readClaudeBackgroundLogs(pi, refreshed, claudeBinary())
       : refreshed;
-    const details = jobToClaudeReviewDetails(withLogs);
+    const output = withLogs.stdout || logReadFailureOutput(withLogs);
+    const details = jobToClaudeReviewDetails(withLogs, output);
     const autoFix = options.fix ?? withLogs.autoFix;
     const shouldFix = details.status === "review" && autoFix && reviewHasFindings(details);
 
