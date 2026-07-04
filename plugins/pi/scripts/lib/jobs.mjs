@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFile, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -16,8 +16,8 @@ export function createImplementationJob(options = {}) {
   return {
     id,
     kind: "implement",
-    status: "running",
-    phase: "starting",
+    status: options.status ?? "running",
+    phase: options.phase ?? "starting",
     workspaceRoot,
     workspaceId,
     sessionRoot: join(dataDir, "pi-sessions"),
@@ -35,6 +35,24 @@ export async function persistJob(job) {
   await mkdir(job.sessionRoot, { recursive: true });
   await mkdir(dirname(job.logFile), { recursive: true });
   await atomicWriteJson(job.jobFile, job);
+}
+
+export async function readJob(path) {
+  return normalizeJobRecord(JSON.parse(await readFile(path, "utf8")), path);
+}
+
+export async function updateJobRecord(job, changes) {
+  Object.assign(job, changes, { updatedAt: new Date().toISOString() });
+  await persistJob(job);
+  return job;
+}
+
+export async function removeFileIfExists(path) {
+  try {
+    await unlink(path);
+  } catch (error) {
+    if (!isMissingFileError(error)) throw error;
+  }
 }
 
 export async function appendJobLog(job, event, details = {}) {

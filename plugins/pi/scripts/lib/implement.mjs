@@ -1,24 +1,62 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
-import { createImplementationJob, appendJobLog, persistJob } from "./jobs.mjs";
+import {
+  createImplementationJob,
+  appendJobLog,
+  persistJob,
+  readJob,
+  updateJobRecord,
+} from "./jobs.mjs";
 import { PiRpcClient } from "./pi-rpc-client.mjs";
+import { terminateProcessTree } from "./process-tree.mjs";
 import { DEFAULT_INTENDED_MODEL, modelRef } from "./setup.mjs";
 
 const WRITE_CAPABLE_TOOLS = "read,grep,find,ls,bash,edit,write";
 const DEFAULT_AGENT_END_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_TERMINATE_TIMEOUT_MS = 10_000;
+const DEFAULT_CANCEL_POLL_MS = 100;
 const execFileAsync = promisify(execFile);
+
+export async function startBackgroundImplement(options = {}) {
+  const brief = normalizeBrief(options.brief);
+  const job = createImplementationJob({ ...options, status: "queued", phase: "queued" });
+  await persistJob(job);
+  await appendJobLog(job, "queued", {
+    briefLength: brief.length,
+    model: options.model ?? process.env.PI_IMPLEMENT_MODEL ?? DEFAULT_INTENDED_MODEL,
+  });
+  const child = spawn(
+    process.execPath,
+    [
+      new URL("../pi-companion.mjs", import.meta.url).pathname,
+      "implement",
+      "--worker",
+      "--job-file",
+      job.jobFile,
+    ],
+    { detached: true, env: { ...process.env, PI_IMPLEMENT_BRIEF: brief }, stdio: "ignore" },
+  );
+  child.unref();
+  await updateJob(job, { workerPid: child.pid });
+  return { ok: true, jobFile: job.jobFile, jobId: job.id, report: renderBackgroundReport(job) };
+}
+
+export async function runImplementWorker(options = {}) {
+  const job = await readJob(options.jobFile);
+  return runImplement({ ...options, brief: process.env.PI_IMPLEMENT_BRIEF, job });
+}
 
 export async function runImplement(options = {}) {
   const brief = normalizeBrief(options.brief);
-  const job = createImplementationJob(options);
+  const job = options.job ?? createImplementationJob(options);
   await startJob(job, brief, options);
   const client = new PiRpcClient({
     command: options.piCommand ?? process.env.PI_CLI ?? "pi",
     args: buildPiArgs(job, options),
     stderrMaxBytes: options.stderrMaxBytes,
     timeoutMs: options.timeoutMs,
+    detached: true,
   });
 
   const outcome = await executeImplementation(client, job, brief, options);
@@ -31,7 +69,7 @@ export async function runImplement(options = {}) {
 }
 
 async function startJob(job, brief, options) {
-  await updateJob(job, { phase: "starting" });
+  await updateJob(job, { status: "running", phase: "starting", workerPid: process.pid });
   await appendJobLog(job, "started", {
     briefLength: brief.length,
     model: options.model ?? process.env.PI_IMPLEMENT_MODEL ?? DEFAULT_INTENDED_MODEL,
@@ -42,21 +80,29 @@ async function executeImplementation(client, job, brief, options) {
   let agentEndWaiter = null;
   let finalText = null;
   let errorMessage = null;
+  const cancellation = watchCancellation(client, job, options);
   try {
     agentEndWaiter = await promptPi(client, job, brief, options);
     const agentEndEvent = await agentEndWaiter.promise;
-    finalText = await getFinalText(client, agentEndEvent);
-    await completeJob(job, finalText);
+    if (job.status === "cancelling") await cancelJob(job, "Pi RPC abort completed");
+    else {
+      finalText = await getFinalText(client, agentEndEvent);
+      await completeJob(job, finalText);
+    }
   } catch (error) {
     agentEndWaiter?.cancel();
     errorMessage = error instanceof Error ? error.message : String(error);
-    await failJob(job, errorMessage);
+    if (job.status === "cancelling") await cancelJob(job, errorMessage);
+    else await failJob(job, errorMessage);
+  } finally {
+    cancellation.cancel();
   }
   return { errorMessage, finalText };
 }
 
 async function promptPi(client, job, brief, options) {
   const state = await requestData(client, { type: "get_state" });
+  await updateJob(job, { piPid: client.process?.pid });
   await updateJobFromState(job, state);
   await appendJobLog(job, "state", {
     model: job.model,
@@ -97,6 +143,16 @@ async function failJob(job, errorMessage) {
   });
 }
 
+async function cancelJob(job, reason) {
+  await updateJob(job, {
+    status: "cancelled",
+    phase: "cancelled",
+    cancelledAt: new Date().toISOString(),
+    summary: "Cancelled by Claude session request.",
+    errorMessage: reason,
+  });
+}
+
 async function finishJob(job, piTerminated) {
   const changedFiles = await detectChangedFiles(job.workspaceRoot);
   await updateJob(job, {
@@ -115,6 +171,38 @@ function normalizeBrief(brief) {
   const normalized = typeof brief === "string" ? brief.trim() : "";
   if (!normalized) throw new Error("Implementation brief is required");
   return normalized;
+}
+
+function watchCancellation(client, job, options) {
+  let stopped = false;
+  let aborting = false;
+  const timer = setInterval(async () => {
+    if (stopped || aborting || job.status === "cancelled") return;
+    const latest = await readJob(job.jobFile).catch(() => null);
+    if (latest?.status !== "cancelling") return;
+    aborting = true;
+    await updateJob(job, { status: "cancelling", phase: "aborting" });
+    await appendJobLog(job, "abort-requested", { piPid: job.piPid });
+    client.abort().catch((error) =>
+      appendJobLog(job, "abort-failed", {
+        errorMessage: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    setTimeout(() => terminateCancellationProcess(job), options.cancelKillTimeoutMs ?? 1_000);
+  }, options.cancelPollMs ?? DEFAULT_CANCEL_POLL_MS);
+  return {
+    cancel: () => {
+      stopped = true;
+      clearInterval(timer);
+    },
+  };
+}
+
+async function terminateCancellationProcess(job) {
+  const latest = await readJob(job.jobFile).catch(() => null);
+  if (latest?.status !== "cancelling") return;
+  await appendJobLog(job, "abort-timeout-kill", { piPid: latest.piPid });
+  await terminateProcessTree(latest.piPid, { timeoutMs: 500 });
 }
 
 function buildPiArgs(job, options) {
@@ -227,8 +315,7 @@ function testEvidenceFromText(text) {
 }
 
 async function updateJob(job, changes) {
-  Object.assign(job, changes, { updatedAt: new Date().toISOString() });
-  await persistJob(job);
+  await updateJobRecord(job, changes);
 }
 
 async function detectChangedFiles(workspaceRoot) {
@@ -265,6 +352,18 @@ function buildImplementResult(input) {
     report: renderImplementReport(input),
     stderr: input.client.stderr,
   };
+}
+
+function renderBackgroundReport(job) {
+  return [
+    "# Pi implementation started",
+    "Status: queued",
+    `Job: ${job.id}`,
+    `Ledger: ${job.jobFile}`,
+    "",
+    `Follow up: /pi:status or /pi:result ${job.id}`,
+    `Cancel: /pi:cancel ${job.id}`,
+  ].join("\n");
 }
 
 function renderImplementReport({ errorMessage, finalText, job, ok, piTerminated }) {

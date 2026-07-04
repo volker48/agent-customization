@@ -1,0 +1,186 @@
+import { chmod, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+
+import { cleanupActiveJobs } from "../plugins/pi/scripts/lib/cancel.mjs";
+import { runResult, runStatus } from "../plugins/pi/scripts/lib/inspect.mjs";
+
+const COMPANION = join(process.cwd(), "plugins/pi/scripts/pi-companion.mjs");
+
+async function runCompanion(args: string[], input: string, env: NodeJS.ProcessEnv, cwd: string) {
+  const child = spawn(process.execPath, [COMPANION, ...args], {
+    cwd,
+    env,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk.toString();
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk.toString();
+  });
+  child.stdin.end(input);
+  const status = await new Promise<number | null>((resolve) => child.on("exit", resolve));
+  return { status, stderr, stdout };
+}
+
+async function writeFakePi(script: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "fake-pi-background-"));
+  const path = join(dir, "fake-pi.mjs");
+  await writeFile(path, `#!/usr/bin/env node\n${script}`);
+  await chmod(path, 0o755);
+  return path;
+}
+
+function fakePiScript(logPath: string, abortFinishes: boolean): string {
+  const abortHandler = abortFinishes
+    ? `emit({ id: command.id, type: "response", success: true });
+       emit({ type: "agent_end", messages: [] });`
+    : `record({ type: "abort-received" });`;
+  return `
+import { appendFileSync, writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(logPath)}, "");
+process.stdin.setEncoding("utf8");
+let buffer = "";
+function emit(message) { process.stdout.write(JSON.stringify(message) + "\\n"); }
+function record(command) {
+  appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(command) + "\\n");
+}
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  while (buffer.includes("\\n")) {
+    const index = buffer.indexOf("\\n");
+    const line = buffer.slice(0, index);
+    buffer = buffer.slice(index + 1);
+    if (!line) continue;
+    const command = JSON.parse(line);
+    record(command);
+    if (command.type === "get_state") emit({ id: command.id, type: "response", success: true,
+      data: { model: { provider: "openai", id: "gpt-5.5" }, sessionId: "bg-session" } });
+    if (command.type === "prompt") emit({ id: command.id, type: "response", success: true });
+    if (command.type === "abort") { ${abortHandler} }
+  }
+});
+process.on("SIGTERM", () => record({ type: "sigterm" }));
+`;
+}
+
+function extractJobId(output: string): string {
+  const match = output.match(/^Job: (.+)$/m);
+  if (!match) throw new Error(`Missing job id in output: ${output}`);
+  return match[1];
+}
+
+async function waitForStatus(
+  dataDir: string,
+  workspaceRoot: string,
+  jobId: string,
+  status: string,
+) {
+  const deadline = Date.now() + 4_000;
+  while (Date.now() < deadline) {
+    const result = await runResult(jobId, { dataDir, workspaceRoot });
+    if (result.job?.status === status) return result.job;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for ${jobId} to become ${status}`);
+}
+
+describe("Pi background implementation cancellation", () => {
+  it("starts a background job and updates status/result ledgers", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-bg-data-"));
+    const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-bg-workspace-")));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(fakePiScript(logPath, true));
+    const env = { ...process.env, PI_CLI: fakePi, PI_COMPANION_DATA_DIR: dataDir };
+
+    const started = await runCompanion(
+      ["implement", "--background"],
+      "background task",
+      env,
+      workspaceRoot,
+    );
+    const jobId = extractJobId(started.stdout);
+    const status = await runStatus({ dataDir, workspaceRoot });
+
+    expect(started.status).toBe(0);
+    expect(started.stdout).toContain("Status: queued");
+    expect(status.report).toContain(jobId);
+    expect(["queued", "running", "cancelling", "cancelled"]).toContain(status.jobs[0].status);
+  });
+
+  it("cancels through Pi RPC abort before marking the job cancelled", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-bg-data-"));
+    const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-bg-workspace-")));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(fakePiScript(logPath, true));
+    const env = { ...process.env, PI_CLI: fakePi, PI_COMPANION_DATA_DIR: dataDir };
+
+    const started = await runCompanion(
+      ["implement", "--background"],
+      "cancel task",
+      env,
+      workspaceRoot,
+    );
+    const jobId = extractJobId(started.stdout);
+    await waitForStatus(dataDir, workspaceRoot, jobId, "running");
+    const cancelled = await runCompanion(["cancel", jobId], "", env, workspaceRoot);
+    const job = await waitForStatus(dataDir, workspaceRoot, jobId, "cancelled");
+    const commands = (await readFile(logPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+
+    expect(cancelled.status).toBe(0);
+    expect(job.phase).toBe("cancelled");
+    expect(commands.map((command) => command.type)).toContain("abort");
+  });
+
+  it("falls back to process-tree termination when abort does not finish", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-bg-data-"));
+    const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-bg-workspace-")));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(fakePiScript(logPath, false));
+    const env = { ...process.env, PI_CLI: fakePi, PI_COMPANION_DATA_DIR: dataDir };
+
+    const started = await runCompanion(
+      ["implement", "--background"],
+      "stuck task",
+      env,
+      workspaceRoot,
+    );
+    const jobId = extractJobId(started.stdout);
+    await waitForStatus(dataDir, workspaceRoot, jobId, "running");
+    const cancelled = await runCompanion(["cancel", jobId], "", env, workspaceRoot);
+    const log = await readFile(logPath, "utf8");
+
+    expect(cancelled.stdout).toContain("Status: cancelled");
+    expect(log).toContain('"type":"abort"');
+  });
+
+  it("session cleanup cancels active jobs for the workspace", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-bg-data-"));
+    const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-bg-workspace-")));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(fakePiScript(logPath, true));
+    const env = { ...process.env, PI_CLI: fakePi, PI_COMPANION_DATA_DIR: dataDir };
+
+    const started = await runCompanion(
+      ["implement", "--background"],
+      "cleanup task",
+      env,
+      workspaceRoot,
+    );
+    const jobId = extractJobId(started.stdout);
+    await waitForStatus(dataDir, workspaceRoot, jobId, "running");
+    const cleanup = await cleanupActiveJobs({ dataDir, workspaceRoot, timeoutMs: 2_000 });
+    const job = await waitForStatus(dataDir, workspaceRoot, jobId, "cancelled");
+
+    expect(cleanup.cancelled).toEqual([`${jobId}: cancelled`]);
+    expect(job.status).toBe("cancelled");
+  });
+});
