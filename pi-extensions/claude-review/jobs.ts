@@ -20,6 +20,8 @@ export type ClaudeReviewJobStatus =
   | "timeout"
   | "unknown";
 
+export type ClaudeReviewSource = "marked-output";
+
 export interface ClaudeReviewJob {
   id: string;
   backend: typeof JOB_BACKEND;
@@ -38,6 +40,7 @@ export interface ClaudeReviewJob {
   stdout: string;
   stderr: string;
   lastLog: string;
+  reviewSource?: ClaudeReviewSource | null;
   errorMessage?: string | null;
   rawStartOutput?: string;
   rawAgentsEntry?: unknown;
@@ -108,6 +111,7 @@ export async function createJob(input: CreateClaudeReviewJobInput): Promise<Clau
     stdout: "",
     stderr: "",
     lastLog: "",
+    reviewSource: null,
     errorMessage: null,
   };
   await writeJob(job);

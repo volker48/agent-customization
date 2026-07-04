@@ -86,6 +86,39 @@ function toReviewDetails(result: ExecResult, options: ClaudeReviewOptions): Clau
   };
 }
 
+const NO_FINDINGS_SUMMARIES = new Set([
+  "",
+  "(none)",
+  "none",
+  "no findings",
+  "no findings reported",
+  "review complete - no findings",
+]);
+
+function reviewHasFindings(details: ClaudeReviewDetails): boolean {
+  return !NO_FINDINGS_SUMMARIES.has(normalizeReviewSummary(details.stdout));
+}
+
+function normalizeReviewSummary(review: string): string {
+  return review
+    .trim()
+    .toLowerCase()
+    .replace(/[—–]/g, "-")
+    .replace(/\s*-\s*/g, " - ")
+    .replace(/[.!]+$/g, "")
+    .replace(/\s+/g, " ");
+}
+
+function maybeNotifyNoFindings(ctx: ExtensionCommandContext, details: ClaudeReviewDetails): void {
+  if (!reviewHasFindings(details)) {
+    ctx.ui.notify("Claude review returned no findings; no auto-fix prompt sent", "info");
+  }
+}
+
+function logReadFailureOutput(job: ClaudeReviewJob): string {
+  return job.errorMessage?.startsWith("Failed to read Claude logs") ? job.lastLog : "";
+}
+
 function handleReviewResult(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
@@ -99,10 +132,13 @@ function handleReviewResult(
   } else if (result.code !== 0) {
     sendReviewOnly(pi, details);
     ctx.ui.notify(`Claude review failed with exit code ${result.code}`, "error");
-  } else if (autoFix) {
+  } else if (autoFix && reviewHasFindings(details)) {
     pi.sendUserMessage(buildAutoFixPrompt(details));
   } else {
     sendReviewOnly(pi, details);
+    if (autoFix) {
+      maybeNotifyNoFindings(ctx, details);
+    }
   }
 }
 
@@ -239,12 +275,16 @@ async function handleClaudeReviewResultCommand(
     const withLogs = refreshed.claudeSessionId
       ? await readClaudeBackgroundLogs(pi, refreshed, claudeBinary())
       : refreshed;
-    const details = jobToClaudeReviewDetails(withLogs);
-    const shouldFix = details.status === "review" && (options.fix ?? withLogs.autoFix);
+    const output = withLogs.stdout || logReadFailureOutput(withLogs);
+    const details = jobToClaudeReviewDetails(withLogs, output);
+    const autoFix = options.fix ?? withLogs.autoFix;
+    const shouldFix = details.status === "review" && autoFix && reviewHasFindings(details);
 
     sendReviewOnly(pi, details);
     if (shouldFix) {
       pi.sendUserMessage(buildAutoFixPrompt(details));
+    } else if (details.status === "review" && autoFix) {
+      maybeNotifyNoFindings(ctx, details);
     } else if (!isTerminalJobStatus(withLogs.status)) {
       ctx.ui.notify(`Claude review is ${withLogs.status}; no auto-fix prompt sent yet`, "info");
     }

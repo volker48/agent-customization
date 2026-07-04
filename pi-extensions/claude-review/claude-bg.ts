@@ -1,3 +1,7 @@
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 import type { ExecResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import { CLAUDE_REVIEW_RESULT_END, CLAUDE_REVIEW_RESULT_START } from "./args.js";
@@ -10,6 +14,27 @@ import {
 
 export const BACKGROUND_START_TIMEOUT_MS = 60 * 1000;
 export const BACKGROUND_STATUS_TIMEOUT_MS = 30 * 1000;
+
+const RAW_LOG_PREVIEW_CHARS = 20_000;
+const ESCAPE_CHAR = String.fromCharCode(27);
+const BELL_CHAR = String.fromCharCode(7);
+const C1_CSI_CHAR = String.fromCharCode(0x9b);
+const ANSI_OSC_SEQUENCE = `${ESCAPE_CHAR}\\][^${BELL_CHAR}]*`;
+const ANSI_OSC_TERMINATOR = `(?:${BELL_CHAR}|${ESCAPE_CHAR}\\\\)`;
+const ANSI_CSI_SEQUENCE = `${ESCAPE_CHAR}\\[[0-?]*[ -/]*[@-~]`;
+const ANSI_FE_SEQUENCE = `${ESCAPE_CHAR}[@-Z\\\\^_]`;
+const C1_CSI_SEQUENCE = `${C1_CSI_CHAR}[0-?]*[ -/]*[@-~]`;
+const ANSI_ESCAPE_PATTERN = new RegExp(
+  [
+    `${ANSI_OSC_SEQUENCE}${ANSI_OSC_TERMINATOR}`,
+    ANSI_CSI_SEQUENCE,
+    ANSI_FE_SEQUENCE,
+    C1_CSI_SEQUENCE,
+  ].join("|"),
+  "g",
+);
+const MISSING_MARKERS_ERROR =
+  "Claude logs did not contain review result markers; refusing to forward raw logs";
 
 interface ClaudeAgentRecord {
   [key: string]: unknown;
@@ -30,6 +55,7 @@ export function claudeBackgroundArgs(
     reviewTools,
     "--allowed-tools",
     reviewTools,
+    "--",
     prompt,
   ];
 }
@@ -67,43 +93,37 @@ export async function startClaudeBackgroundReview(
   const rawStartOutput = joinOutput(result);
   const claudeSessionId = parseBackgroundSessionId(rawStartOutput);
 
-  if (result.killed) {
-    return writeJob({
+  const writeStartFailure = (
+    status: Extract<ClaudeReviewJobStatus, "failed" | "timeout">,
+    errorMessage: string,
+  ): Promise<ClaudeReviewJob> =>
+    writeJob({
       ...next,
-      status: "timeout",
+      status,
       stdout: result.stdout,
       stderr: result.stderr,
       exitCode: result.code,
       completedAt: new Date().toISOString(),
-      errorMessage: "Claude background session did not start before the startup timeout",
+      errorMessage,
       rawStartOutput,
     });
+
+  if (result.killed) {
+    return writeStartFailure(
+      "timeout",
+      "Claude background session did not start before the startup timeout",
+    );
   }
 
   if (result.code !== 0) {
-    return writeJob({
-      ...next,
-      status: "failed",
-      stdout: result.stdout,
-      stderr: result.stderr,
-      exitCode: result.code,
-      completedAt: new Date().toISOString(),
-      errorMessage: `Claude background session failed to start with exit code ${result.code}`,
-      rawStartOutput,
-    });
+    return writeStartFailure(
+      "failed",
+      `Claude background session failed to start with exit code ${result.code}`,
+    );
   }
 
   if (!claudeSessionId) {
-    return writeJob({
-      ...next,
-      status: "failed",
-      stdout: result.stdout,
-      stderr: result.stderr,
-      exitCode: result.code,
-      completedAt: new Date().toISOString(),
-      errorMessage: "Claude background session did not report a session id",
-      rawStartOutput,
-    });
+    return writeStartFailure("failed", "Claude background session did not report a session id");
   }
 
   next = await writeJob({
@@ -194,37 +214,155 @@ export async function readClaudeBackgroundLogs(
     throw new Error("Claude session id is not known yet; run /claude-review-status and try again");
   }
 
+  const transcript = await readClaudeTranscript(job);
+  if (transcript) {
+    return applyClaudeLogOutput(job, { stdout: transcript, stderr: "", code: 0 });
+  }
+
   const result = await pi.exec(claudeBinary, claudeLogsArgs(job.claudeSessionId), {
     cwd: job.cwd,
     timeout: BACKGROUND_STATUS_TIMEOUT_MS,
   });
 
-  const markedReview = extractMarkedReview(result.stdout);
   if (result.code !== 0 && isTerminalJobStatus(job.status)) {
     return job;
   }
+  return applyClaudeLogOutput(job, result);
+}
 
+interface ClaudeLogOutput {
+  stdout: string;
+  stderr: string;
+  code: number;
+}
+
+async function applyClaudeLogOutput(
+  job: ClaudeReviewJob,
+  result: ClaudeLogOutput,
+): Promise<ClaudeReviewJob> {
+  const normalizedStdout = normalizeClaudeOutput(result.stdout);
+  const markedReview = extractMarkedReviewFromNormalized(normalizedStdout);
   let status = job.status;
+  let stdout = job.stdout;
+  let completedAt = job.completedAt;
+  let errorMessage = job.errorMessage;
+  let reviewSource = job.reviewSource;
   if (result.code !== 0) {
     status = "failed";
-  } else if (markedReview && !isTerminalJobStatus(job.status)) {
-    status = "review";
+    completedAt = completedAt ?? new Date().toISOString();
+    reviewSource = null;
+    errorMessage = `Failed to read Claude logs with exit code ${result.code}`;
+  } else if (markedReview) {
+    if (!isTerminalJobStatus(job.status)) {
+      status = "review";
+      stdout = markedReview;
+      reviewSource = "marked-output";
+      completedAt = completedAt ?? new Date().toISOString();
+    } else if (!stdout.trim()) {
+      stdout = markedReview;
+      reviewSource = "marked-output";
+    }
+  } else if (job.status === "review" && !hasPersistedReview(job)) {
+    status = "failed";
+    stdout = "";
+    completedAt = completedAt ?? new Date().toISOString();
+    reviewSource = null;
+    errorMessage = MISSING_MARKERS_ERROR;
   }
 
   return writeJob({
     ...job,
     status,
-    stdout: markedReview ?? result.stdout,
+    stdout,
     stderr: result.stderr,
-    lastLog: result.stdout,
+    lastLog: truncateClaudeLog(normalizedStdout),
+    reviewSource,
     exitCode: job.exitCode,
-    completedAt:
-      status === "review" && !job.completedAt ? new Date().toISOString() : job.completedAt,
-    errorMessage:
-      result.code !== 0
-        ? `Failed to read Claude logs with exit code ${result.code}`
-        : job.errorMessage,
+    completedAt,
+    errorMessage,
   });
+}
+
+async function readClaudeTranscript(job: ClaudeReviewJob): Promise<string | undefined> {
+  for (const path of await claudeTranscriptPaths(job)) {
+    const markedReview = await readMarkedReviewFromJsonl(path);
+    if (markedReview) {
+      return `${CLAUDE_REVIEW_RESULT_START}\n${markedReview}\n${CLAUDE_REVIEW_RESULT_END}`;
+    }
+  }
+  return undefined;
+}
+
+async function claudeTranscriptPaths(job: ClaudeReviewJob): Promise<string[]> {
+  const paths = new Set<string>();
+  if (!job.claudeSessionId) {
+    return [];
+  }
+  const jobDir = join(homedir(), ".claude", "jobs", job.claudeSessionId);
+  paths.add(join(jobDir, "timeline.jsonl"));
+
+  const state = await readJsonFile(join(jobDir, "state.json"));
+  if (state) {
+    const linkScanPath = pickString(state, ["linkScanPath"]);
+    if (linkScanPath) {
+      paths.add(linkScanPath);
+    }
+  }
+  return [...paths];
+}
+
+async function readMarkedReviewFromJsonl(path: string): Promise<string | undefined> {
+  const content = await readFile(path, "utf8").catch(() => undefined);
+  if (!content) {
+    return undefined;
+  }
+
+  let latest: string | undefined;
+  for (const line of content.split(/\r?\n/)) {
+    const record = parseJson(line);
+    if (!isRecord(record)) {
+      continue;
+    }
+    for (const text of extractRecordTexts(record)) {
+      const review = extractMarkedReview(text);
+      if (review && !review.includes("<your concise, actionable review")) {
+        latest = review;
+      }
+    }
+  }
+  return latest;
+}
+
+async function readJsonFile(path: string): Promise<ClaudeAgentRecord | undefined> {
+  const content = await readFile(path, "utf8").catch(() => undefined);
+  const parsed = content ? parseJson(content) : undefined;
+  return isRecord(parsed) ? parsed : undefined;
+}
+
+function extractRecordTexts(record: ClaudeAgentRecord): string[] {
+  const texts: string[] = [];
+  if (typeof record.text === "string") {
+    texts.push(record.text);
+  }
+
+  const message = record.message;
+  if (isRecord(message)) {
+    pushMessageTexts(texts, message);
+  }
+  return texts;
+}
+
+function pushMessageTexts(texts: string[], message: ClaudeAgentRecord): void {
+  const content = message.content;
+  if (typeof content === "string") {
+    texts.push(content);
+  } else if (Array.isArray(content)) {
+    for (const item of content) {
+      if (isRecord(item) && typeof item.text === "string") {
+        texts.push(item.text);
+      }
+    }
+  }
 }
 
 export async function cancelClaudeBackgroundJob(
@@ -261,6 +399,77 @@ export async function cancelClaudeBackgroundJob(
 
 function joinOutput(result: ExecResult): string {
   return [result.stdout, result.stderr].filter(Boolean).join("\n");
+}
+
+export function sanitizeClaudeLog(output: string): string {
+  return truncateClaudeLog(normalizeClaudeOutput(output));
+}
+
+function normalizeClaudeOutput(output: string): string {
+  return stripUnsafeControls(stripAnsiControls(output).replace(/\r/g, "\n"));
+}
+
+function stripAnsiControls(output: string): string {
+  return output.replace(ANSI_ESCAPE_PATTERN, "");
+}
+
+function truncateClaudeLog(output: string): string {
+  if (output.length <= RAW_LOG_PREVIEW_CHARS) {
+    return output;
+  }
+  return [
+    `[Claude log truncated to last ${RAW_LOG_PREVIEW_CHARS} of ${output.length} characters]`,
+    "",
+    output.slice(-RAW_LOG_PREVIEW_CHARS),
+  ].join("\n");
+}
+
+function hasPersistedReview(job: ClaudeReviewJob): boolean {
+  const stdout = normalizeClaudeOutput(job.stdout).trim();
+  if (!stdout) {
+    return false;
+  }
+  if (job.reviewSource === "marked-output") {
+    return true;
+  }
+  if (job.reviewSource !== undefined) {
+    return false;
+  }
+  return !isClaudeStartupOutput(job.stdout, job) && !isMarkerlessRawStdout(job, stdout);
+}
+
+function isMarkerlessRawStdout(job: ClaudeReviewJob, stdout: string): boolean {
+  const lastLog = normalizeClaudeOutput(job.lastLog).trim();
+  return Boolean(lastLog && lastLog === stdout);
+}
+
+function isClaudeStartupOutput(output: string, job: ClaudeReviewJob): boolean {
+  const trimmed = output.trim();
+  if (job.rawStartOutput && trimmed === job.rawStartOutput.trim()) {
+    return true;
+  }
+  if (!trimmed.startsWith("backgrounded ·")) {
+    return false;
+  }
+  return Boolean(
+    (job.claudeSessionId && trimmed.includes(job.claudeSessionId)) ||
+    trimmed.includes(job.claudeSessionName),
+  );
+}
+
+function stripUnsafeControls(output: string): string {
+  let stripped = "";
+  for (const char of output) {
+    const code = char.charCodeAt(0);
+    const isUnsafeControl =
+      (code < 32 && char !== "\n" && char !== "\t") ||
+      code === 127 ||
+      (code >= 0x80 && code <= 0x9f);
+    if (!isUnsafeControl) {
+      stripped += char;
+    }
+  }
+  return stripped;
 }
 
 export function parseBackgroundSessionId(output: string): string | undefined {
@@ -427,6 +636,10 @@ function pickNumber(record: ClaudeAgentRecord, keys: string[]): number | undefin
 }
 
 export function extractMarkedReview(output: string): string | undefined {
+  return extractMarkedReviewFromNormalized(normalizeClaudeOutput(output));
+}
+
+function extractMarkedReviewFromNormalized(output: string): string | undefined {
   const start = output.lastIndexOf(CLAUDE_REVIEW_RESULT_START);
   const end = output.indexOf(CLAUDE_REVIEW_RESULT_END, start + CLAUDE_REVIEW_RESULT_START.length);
   if (start === -1 || end === -1 || end <= start) {
