@@ -79,7 +79,7 @@ function slowAgentEndFakePi(logPath: string): string {
     `    const text = "Slow implementation complete.";
     if (command.type === "prompt") {
       emit({ id: command.id, type: "response", command: "prompt", success: true });
-      setTimeout(() => emit({ type: "agent_end", messages: [] }), 75);
+      setTimeout(() => emit({ type: "agent_end", messages: [] }), 650);
     }
     if (command.type === "get_last_assistant_text") {
       emit({ id: command.id, type: "response", command: "get_last_assistant_text",
@@ -262,12 +262,12 @@ describe("Claude Code Pi implementation delegation", () => {
     const fakePi = await writeFakePi(slowAgentEndFakePi(logPath));
 
     const result = await runImplement({
-      agentEndTimeoutMs: 200,
+      agentEndTimeoutMs: 1_500,
       brief: "Implement a slow request.",
       dataDir,
       piCommand: process.execPath,
       piPrefixArgs: [fakePi],
-      timeoutMs: 50,
+      timeoutMs: 500,
       workspaceRoot: "/repo-under-test",
     });
 
@@ -286,7 +286,7 @@ describe("Claude Code Pi implementation delegation", () => {
       dataDir,
       piCommand: process.execPath,
       piPrefixArgs: [fakePi],
-      timeoutMs: 50,
+      timeoutMs: 500,
       workspaceRoot: "/repo-under-test",
     });
 
