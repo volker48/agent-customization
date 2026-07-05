@@ -7,7 +7,7 @@ import { runSetup } from "./lib/setup.mjs";
 const IMPLEMENT_COMMAND_USAGE = "pi-companion.mjs implement --wait [--model provider/model]";
 const REVIEW_COMMAND_USAGE =
   "pi-companion.mjs review --wait [--model provider/model] [--target ref]";
-const CONTINUE_COMMAND_USAGE = "pi-companion.mjs continue --wait [job-id|latest] <instruction>";
+const CONTINUE_COMMAND_USAGE = "pi-companion.mjs continue --wait [job-id|latest]";
 const IMPLEMENT_USAGE = `Usage: ${IMPLEMENT_COMMAND_USAGE}`;
 const REVIEW_USAGE = `Usage: ${REVIEW_COMMAND_USAGE}`;
 const CONTINUE_USAGE = `Usage: ${CONTINUE_COMMAND_USAGE}`;
@@ -175,11 +175,13 @@ async function runContinueCommand(args) {
 function parseContinueArgs(args) {
   let wait = false;
   let selector = "latest";
+  let hasSelector = false;
   for (const arg of args) {
     if (arg === "--wait") {
       wait = true;
-    } else if (selector === "latest" && !arg.startsWith("--") && !/\s/.test(arg)) {
+    } else if (!hasSelector && !arg.startsWith("--") && !/\s/.test(arg)) {
       selector = arg;
+      hasSelector = true;
     } else {
       throw new Error(CONTINUE_USAGE);
     }

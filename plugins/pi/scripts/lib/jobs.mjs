@@ -96,13 +96,24 @@ export async function findJob(selector = "latest", options = {}) {
 export async function findResumableImplementationJob(selector = "latest", options = {}) {
   const result = await listJobs({ ...options, limit: Number.POSITIVE_INFINITY });
   const jobs = result.jobs.filter(isImplementationJob);
-  if (selector === "latest" || !selector) return { ...result, job: jobs[0] ?? null };
+  if (selector === "latest" || !selector) {
+    return { ...result, job: jobs.find(hasUsablePiSessionMetadata) ?? null };
+  }
   const job = jobs.find((candidate) => candidate.id === selector) ?? null;
   return { ...result, job };
 }
 
 export function isImplementationJob(job) {
   return job?.kind === "implement" || job?.kind === "implement-continuation";
+}
+
+function hasUsablePiSessionMetadata(job) {
+  return (
+    typeof job?.piSessionFile === "string" &&
+    Boolean(job.piSessionFile.trim()) &&
+    typeof job?.sessionId === "string" &&
+    Boolean(job.sessionId.trim())
+  );
 }
 
 export function resolveDataDir(dataDir) {

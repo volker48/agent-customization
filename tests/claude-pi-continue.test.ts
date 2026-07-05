@@ -86,6 +86,7 @@ process.on("SIGTERM", () => process.exit(0));
 async function storedJob(options: {
   dataDir: string;
   id: string;
+  kind?: "implement" | "implement-continuation";
   sessionFile?: string;
   sessionId?: string;
   updatedAt: string;
@@ -99,6 +100,7 @@ async function storedJob(options: {
   Object.assign(job, {
     status: "completed",
     phase: "completed",
+    kind: options.kind ?? job.kind,
     model: "openai/gpt-5.5",
     sessionId: options.sessionId,
     piSessionFile: options.sessionFile,
@@ -170,6 +172,44 @@ describe("Pi implementation continuation", () => {
       result: "Continued implementation. Tests: pnpm test:unit -- continue.",
     });
     expect(result.report).toContain("Parent job: impl-latest");
+  });
+
+  it("skips newer non-resumable jobs when continuing latest", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-continue-data-"));
+    const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-continue-workspace-")));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(logPath);
+    const resumable = await storedJob({
+      dataDir,
+      id: "impl-resumable",
+      sessionFile: "/tmp/resumable-session.jsonl",
+      sessionId: "resumable-session",
+      updatedAt: "2026-07-04T00:00:00.000Z",
+      workspaceRoot,
+    });
+    await storedJob({
+      dataDir,
+      id: "cont-newer-no-session",
+      kind: "implement-continuation",
+      updatedAt: "2026-07-04T00:01:00.000Z",
+      workspaceRoot,
+    });
+
+    await runContinue("latest", {
+      dataDir,
+      instruction: "continue the latest resumable job",
+      piCommand: process.execPath,
+      piPrefixArgs: [fakePi],
+      timeoutMs: 1_000,
+      workspaceRoot,
+    });
+    const argv = (await readFile(logPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .find((record) => record.type === "argv").argv;
+
+    expect(argv).toContain(resumable.piSessionFile);
   });
 
   it("continues an explicit implementation job instead of the latest job", async () => {
@@ -258,6 +298,21 @@ describe("Pi implementation continuation", () => {
     expect(result.report).toContain("Parent job: impl-parent");
     expect(result.report).toContain("Continued implementation.");
     expect(result.report).toContain("- pnpm test:unit -- continue: reported");
+  });
+
+  it("reports continue CLI usage without advertising argv instructions", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-continue-data-"));
+    const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-continue-workspace-")));
+
+    const result = await runCompanion(
+      ["continue", "--wait", "latest", "extra-argv-instruction"],
+      "",
+      { ...process.env, PI_COMPANION_DATA_DIR: dataDir },
+      workspaceRoot,
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr.trim()).toBe("Usage: pi-companion.mjs continue --wait [job-id|latest]");
   });
 
   it("parses explicit job selectors from the Claude command stdin", async () => {
