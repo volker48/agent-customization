@@ -1,7 +1,7 @@
 import Foundation
 import IrohLib
 
-public struct RemoteSession: Codable, Equatable, Identifiable, Sendable {
+public struct RemoteSession: Codable, Equatable, Hashable, Identifiable, Sendable {
   public let sessionID: String
   public let name: String
   public let cwd: String

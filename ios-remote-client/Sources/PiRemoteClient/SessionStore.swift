@@ -48,9 +48,13 @@ public final class SessionStore {
     }
   }
 
-  public func refreshSessionListUntilCancelled() async {
+  public func refreshSessionListUntilCancelled(
+    when shouldRefresh: @MainActor () -> Bool = { true }
+  ) async {
     while !Task.isCancelled {
-      await refresh()
+      if shouldRefresh() {
+        await refresh()
+      }
       await sleepBeforeRegistryRefresh()
     }
   }
@@ -119,21 +123,23 @@ public final class SessionStore {
 public struct SessionListView: View {
   private let store: SessionStore
   @Environment(\.scenePhase) private var scenePhase
+  @State private var navigationPath: [RemoteSession] = []
 
   public init(store: SessionStore) {
     self.store = store
   }
 
   public var body: some View {
-    NavigationStack {
+    NavigationStack(path: $navigationPath) {
       List(store.sessions) { session in
-        NavigationLink {
-          ConversationView(store: store, session: session)
-        } label: {
+        NavigationLink(value: session) {
           SessionRow(session: session)
         }
       }
       .navigationTitle("Remote Sessions")
+      .navigationDestination(for: RemoteSession.self) { session in
+        ConversationView(store: store, session: session)
+      }
       .overlay {
         if store.sessions.isEmpty {
           ContentUnavailableView("No Remote Sessions", systemImage: "iphone.slash")
@@ -142,16 +148,22 @@ public struct SessionListView: View {
       .refreshable {
         await store.refresh()
       }
-      .task {
-        await store.refreshSessionListUntilCancelled()
-      }
-      .onChange(of: scenePhase) { _, phase in
-        guard phase == .active else {
+      .task(id: registryPollingIsActive) {
+        // Check registryPollingIsActive at .task(id:) startup and again in the
+        // refreshSessionListUntilCancelled closure to close the state-change /
+        // cancellation race window; the inner check is intentional.
+        guard registryPollingIsActive else {
           return
         }
-        Task { await store.refresh() }
+        await store.refreshSessionListUntilCancelled {
+          registryPollingIsActive
+        }
       }
     }
+  }
+
+  private var registryPollingIsActive: Bool {
+    scenePhase == .active && navigationPath.isEmpty
   }
 }
 
