@@ -149,6 +149,9 @@ public struct SessionListView: View {
         await store.refresh()
       }
       .task(id: registryPollingIsActive) {
+        // Check registryPollingIsActive at .task(id:) startup and again in the
+        // refreshSessionListUntilCancelled closure to close the state-change /
+        // cancellation race window; the inner check is intentional.
         guard registryPollingIsActive else {
           return
         }
