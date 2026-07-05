@@ -356,6 +356,41 @@ describe("Pi implementation continuation", () => {
     expect(result.stderr.trim()).toBe("Usage: pi-companion.mjs continue --wait [job-id|latest]");
   });
 
+  it("keeps an explicit CLI selector when stdin starts with a selector-like token", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-continue-data-"));
+    const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-continue-workspace-")));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(logPath);
+    await storedJob({
+      dataDir,
+      id: "impl-cli",
+      sessionFile: "/tmp/cli-session.jsonl",
+      sessionId: "cli-session",
+      updatedAt: "2026-07-04T00:00:00.000Z",
+      workspaceRoot,
+    });
+    await storedJob({
+      dataDir,
+      id: "impl-newer",
+      sessionFile: "/tmp/newer-session.jsonl",
+      sessionId: "newer-session",
+      updatedAt: "2026-07-04T00:01:00.000Z",
+      workspaceRoot,
+    });
+
+    const result = await runCompanion(
+      ["continue", "--wait", "impl-cli"],
+      "latest continue from the explicit CLI selector",
+      { ...process.env, PI_CLI: fakePi, PI_COMPANION_DATA_DIR: dataDir },
+      workspaceRoot,
+    );
+
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("Parent job: impl-cli");
+    expect(result.stdout).not.toContain("Parent job: impl-newer");
+  });
+
   it("parses explicit job selectors from the Claude command stdin", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "pi-continue-data-"));
     const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-continue-workspace-")));

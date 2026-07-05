@@ -161,12 +161,17 @@ function parseReviewValue(value) {
 
 async function runContinueCommand(args) {
   const parsedArgs = parseContinueArgs(args);
-  const parsedInput = parseContinueInput(await readStdin());
+  const parsedInput = parseContinueInput(await readStdin(), {
+    parseSelector: !parsedArgs.hasSelector,
+  });
   if (!parsedArgs.wait && !parsedInput.wait) {
     throw new Error(CONTINUE_USAGE);
   }
+  const selector = parsedArgs.hasSelector
+    ? parsedArgs.selector
+    : parsedInput.selector ?? parsedArgs.selector;
   await printResult(
-    await runContinue(parsedInput.selector ?? parsedArgs.selector, {
+    await runContinue(selector, {
       instruction: parsedInput.instruction,
     }),
   );
@@ -186,10 +191,10 @@ function parseContinueArgs(args) {
       throw new Error(CONTINUE_USAGE);
     }
   }
-  return { selector, wait };
+  return { hasSelector, selector, wait };
 }
 
-function parseContinueInput(input) {
+function parseContinueInput(input, options = {}) {
   let remaining = input.trimStart();
   let wait = false;
   const waitMatch = remaining.match(/^--wait(?:\s+|$)/);
@@ -197,6 +202,7 @@ function parseContinueInput(input) {
     wait = true;
     remaining = remaining.slice(waitMatch[0].length).trimStart();
   }
+  if (options.parseSelector === false) return { instruction: remaining, wait };
   const selectorMatch = remaining.match(/^(\S+)(?:\s+|$)/);
   if (!selectorMatch) return { instruction: "", wait };
   const firstToken = selectorMatch[1];
