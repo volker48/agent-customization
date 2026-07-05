@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { runImplement } from "./lib/implement.mjs";
+import { runContinue, runImplement } from "./lib/implement.mjs";
 import { runResult, runStatus } from "./lib/inspect.mjs";
 import { runReview } from "./lib/review.mjs";
 import { runSetup } from "./lib/setup.mjs";
@@ -7,8 +7,10 @@ import { runSetup } from "./lib/setup.mjs";
 const IMPLEMENT_COMMAND_USAGE = "pi-companion.mjs implement --wait [--model provider/model]";
 const REVIEW_COMMAND_USAGE =
   "pi-companion.mjs review --wait [--model provider/model] [--target ref]";
+const CONTINUE_COMMAND_USAGE = "pi-companion.mjs continue --wait [job-id|latest]";
 const IMPLEMENT_USAGE = `Usage: ${IMPLEMENT_COMMAND_USAGE}`;
 const REVIEW_USAGE = `Usage: ${REVIEW_COMMAND_USAGE}`;
+const CONTINUE_USAGE = `Usage: ${CONTINUE_COMMAND_USAGE}`;
 const RESULT_USAGE = "Usage: pi-companion.mjs result [job-id|latest]";
 
 async function main() {
@@ -25,6 +27,10 @@ async function main() {
     await runReviewCommand(command, args);
     return;
   }
+  if (command === "continue") {
+    await runContinueCommand(args);
+    return;
+  }
   if (command === "status") {
     await printResult(await runStatus());
     return;
@@ -34,7 +40,13 @@ async function main() {
     return;
   }
   console.error(
-    `Usage: pi-companion.mjs setup | ${IMPLEMENT_COMMAND_USAGE} | ${REVIEW_COMMAND_USAGE} | status | result`,
+    [
+      "Usage: pi-companion.mjs setup",
+      IMPLEMENT_COMMAND_USAGE,
+      REVIEW_COMMAND_USAGE,
+      CONTINUE_COMMAND_USAGE,
+      "status | result",
+    ].join(" | "),
   );
   process.exitCode = 2;
 }
@@ -145,6 +157,67 @@ function takeReviewValue(input) {
 function parseReviewValue(value) {
   if (!value || value.startsWith("--")) throw new Error(REVIEW_USAGE);
   return value;
+}
+
+async function runContinueCommand(args) {
+  const parsedArgs = parseContinueArgs(args);
+  const parsedInput = parseContinueInput(await readStdin(), {
+    parseSelector: !parsedArgs.hasSelector,
+  });
+  if (!parsedArgs.wait && !parsedInput.wait) {
+    throw new Error(CONTINUE_USAGE);
+  }
+  const selector = parsedArgs.hasSelector
+    ? parsedArgs.selector
+    : parsedInput.selector ?? parsedArgs.selector;
+  await printResult(
+    await runContinue(selector, {
+      instruction: parsedInput.instruction,
+    }),
+  );
+}
+
+function parseContinueArgs(args) {
+  let wait = false;
+  let selector = "latest";
+  let hasSelector = false;
+  for (const arg of args) {
+    if (arg === "--wait") {
+      wait = true;
+    } else if (!hasSelector && !arg.startsWith("--") && !/\s/.test(arg)) {
+      selector = arg;
+      hasSelector = true;
+    } else {
+      throw new Error(CONTINUE_USAGE);
+    }
+  }
+  return { hasSelector, selector, wait };
+}
+
+function parseContinueInput(input, options = {}) {
+  let remaining = input.trimStart();
+  let wait = false;
+  const waitMatch = remaining.match(/^--wait(?:\s+|$)/);
+  if (waitMatch) {
+    wait = true;
+    remaining = remaining.slice(waitMatch[0].length).trimStart();
+  }
+  if (options.parseSelector === false) return { instruction: remaining, wait };
+  const selectorMatch = remaining.match(/^(\S+)(?:\s+|$)/);
+  if (!selectorMatch) return { instruction: "", wait };
+  const firstToken = selectorMatch[1];
+  if (isContinuationSelector(firstToken)) {
+    return {
+      instruction: remaining.slice(selectorMatch[0].length).trimStart(),
+      selector: firstToken,
+      wait,
+    };
+  }
+  return { instruction: remaining, wait };
+}
+
+function isContinuationSelector(value) {
+  return value === "latest" || value.startsWith("impl-") || value.startsWith("cont-");
 }
 
 async function runResultCommand(args) {

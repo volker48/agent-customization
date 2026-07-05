@@ -6,15 +6,30 @@ import { basename, dirname, join } from "node:path";
 export const DEFAULT_DATA_DIR = join(homedir(), ".local", "state", "claude-pi-companion");
 export const RECENT_JOBS_LIMIT = 20;
 
+const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled"]);
+
 export function createImplementationJob(options = {}) {
-  return createPiJob({ ...options, idPrefix: "impl", kind: "implement" });
+  return createJobRecord({ ...options, idPrefix: "impl", kind: "implement" });
 }
 
 export function createReviewJob(options = {}) {
-  return createPiJob({ ...options, idPrefix: "review", kind: "review" });
+  return createJobRecord({ ...options, idPrefix: "review", kind: "review" });
 }
 
-function createPiJob(options = {}) {
+export function createContinuationJob(parentJob, options = {}) {
+  const rootJobId = parentJob.rootJobId ?? parentJob.parentJobId ?? parentJob.id;
+  return createJobRecord({
+    ...options,
+    idPrefix: "cont",
+    kind: "implement-continuation",
+    parentJobId: parentJob.id,
+    rootJobId,
+    continuedFromSessionId: parentJob.sessionId,
+    continuedFromSessionFile: parentJob.piSessionFile,
+  });
+}
+
+function createJobRecord(options = {}) {
   const workspaceRoot = options.workspaceRoot ?? process.cwd();
   const dataDir = resolveDataDir(options.dataDir);
   const workspaceId = workspaceIdForRoot(workspaceRoot);
@@ -35,6 +50,14 @@ function createPiJob(options = {}) {
     updatedAt: now,
     changedFiles: [],
     testsRun: [],
+    ...(options.parentJobId ? { parentJobId: options.parentJobId } : {}),
+    ...(options.rootJobId ? { rootJobId: options.rootJobId } : {}),
+    ...(options.continuedFromSessionId
+      ? { continuedFromSessionId: options.continuedFromSessionId }
+      : {}),
+    ...(options.continuedFromSessionFile
+      ? { continuedFromSessionFile: options.continuedFromSessionFile }
+      : {}),
   };
 }
 
@@ -70,6 +93,34 @@ export async function findJob(selector = "latest", options = {}) {
   if (selector === "latest" || !selector) return { ...result, job: result.jobs[0] ?? null };
   const job = result.jobs.find((candidate) => candidate.id === selector) ?? null;
   return { ...result, job };
+}
+
+export async function findResumableImplementationJob(selector = "latest", options = {}) {
+  const result = await listJobs({ ...options, limit: Number.POSITIVE_INFINITY });
+  const jobs = result.jobs.filter(isImplementationJob);
+  if (selector === "latest" || !selector) {
+    const terminalJobs = jobs.filter(isTerminalJob);
+    return { ...result, job: terminalJobs.find(hasUsablePiSessionMetadata) ?? null };
+  }
+  const job = jobs.find((candidate) => candidate.id === selector) ?? null;
+  return { ...result, job };
+}
+
+export function isImplementationJob(job) {
+  return job?.kind === "implement" || job?.kind === "implement-continuation";
+}
+
+function isTerminalJob(job) {
+  return TERMINAL_JOB_STATUSES.has(job?.status);
+}
+
+function hasUsablePiSessionMetadata(job) {
+  return (
+    typeof job?.piSessionFile === "string" &&
+    Boolean(job.piSessionFile.trim()) &&
+    typeof job?.sessionId === "string" &&
+    Boolean(job.sessionId.trim())
+  );
 }
 
 export function resolveDataDir(dataDir) {
