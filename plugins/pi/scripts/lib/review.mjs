@@ -21,7 +21,15 @@ export async function runReview(options = {}) {
   const target = normalizeText(options.target);
   const job = createReviewJob(options);
   await startReviewJob(job, { extraContext, mode, target });
-  const gitContext = await collectGitContext(job.workspaceRoot, { ...options, target });
+  let gitContext;
+  try {
+    gitContext = await collectGitContext(job.workspaceRoot, { ...options, target });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    await failJob(job, errorMessage);
+    await finishReviewJob(job, { files: [], notes: [] }, null);
+    throw error;
+  }
   const client = new PiRpcClient({
     command: options.piCommand ?? process.env.PI_CLI ?? "pi",
     args: buildReviewPiArgs(job, options),
@@ -205,7 +213,7 @@ async function targetDiffSection(workspaceRoot, target, limits, notes) {
   const result = await git(workspaceRoot, ["diff", `${target}...HEAD`], { allowFailure: false });
   return section(
     `git diff ${target}...HEAD`,
-    capFile(`${target}...HEAD`, result.stdout, limits, notes),
+    capTargetDiff(`${target}...HEAD`, result.stdout, limits, notes),
   );
 }
 
@@ -250,6 +258,12 @@ function capFile(path, text, limits, notes) {
   if (Buffer.byteLength(text) <= limits.maxFileBytes) return text;
   notes.push(`- ${path} truncated to ${limits.maxFileBytes} bytes`);
   return truncateBytes(text, limits.maxFileBytes);
+}
+
+function capTargetDiff(label, text, limits, notes) {
+  if (Buffer.byteLength(text) <= limits.maxTotalBytes) return text;
+  notes.push(`- target diff ${label} truncated to ${limits.maxTotalBytes} bytes`);
+  return truncateBytes(text, limits.maxTotalBytes);
 }
 
 function truncateBytes(text, maxBytes) {

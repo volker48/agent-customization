@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
+import { findJob } from "../plugins/pi/scripts/lib/jobs.mjs";
 import {
   buildReviewPiArgs,
   collectGitContext,
@@ -184,16 +185,43 @@ describe("Claude Code Pi read-only review delegation", () => {
     expect(prompt).toContain("data-loss risk");
   });
 
-  it("collects branch-target diffs", async () => {
+  it("fails and finalizes the review job when context collection fails", async () => {
+    const repo = await createRepo();
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-review-data-"));
+
+    await expect(
+      runReview({
+        dataDir,
+        piCommand: process.execPath,
+        target: "missing-target-ref",
+        timeoutMs: 1_000,
+        workspaceRoot: repo,
+      }),
+    ).rejects.toThrow();
+
+    const { job } = await findJob("latest", { dataDir, workspaceRoot: repo });
+
+    expect(job?.status).toBe("failed");
+    expect(job?.phase).toBe("failed");
+    expect(job?.completedAt).toEqual(expect.any(String));
+  });
+
+  it("collects branch-target diffs without applying the per-file cap", async () => {
     const repo = await createRepo();
     await git(repo, ["checkout", "-b", "feature"]);
-    await writeFile(join(repo, "file.txt"), "feature\n", "utf8");
+    await writeFile(join(repo, "file.txt"), `${"feature\n".repeat(80)}`, "utf8");
     await git(repo, ["commit", "-am", "feature change"]);
 
-    const context = await collectGitContext(repo, { target: "HEAD~1" });
+    const context = await collectGitContext(repo, {
+      limits: { maxFileBytes: 100, maxStatusBytes: 1_000, maxTotalBytes: 10_000 },
+      target: "HEAD~1",
+    });
 
     expect(context.text).toContain("git diff HEAD~1...HEAD");
     expect(context.text).toContain("+feature");
+    expect(context.notes).not.toEqual(
+      expect.arrayContaining([expect.stringContaining("HEAD~1...HEAD truncated to 100 bytes")]),
+    );
   });
 
   it("adds visible truncation notes for large diffs", async () => {
