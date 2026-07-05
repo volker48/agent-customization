@@ -60,7 +60,7 @@ jobs:
 
       - name: Check Swift formatting
         working-directory: ios-remote-client
-        run: swift format lint --strict --recursive --configuration .swift-format Sources Tests Package.swift
+        run: swift format lint --strict --recursive Sources Tests Package.swift
 
       - name: Run Swift unit tests
         working-directory: ios-remote-client
