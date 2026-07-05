@@ -1,10 +1,14 @@
 #!/usr/bin/env node
 import { runImplement } from "./lib/implement.mjs";
 import { runResult, runStatus } from "./lib/inspect.mjs";
+import { runReview } from "./lib/review.mjs";
 import { runSetup } from "./lib/setup.mjs";
 
 const IMPLEMENT_COMMAND_USAGE = "pi-companion.mjs implement --wait [--model provider/model]";
+const REVIEW_COMMAND_USAGE =
+  "pi-companion.mjs review --wait [--model provider/model] [--target ref]";
 const IMPLEMENT_USAGE = `Usage: ${IMPLEMENT_COMMAND_USAGE}`;
+const REVIEW_USAGE = `Usage: ${REVIEW_COMMAND_USAGE}`;
 const RESULT_USAGE = "Usage: pi-companion.mjs result [job-id|latest]";
 
 async function main() {
@@ -17,6 +21,10 @@ async function main() {
     await runImplementCommand(args);
     return;
   }
+  if (command === "review" || command === "adversarial-review") {
+    await runReviewCommand(command, args);
+    return;
+  }
   if (command === "status") {
     await printResult(await runStatus());
     return;
@@ -25,7 +33,9 @@ async function main() {
     await runResultCommand(args);
     return;
   }
-  console.error(`Usage: pi-companion.mjs setup | ${IMPLEMENT_COMMAND_USAGE} | status | result`);
+  console.error(
+    `Usage: pi-companion.mjs setup | ${IMPLEMENT_COMMAND_USAGE} | ${REVIEW_COMMAND_USAGE} | status | result`,
+  );
   process.exitCode = 2;
 }
 
@@ -79,6 +89,61 @@ function parseBriefInput(input) {
 
 function parseModelValue(value) {
   if (!value || value.startsWith("--")) throw new Error(IMPLEMENT_USAGE);
+  return value;
+}
+
+async function runReviewCommand(command, args) {
+  const parsedArgs = parseReviewArgs(args);
+  const parsedInput = parseReviewInput(await readStdin());
+  if (!parsedArgs.wait && !parsedInput.wait) throw new Error(REVIEW_USAGE);
+  await printResult(
+    await runReview({
+      context: parsedInput.context,
+      mode: command === "adversarial-review" ? "adversarial" : "review",
+      model: parsedArgs.model ?? parsedInput.model,
+      target: parsedArgs.target ?? parsedInput.target,
+    }),
+  );
+}
+
+function parseReviewArgs(args) {
+  let wait = false;
+  let model;
+  let target;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--wait") wait = true;
+    else if (arg === "--model") model = parseReviewValue(args[++index]);
+    else if (arg === "--target") target = parseReviewValue(args[++index]);
+    else throw new Error(`Unknown review option: ${arg}`);
+  }
+  return { model, target, wait };
+}
+
+function parseReviewInput(input) {
+  let remaining = input.trimStart();
+  let model;
+  let target;
+  let wait = false;
+  while (true) {
+    const flag = remaining.match(/^--(wait|model|target)(?:\s+|$)/);
+    if (!flag) break;
+    remaining = remaining.slice(flag[0].length).trimStart();
+    if (flag[1] === "wait") wait = true;
+    if (flag[1] === "model") ({ remaining, value: model } = takeReviewValue(remaining));
+    if (flag[1] === "target") ({ remaining, value: target } = takeReviewValue(remaining));
+  }
+  return { context: remaining, model, target, wait };
+}
+
+function takeReviewValue(input) {
+  const match = input.match(/^(\S+)(?:\s+|$)/);
+  const value = parseReviewValue(match?.[1]);
+  return { remaining: input.slice(match[0].length).trimStart(), value };
+}
+
+function parseReviewValue(value) {
+  if (!value || value.startsWith("--")) throw new Error(REVIEW_USAGE);
   return value;
 }
 
