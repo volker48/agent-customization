@@ -19,3 +19,7 @@ PI_IMPLEMENT_BRIEF
 For `--background`, report the job id and tell the user to use `/pi:status`, `/pi:result`, or
 `/pi:cancel`. For `--wait`, report the Pi session metadata, final implementation summary, and
 any failed checks. Do not edit files on the Claude side while Pi is implementing.
+
+Pi implementation runs can take up to 30 minutes, which exceeds the Bash tool's foreground
+timeout. For anything beyond a small brief, either run the `--wait` command with
+`run_in_background` or use `--background` and poll `/pi:status` until the job finishes.
