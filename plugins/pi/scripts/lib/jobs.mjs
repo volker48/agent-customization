@@ -6,6 +6,7 @@ import {
   readdir,
   readFile,
   rename,
+  stat,
   unlink,
   writeFile,
 } from "node:fs/promises";
@@ -187,10 +188,37 @@ async function acquireJobLock(lockFile) {
       return handle;
     } catch (error) {
       if (!isExistingFileError(error)) throw error;
+      await reclaimStaleJobLock(lockFile);
       await sleep(JOB_LOCK_POLL_MS);
     }
   }
   throw new Error(`Timed out acquiring job lock: ${lockFile}`);
+}
+
+async function reclaimStaleJobLock(lockFile) {
+  let owner;
+  let lockStat;
+  try {
+    [owner, lockStat] = await Promise.all([readFile(lockFile, "utf8"), stat(lockFile)]);
+  } catch (error) {
+    if (!isMissingFileError(error)) throw error;
+    return;
+  }
+  const pid = Number.parseInt(owner.trim(), 10);
+  const lockAgeMs = Date.now() - lockStat.mtimeMs;
+  if (Number.isInteger(pid) && isPidAlive(pid) && lockAgeMs < JOB_LOCK_TIMEOUT_MS) return;
+  await unlink(lockFile).catch((error) => {
+    if (!isMissingFileError(error)) throw error;
+  });
+}
+
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error && typeof error === "object" && error.code === "EPERM";
+  }
 }
 
 async function atomicWriteJson(path, data) {

@@ -7,7 +7,11 @@ import { describe, expect, it } from "vitest";
 
 import { runImplement } from "../plugins/pi/scripts/lib/implement.mjs";
 import { runResult, runStatus } from "../plugins/pi/scripts/lib/inspect.mjs";
-import { createImplementationJob, persistJob } from "../plugins/pi/scripts/lib/jobs.mjs";
+import {
+  createImplementationJob,
+  persistJob,
+  updateJobRecord,
+} from "../plugins/pi/scripts/lib/jobs.mjs";
 
 const COMPANION = join(process.cwd(), "plugins/pi/scripts/pi-companion.mjs");
 const execFileAsync = promisify(execFile);
@@ -212,6 +216,19 @@ describe("Pi implementation job audit ledger", () => {
     expect(status.report).toContain("Warning: Skipped unreadable job record broken.json");
     expect(missing.ok).toBe(false);
     expect(missing.report).toContain("Job not found: does-not-exist");
+  });
+
+  it("recovers stale job locks before updating records", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-jobs-data-"));
+    const workspaceRoot = "/repo-under-test";
+    const job = createImplementationJob({ dataDir, workspaceRoot, id: "impl-stale-lock" });
+    await persistJob(job);
+    await writeFile(`${job.jobFile}.lock`, "not-a-pid");
+
+    await updateJobRecord(job, { phase: "running" });
+
+    const record = JSON.parse(await readFile(job.jobFile, "utf8"));
+    expect(record.phase).toBe("running");
   });
 
   it("exits zero for successful status and result commands", async () => {

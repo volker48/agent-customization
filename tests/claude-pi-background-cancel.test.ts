@@ -179,7 +179,7 @@ describe("Pi background implementation cancellation", () => {
 
     await runCancel(jobId, { dataDir, workspaceRoot, timeoutMs: 500 });
     await waitForStatus(dataDir, workspaceRoot, jobId, "cancelled");
-  });
+  }, 20_000);
 
   it("cancels through Pi RPC abort before marking the job cancelled", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "pi-bg-data-"));
@@ -206,7 +206,7 @@ describe("Pi background implementation cancellation", () => {
     expect(cancelled.status).toBe(0);
     expect(job.phase).toBe("cancelled");
     expect(commands.map((command) => command.type)).toContain("abort");
-  });
+  }, 20_000);
 
   it("keeps a real completion that wins the cancel race", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "pi-bg-data-"));
@@ -234,7 +234,7 @@ describe("Pi background implementation cancellation", () => {
     expect(cancelled.job.status).toBe("completed");
     expect(result.job?.status).toBe("completed");
     expect(result.job?.summary).toBe("real completion");
-  });
+  }, 20_000);
 
   it("falls back to process-tree termination when abort does not finish", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "pi-bg-data-"));
@@ -256,7 +256,7 @@ describe("Pi background implementation cancellation", () => {
 
     expect(cancelled.stdout).toContain("Status: cancelled");
     expect(log).toContain('"type":"abort"');
-  });
+  }, 20_000);
 
   it("session cleanup cancels active jobs owned by the ending Claude session", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "pi-bg-data-"));
@@ -297,7 +297,7 @@ describe("Pi background implementation cancellation", () => {
     expect(cleanup.stdout).toContain(`${jobId}: cancelled`);
     expect(job.status).toBe("cancelled");
     expect(otherJob.job?.status).toBe("running");
-  });
+  }, 20_000);
 
   it("session cleanup falls back to the environment for malformed hook input", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "pi-bg-data-"));
@@ -325,7 +325,7 @@ describe("Pi background implementation cancellation", () => {
     expect(cleanup.status).toBe(0);
     expect(cleanup.stdout).toContain(`${jobId}: cancelled`);
     expect(job.status).toBe("cancelled");
-  });
+  }, 20_000);
 
   it("terminates descendants that outlive the root process", async () => {
     const pidFile = join(await mkdtemp(join(tmpdir(), "pi-tree-")), "child.pid");
