@@ -227,7 +227,11 @@ function selectedModel(options) {
 }
 
 function ownerClaudeSessionId(options) {
-  return options.ownerClaudeSessionId ?? process.env.CLAUDE_SESSION_ID;
+  return (
+    options.ownerClaudeSessionId ??
+    process.env.CLAUDE_CODE_SESSION_ID ??
+    process.env.CLAUDE_SESSION_ID
+  );
 }
 
 function watchCancellation(client, job, options) {

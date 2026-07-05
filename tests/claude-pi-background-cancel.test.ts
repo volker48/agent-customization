@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { cleanupActiveJobs, runCancel } from "../plugins/pi/scripts/lib/cancel.mjs";
+import { runCancel } from "../plugins/pi/scripts/lib/cancel.mjs";
 import {
   createImplementationJob,
   persistJob,
@@ -13,6 +13,8 @@ import {
 import { runResult, runStatus } from "../plugins/pi/scripts/lib/inspect.mjs";
 
 const COMPANION = join(process.cwd(), "plugins/pi/scripts/pi-companion.mjs");
+const PLUGIN_MANIFEST = join(process.cwd(), "plugins/pi/.claude-plugin/plugin.json");
+const PLUGIN_HOOKS = join(process.cwd(), "plugins/pi/hooks/hooks.json");
 
 async function runCompanion(args: string[], input: string, env: NodeJS.ProcessEnv, cwd: string) {
   const child = spawn(process.execPath, [COMPANION, ...args], {
@@ -107,6 +109,20 @@ async function waitForLogCommands(path: string) {
 }
 
 describe("Pi background implementation cancellation", () => {
+  it("declares a Claude SessionEnd hook for scoped session cleanup", async () => {
+    const manifest = JSON.parse(await readFile(PLUGIN_MANIFEST, "utf8"));
+    const hooks = JSON.parse(await readFile(PLUGIN_HOOKS, "utf8"));
+    const sessionEndHook = hooks.hooks.SessionEnd[0].hooks[0];
+
+    expect(manifest.hooks).toBe("./hooks/hooks.json");
+    expect(sessionEndHook.type).toBe("command");
+    expect(sessionEndHook.command).toBe("node");
+    expect(sessionEndHook.args).toEqual([
+      "${CLAUDE_PLUGIN_ROOT}/scripts/pi-companion.mjs",
+      "session-cleanup",
+    ]);
+  });
+
   it("starts a background job and updates status/result ledgers", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "pi-bg-data-"));
     const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-bg-workspace-")));
@@ -221,7 +237,7 @@ describe("Pi background implementation cancellation", () => {
     const fakePi = await writeFakePi(fakePiScript(logPath, true));
     const env = {
       ...process.env,
-      CLAUDE_SESSION_ID: "claude-session-a",
+      CLAUDE_CODE_SESSION_ID: "claude-session-a",
       PI_CLI: fakePi,
       PI_COMPANION_DATA_DIR: dataDir,
     };
@@ -240,16 +256,17 @@ describe("Pi background implementation cancellation", () => {
     );
     const jobId = extractJobId(started.stdout);
     await waitForStatus(dataDir, workspaceRoot, jobId, "running");
-    const cleanup = await cleanupActiveJobs({
-      dataDir,
-      ownerClaudeSessionId: "claude-session-a",
+    const cleanup = await runCompanion(
+      ["session-cleanup"],
+      JSON.stringify({ cwd: workspaceRoot, session_id: "claude-session-a" }),
+      env,
       workspaceRoot,
-      timeoutMs: 500,
-    });
+    );
     const job = await waitForStatus(dataDir, workspaceRoot, jobId, "cancelled");
     const otherJob = await runResult(unrelated.id, { dataDir, workspaceRoot });
 
-    expect(cleanup.cancelled).toEqual([`${jobId}: cancelled`]);
+    expect(cleanup.status).toBe(0);
+    expect(cleanup.stdout).toContain(`${jobId}: cancelled`);
     expect(job.status).toBe("cancelled");
     expect(otherJob.job?.status).toBe("running");
   });

@@ -284,12 +284,17 @@ function parseSessionCleanupArgs(args) {
 }
 
 function parseHookInput(input) {
-  if (!input.trim()) return { sessionId: process.env.CLAUDE_SESSION_ID };
+  if (!input.trim()) return { sessionId: currentClaudeSessionId() };
   const payload = JSON.parse(input);
   return {
     cwd: typeof payload.cwd === "string" ? payload.cwd : undefined,
-    sessionId: typeof payload.session_id === "string" ? payload.session_id : undefined,
+    sessionId:
+      typeof payload.session_id === "string" ? payload.session_id : currentClaudeSessionId(),
   };
+}
+
+function currentClaudeSessionId() {
+  return process.env.CLAUDE_CODE_SESSION_ID ?? process.env.CLAUDE_SESSION_ID;
 }
 
 async function runResultCommand(args) {
