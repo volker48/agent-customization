@@ -21,6 +21,10 @@ export function isProcessAlive(pid) {
   }
 }
 
+export function isDeadPid(pid) {
+  return Number.isInteger(pid) && pid > 0 && !isProcessAlive(pid);
+}
+
 async function signalTree(pid, signal) {
   for (const childPid of await childPids(pid)) await signalTree(childPid, signal);
   try {

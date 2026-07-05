@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { exitedProcessPid } from "./helpers/process.js";
 import { runCancel } from "../plugins/pi/scripts/lib/cancel.mjs";
 import {
   createImplementationJob,
@@ -151,6 +152,33 @@ describe("Pi background implementation cancellation", () => {
     ]);
   });
 
+  it("stores background implementation briefs in the job file", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-bg-data-"));
+    const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-bg-workspace-")));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(fakePiScript(logPath, true));
+    const env = { ...process.env, PI_CLI: fakePi, PI_COMPANION_DATA_DIR: dataDir };
+
+    const started = await runCompanion(
+      ["implement", "--background"],
+      "persist this background brief",
+      env,
+      workspaceRoot,
+    );
+    const jobId = extractJobId(started.stdout);
+    await waitForStatus(dataDir, workspaceRoot, jobId, "running");
+    const result = await runResult(jobId, { dataDir, workspaceRoot });
+    if (!result.job) throw new Error(`Missing job: ${jobId}`);
+    const job = JSON.parse(await readFile(result.job.jobFile, "utf8"));
+
+    expect(started.status).toBe(0);
+    expect(job.brief).toBe("persist this background brief");
+    expect(result.report).not.toContain("persist this background brief");
+
+    await runCancel(jobId, { dataDir, workspaceRoot, timeoutMs: 500 });
+    await waitForStatus(dataDir, workspaceRoot, jobId, "cancelled");
+  }, 20_000);
+
   it("starts a background job and updates status/result ledgers", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "pi-bg-data-"));
     const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-bg-workspace-")));
@@ -206,6 +234,32 @@ describe("Pi background implementation cancellation", () => {
     expect(cancelled.status).toBe(0);
     expect(job.phase).toBe("cancelled");
     expect(commands.map((command) => command.type)).toContain("abort");
+  }, 20_000);
+
+  it("cancels active jobs immediately when the recorded worker is dead", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-bg-data-"));
+    const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-bg-workspace-")));
+    const deadPid = await exitedProcessPid();
+    const job = createImplementationJob({
+      dataDir,
+      workspaceRoot,
+      id: "impl-dead-worker-cancel",
+      status: "running",
+      phase: "running",
+    });
+    Object.assign(job, { workerPid: deadPid, piPid: deadPid });
+    await persistJob(job);
+
+    const startedAt = Date.now();
+    const cancelled = await runCancel(job.id, {
+      dataDir,
+      workspaceRoot,
+      timeoutMs: 3_000,
+    });
+
+    expect(cancelled.job.status).toBe("cancelled");
+    expect(cancelled.job.phase).toBe("cancelled");
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
   }, 20_000);
 
   it("keeps a real completion that wins the cancel race", async () => {

@@ -13,11 +13,14 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
+import { isDeadPid } from "./process-tree.mjs";
+
 export const DEFAULT_DATA_DIR = join(homedir(), ".local", "state", "claude-pi-companion");
 export const RECENT_JOBS_LIMIT = 20;
 
 const JOB_LOCK_POLL_MS = 25;
 const JOB_LOCK_TIMEOUT_MS = 5_000;
+export const ACTIVE_JOB_STATUSES = new Set(["queued", "running", "cancelling"]);
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 export function createImplementationJob(options = {}) {
@@ -63,6 +66,7 @@ function createJobRecord(options = {}) {
     model: options.model,
     requestedModel: options.requestedModel ?? options.model,
     ownerClaudeSessionId: options.ownerClaudeSessionId,
+    ...(typeof options.brief === "string" ? { brief: options.brief } : {}),
     changedFiles: [],
     testsRun: [],
     ...(options.parentJobId ? { parentJobId: options.parentJobId } : {}),
@@ -116,7 +120,9 @@ export async function listJobs(options = {}) {
   const jobsDir = join(root, "jobs");
   const warnings = [];
   const records = await readJobRecords(jobsDir, warnings);
-  const jobs = sortJobs(records).slice(0, options.limit ?? RECENT_JOBS_LIMIT);
+  const jobs = sortJobs(records)
+    .slice(0, options.limit ?? RECENT_JOBS_LIMIT)
+    .map(markStaleJob);
   return { jobs, ledgerPath: jobsDir, warnings };
 }
 
@@ -144,6 +150,11 @@ export function isImplementationJob(job) {
 
 function isTerminalJob(job) {
   return TERMINAL_JOB_STATUSES.has(job?.status);
+}
+
+function markStaleJob(job) {
+  if (!ACTIVE_JOB_STATUSES.has(job.status) || !isDeadPid(job.workerPid)) return job;
+  return { ...job, stale: true };
 }
 
 function hasUsablePiSessionMetadata(job) {

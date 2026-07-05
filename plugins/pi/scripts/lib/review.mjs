@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { appendJobLog, createReviewJob, persistJob } from "./jobs.mjs";
+import { appendJobLog, createReviewJob, updateJobRecord } from "./jobs.mjs";
 import { PiRpcClient } from "./pi-rpc-client.mjs";
 import { DEFAULT_INTENDED_MODEL, modelRef } from "./setup.mjs";
 
@@ -13,6 +13,7 @@ const DEFAULT_CONTEXT_LIMITS = {
   maxTotalBytes: 180_000,
   maxStatusBytes: 20_000,
 };
+const TERMINAL_STATUSES = new Set(["cancelled", "completed", "failed"]);
 const execFileAsync = promisify(execFile);
 
 export async function runReview(options = {}) {
@@ -42,7 +43,8 @@ export async function runReview(options = {}) {
     options.terminateTimeoutMs ?? DEFAULT_TERMINATE_TIMEOUT_MS,
   );
   await finishReviewJob(job, gitContext, piTerminated);
-  return buildReviewResult({ client, ...outcome, gitContext, job, piTerminated });
+  const ok = job.status === "completed";
+  return buildReviewResult({ client, ...outcome, gitContext, job, ok, piTerminated });
 }
 
 export async function collectGitContext(workspaceRoot, options = {}) {
@@ -106,7 +108,7 @@ async function executeReview(client, job, gitContext, options) {
     errorMessage = error instanceof Error ? error.message : String(error);
     await failJob(job, errorMessage);
   }
-  return { errorMessage, finalText, ok: !errorMessage };
+  return { errorMessage, finalText };
 }
 
 async function promptPiForReview(client, job, gitContext, options) {
@@ -313,21 +315,38 @@ async function updateJobFromState(job, state) {
 }
 
 async function completeJob(job, finalText) {
-  await updateJob(job, {
-    status: "completed",
-    phase: "completed",
-    result: finalText,
-    summary: firstNonEmptyLine(finalText),
+  await updateJobRecord(job, (current) => {
+    if (current.status === "cancelling" || TERMINAL_STATUSES.has(current.status)) return null;
+    return {
+      status: "completed",
+      phase: "completed",
+      result: finalText,
+      summary: firstNonEmptyLine(finalText),
+    };
   });
 }
 
 async function failJob(job, errorMessage) {
-  await updateJob(job, {
-    status: "failed",
-    phase: "failed",
-    errorMessage,
-    summary: `Failed: ${errorMessage}`,
+  await updateJobRecord(job, (current) => {
+    if (current.status === "cancelling") return cancellationChanges(errorMessage);
+    if (TERMINAL_STATUSES.has(current.status)) return null;
+    return {
+      status: "failed",
+      phase: "failed",
+      errorMessage,
+      summary: `Failed: ${errorMessage}`,
+    };
   });
+}
+
+function cancellationChanges(reason) {
+  return {
+    status: "cancelled",
+    phase: "cancelled",
+    cancelledAt: new Date().toISOString(),
+    summary: "Cancelled by Claude session request.",
+    errorMessage: reason,
+  };
 }
 
 async function finishReviewJob(job, gitContext, piTerminated) {
@@ -376,8 +395,7 @@ function firstNonEmptyLine(text) {
 }
 
 async function updateJob(job, changes) {
-  Object.assign(job, changes, { updatedAt: new Date().toISOString() });
-  await persistJob(job);
+  await updateJobRecord(job, changes);
 }
 
 function buildReviewResult(input) {
@@ -396,7 +414,7 @@ function buildReviewResult(input) {
 function renderReviewReport({ errorMessage, finalText, gitContext, job, ok, piTerminated }) {
   return [
     "# Pi review result",
-    `Status: ${ok ? "completed" : "failed"}`,
+    `Status: ${job.status}`,
     `Job: ${job.id}`,
     `Mode: ${job.mode ?? "review"}`,
     `Target: ${job.target || "working tree"}`,
@@ -406,6 +424,13 @@ function renderReviewReport({ errorMessage, finalText, gitContext, job, ok, piTe
     `Pi RPC termination: ${piTerminated ? "ok" : "failed"}`,
     ...gitContext.notes.map((note) => `Note: ${note}`),
     "",
-    ok ? finalText : `Error: ${errorMessage}`,
+    reviewReportBody({ errorMessage, finalText, job, ok }),
   ].join("\n");
+}
+
+function reviewReportBody({ errorMessage, finalText, job, ok }) {
+  if (job.status === "cancelled" || job.status === "cancelling") {
+    return "Review cancelled before completion.";
+  }
+  return ok ? finalText : `Error: ${errorMessage}`;
 }

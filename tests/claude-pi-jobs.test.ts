@@ -5,10 +5,12 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 
+import { exitedProcessPid } from "./helpers/process.js";
 import { runImplement } from "../plugins/pi/scripts/lib/implement.mjs";
 import { runResult, runStatus } from "../plugins/pi/scripts/lib/inspect.mjs";
 import {
   createImplementationJob,
+  listJobs,
   persistJob,
   updateJobRecord,
 } from "../plugins/pi/scripts/lib/jobs.mjs";
@@ -101,6 +103,7 @@ describe("Pi implementation job audit ledger", () => {
       status: "completed",
       phase: "completed",
       workspaceRoot,
+      brief: "Implement auditable job records.",
       sessionId: "audit-session",
       piSessionFile: "/tmp/audit-session.jsonl",
       model: "openai-codex/gpt-5.5",
@@ -196,6 +199,44 @@ describe("Pi implementation job audit ledger", () => {
     expect(result.report).toContain("- pnpm test:unit: passed");
     expect(result.report).toContain("Session: session-123");
     expect(result.report).toContain(`Log: ${job.logFile}`);
+  });
+
+  it("reports stale active jobs when their worker process is dead", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-jobs-data-"));
+    const workspaceRoot = "/repo-under-test";
+    const deadPid = await exitedProcessPid();
+    const staleJob = createImplementationJob({ dataDir, workspaceRoot, id: "impl-stale" });
+    const liveJob = createImplementationJob({ dataDir, workspaceRoot, id: "impl-live" });
+    Object.assign(staleJob, { status: "running", phase: "running", workerPid: deadPid });
+    Object.assign(liveJob, { status: "running", phase: "running", workerPid: process.pid });
+    await persistJob(staleJob);
+    await persistJob(liveJob);
+
+    const { jobs } = await listJobs({ dataDir, workspaceRoot });
+    const stale = jobs.find((job) => job.id === "impl-stale");
+    const live = jobs.find((job) => job.id === "impl-live");
+    const persisted = JSON.parse(await readFile(staleJob.jobFile, "utf8"));
+
+    expect(stale?.stale).toBe(true);
+    expect(live?.stale).toBeUndefined();
+    expect(persisted.stale).toBeUndefined();
+  });
+
+  it("renders stale jobs without claiming they are running", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-jobs-data-"));
+    const workspaceRoot = "/repo-under-test";
+    const deadPid = await exitedProcessPid();
+    const job = createImplementationJob({ dataDir, workspaceRoot, id: "impl-stale-report" });
+    Object.assign(job, { status: "running", phase: "running", workerPid: deadPid });
+    await persistJob(job);
+
+    const status = await runStatus({ dataDir, workspaceRoot });
+    const result = await runResult(job.id, { dataDir, workspaceRoot });
+
+    expect(status.report).toContain("running (stale)");
+    expect(status.report).not.toContain("/pi:result impl-stale-report (running)");
+    expect(result.report).toContain("worker process is no longer alive");
+    expect(result.report).toContain(`/pi:cancel ${job.id}`);
   });
 
   it("tolerates malformed and partial job records while reading the ledger", async () => {

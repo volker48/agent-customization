@@ -73,6 +73,61 @@ process.on("SIGTERM", () => process.exit(0));
 `;
 }
 
+function cancellingFakePiScript(logPath: string, dataDir: string) {
+  return `#!/usr/bin/env node
+import { appendFileSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+writeFileSync(${JSON.stringify(logPath)}, JSON.stringify({ type: "argv", argv: process.argv.slice(1) }) + "\\n");
+process.stdin.setEncoding("utf8");
+let buffer = "";
+function emit(message) { process.stdout.write(JSON.stringify(message) + "\\n"); }
+function record(command) {
+  appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ type: "command", command }) + "\\n");
+}
+function findJobFile(root) {
+  for (const entry of readdirSync(root)) {
+    const path = join(root, entry);
+    if (statSync(path).isDirectory()) {
+      const found = findJobFile(path);
+      if (found) return found;
+    }
+    if (path.endsWith(".json")) return path;
+  }
+  return null;
+}
+function markCancelling() {
+  const path = findJobFile(${JSON.stringify(dataDir)});
+  const job = JSON.parse(readFileSync(path, "utf8"));
+  writeFileSync(path, JSON.stringify({ ...job, status: "cancelling", phase: "cancelling" }, null, 2) + "\\n");
+}
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  while (buffer.includes("\\n")) {
+    const index = buffer.indexOf("\\n");
+    const line = buffer.slice(0, index);
+    buffer = buffer.slice(index + 1);
+    if (!line) continue;
+    const command = JSON.parse(line);
+    record(command);
+    if (command.type === "get_state") emit({ id: command.id, type: "response", command: "get_state", success: true, data: {
+      model: { provider: "openai", id: "gpt-5.5", name: "GPT 5.5" },
+      sessionId: "review-session",
+      sessionFile: "/tmp/review-session.jsonl"
+    }});
+    if (command.type === "prompt") {
+      emit({ id: command.id, type: "response", command: "prompt", success: true });
+      emit({ type: "agent_end", messages: [] });
+    }
+    if (command.type === "get_last_assistant_text") {
+      markCancelling();
+      emit({ id: command.id, type: "response", command: "get_last_assistant_text", success: true, data: { text: "Review finding: fix it." } });
+    }
+  }
+});
+process.on("SIGTERM", () => process.exit(0));
+`;
+}
+
 async function runCompanion(
   args: string[],
   input: string,
@@ -156,6 +211,31 @@ describe("Claude Code Pi read-only review delegation", () => {
     expect(prompt).toContain("Git context collected outside Pi");
     expect(prompt).toContain("+after");
     expect(prompt).toContain("check issue #42");
+  });
+
+  it("does not complete a review job that was marked cancelling", async () => {
+    const repo = await createRepo();
+    await writeFile(join(repo, "file.txt"), "before\nafter\n", "utf8");
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-review-data-"));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(cancellingFakePiScript(logPath, dataDir));
+
+    const result = await runReview({
+      dataDir,
+      piCommand: process.execPath,
+      piPrefixArgs: [fakePi],
+      timeoutMs: 1_000,
+      workspaceRoot: repo,
+    });
+    const { job } = await findJob("latest", { dataDir, workspaceRoot: repo });
+
+    expect(result.ok).not.toBe(true);
+    expect(result.report).toContain("Status: cancelling");
+    expect(result.report).not.toContain("Status: completed");
+    expect(result.report).toContain("Review cancelled before completion.");
+    expect(result.report).not.toContain("Review finding: fix it.");
+    expect(job?.status).toBe("cancelling");
+    expect(job?.result).toBeUndefined();
   });
 
   it("frames adversarial review prompts with required risk areas", async () => {
