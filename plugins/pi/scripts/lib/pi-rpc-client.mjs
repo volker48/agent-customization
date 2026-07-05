@@ -11,18 +11,25 @@ export class PiRpcClient {
     this.pending = new Map();
     this.eventWaiters = [];
     this.stderr = "";
+    this.closed = false;
     this.terminated = false;
     this.protocolError = null;
+    this.detached = options.detached === true;
   }
 
   start() {
-    this.process = spawn(this.command, this.args, { stdio: ["pipe", "pipe", "pipe"] });
+    this.process = spawn(this.command, this.args, {
+      detached: this.detached,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
     attachJsonlReader(this.process.stdout, (line) => this.handleLine(line));
     this.process.stderr.on("data", (chunk) => {
       this.appendStderr(chunk.toString());
     });
-    this.process.once("exit", () => {
+    this.process.once("close", () => {
+      this.closed = true;
       this.terminated = true;
+      this.failPending(new Error("Pi RPC process exited before completing the request"));
     });
   }
 
@@ -62,9 +69,13 @@ export class PiRpcClient {
     };
   }
 
+  async abort() {
+    return this.request({ type: "abort" });
+  }
+
   async terminate(timeoutMs = 10_000) {
-    if (!this.process || this.process.exitCode !== null) return true;
-    this.process.kill("SIGTERM");
+    if (!this.process || this.closed) return true;
+    if (this.process.exitCode === null) this.process.kill("SIGTERM");
     return this.waitForExit(timeoutMs);
   }
 
@@ -153,7 +164,7 @@ export class PiRpcClient {
 
   waitForExit(timeoutMs) {
     return new Promise((resolve) => {
-      if (!this.process || this.process.exitCode !== null) {
+      if (!this.process || this.closed) {
         resolve(true);
         return;
       }
@@ -161,7 +172,7 @@ export class PiRpcClient {
         this.process.kill("SIGKILL");
         resolve(false);
       }, timeoutMs);
-      this.process.once("exit", () => {
+      this.process.once("close", () => {
         clearTimeout(timer);
         resolve(true);
       });

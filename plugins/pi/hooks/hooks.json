@@ -1,0 +1,22 @@
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/pi-companion.mjs",
+              "session-cleanup"
+            ],
+            "async": true,
+            "timeout": 60,
+            "statusMessage": "Cleaning up Pi implementation jobs"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -203,11 +203,13 @@ function successfulFakePi(logPath: string): string {
 }
 
 describe("Claude Code Pi implementation delegation", () => {
-  it("ships a pi implement command that invokes the companion in wait mode", async () => {
+  it("ships a pi implement command that passes mode flags through stdin", async () => {
     const command = await readFile("plugins/pi/commands/implement.md", "utf8");
 
     await access("plugins/pi/scripts/pi-companion.mjs");
-    expect(command).toContain('pi-companion.mjs" implement --wait');
+    expect(command).toContain('pi-companion.mjs" implement');
+    expect(command).toContain("--wait");
+    expect(command).toContain("--background");
     expect(command).toContain("PI_IMPLEMENT_BRIEF");
     expect(command).toContain("write-capable");
   });

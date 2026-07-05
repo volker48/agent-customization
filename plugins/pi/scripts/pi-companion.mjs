@@ -1,10 +1,17 @@
 #!/usr/bin/env node
-import { runContinue, runImplement } from "./lib/implement.mjs";
+import { cleanupActiveJobs, runCancel } from "./lib/cancel.mjs";
+import {
+  runContinue,
+  runImplement,
+  runImplementWorker,
+  startBackgroundImplement,
+} from "./lib/implement.mjs";
 import { runResult, runStatus } from "./lib/inspect.mjs";
 import { runReview } from "./lib/review.mjs";
 import { runSetup } from "./lib/setup.mjs";
 
-const IMPLEMENT_COMMAND_USAGE = "pi-companion.mjs implement --wait [--model provider/model]";
+const IMPLEMENT_COMMAND_USAGE =
+  "pi-companion.mjs implement --wait|--background [--model provider/model]";
 const REVIEW_COMMAND_USAGE =
   "pi-companion.mjs review --wait [--model provider/model] [--target ref]";
 const CONTINUE_COMMAND_USAGE = "pi-companion.mjs continue --wait [job-id|latest]";
@@ -12,6 +19,7 @@ const IMPLEMENT_USAGE = `Usage: ${IMPLEMENT_COMMAND_USAGE}`;
 const REVIEW_USAGE = `Usage: ${REVIEW_COMMAND_USAGE}`;
 const CONTINUE_USAGE = `Usage: ${CONTINUE_COMMAND_USAGE}`;
 const RESULT_USAGE = "Usage: pi-companion.mjs result [job-id|latest]";
+const CANCEL_USAGE = "Usage: pi-companion.mjs cancel [job-id|latest]";
 
 async function main() {
   const [command, ...args] = process.argv.slice(2);
@@ -35,6 +43,14 @@ async function main() {
     await printResult(await runStatus());
     return;
   }
+  if (command === "cancel") {
+    await runCancelCommand(args);
+    return;
+  }
+  if (command === "session-cleanup") {
+    await runSessionCleanupCommand(args);
+    return;
+  }
   if (command === "result") {
     await runResultCommand(args);
     return;
@@ -45,7 +61,7 @@ async function main() {
       IMPLEMENT_COMMAND_USAGE,
       REVIEW_COMMAND_USAGE,
       CONTINUE_COMMAND_USAGE,
-      "status | result",
+      "status | result | cancel",
     ].join(" | "),
   );
   process.exitCode = 2;
@@ -54,35 +70,49 @@ async function main() {
 async function runImplementCommand(args) {
   const parsedArgs = parseImplementArgs(args);
   const parsedInput = parseBriefInput(await readStdin());
-  if (!parsedArgs.wait && !parsedInput.wait) {
-    throw new Error(IMPLEMENT_USAGE);
+  if (parsedArgs.worker) {
+    await printResult(await runImplementWorker({ jobFile: parsedArgs.jobFile }));
+    return;
   }
+  const background = parsedArgs.background || parsedInput.background;
+  const wait = parsedArgs.wait || parsedInput.wait;
+  if (background === wait) throw new Error(IMPLEMENT_USAGE);
+  const options = { brief: parsedInput.brief, model: parsedArgs.model ?? parsedInput.model };
   await printResult(
-    await runImplement({ brief: parsedInput.brief, model: parsedArgs.model ?? parsedInput.model }),
+    background ? await startBackgroundImplement(options) : await runImplement(options),
   );
 }
 
 function parseImplementArgs(args) {
-  let wait = false;
+  let background = false;
+  let jobFile;
   let model;
+  let wait = false;
+  let worker = false;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
-    if (arg === "--wait") {
-      wait = true;
-    } else if (arg === "--model") {
-      model = parseModelValue(args[++index]);
-    } else {
-      throw new Error(`Unknown implement option: ${arg}`);
-    }
+    if (arg === "--background") background = true;
+    else if (arg === "--wait") wait = true;
+    else if (arg === "--worker") worker = true;
+    else if (arg === "--job-file") jobFile = parseModelValue(args[++index]);
+    else if (arg === "--model") model = parseModelValue(args[++index]);
+    else throw new Error(`Unknown implement option: ${arg}`);
   }
-  return { model, wait };
+  return { background, jobFile, model, wait, worker };
 }
 
 function parseBriefInput(input) {
   let remaining = input.trimStart();
+  let background = false;
   let model;
   let wait = false;
   while (true) {
+    const backgroundMatch = remaining.match(/^--background(?:\s+|$)/);
+    if (backgroundMatch) {
+      background = true;
+      remaining = remaining.slice(backgroundMatch[0].length).trimStart();
+      continue;
+    }
     const waitMatch = remaining.match(/^--wait(?:\s+|$)/);
     if (waitMatch) {
       wait = true;
@@ -96,7 +126,7 @@ function parseBriefInput(input) {
     model = parseModelValue(valueMatch?.[1]);
     remaining = remaining.slice(valueMatch[0].length).trimStart();
   }
-  return { brief: remaining, model, wait };
+  return { background, brief: remaining, model, wait };
 }
 
 function parseModelValue(value) {
@@ -218,6 +248,58 @@ function parseContinueInput(input, options = {}) {
 
 function isContinuationSelector(value) {
   return value === "latest" || value.startsWith("impl-") || value.startsWith("cont-");
+}
+
+function parseRequiredValue(value) {
+  if (!value || value.startsWith("--")) throw new Error("Missing required option value");
+  return value;
+}
+
+async function runCancelCommand(args) {
+  if (args.length > 1) throw new Error(CANCEL_USAGE);
+  const inputSelector = args[0] ?? (await readStdin()).trim();
+  const selector = parseResultSelector(inputSelector);
+  await printResult(await runCancel(selector));
+}
+
+async function runSessionCleanupCommand(args) {
+  const parsedArgs = parseSessionCleanupArgs(args);
+  const hookInput = parseHookInput(await readStdin());
+  await printResult(
+    await cleanupActiveJobs({
+      ownerClaudeSessionId: parsedArgs.ownerClaudeSessionId ?? hookInput.sessionId,
+      workspaceRoot: hookInput.cwd,
+    }),
+  );
+}
+
+function parseSessionCleanupArgs(args) {
+  let ownerClaudeSessionId;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--claude-session-id") ownerClaudeSessionId = parseRequiredValue(args[++index]);
+    else throw new Error("Usage: pi-companion.mjs session-cleanup [--claude-session-id id]");
+  }
+  return { ownerClaudeSessionId };
+}
+
+function parseHookInput(input) {
+  if (!input.trim()) return { sessionId: currentClaudeSessionId() };
+  let payload;
+  try {
+    payload = JSON.parse(input);
+  } catch {
+    return { sessionId: currentClaudeSessionId() };
+  }
+  return {
+    cwd: typeof payload.cwd === "string" ? payload.cwd : undefined,
+    sessionId:
+      typeof payload.session_id === "string" ? payload.session_id : currentClaudeSessionId(),
+  };
+}
+
+function currentClaudeSessionId() {
+  return process.env.CLAUDE_CODE_SESSION_ID ?? process.env.CLAUDE_SESSION_ID;
 }
 
 async function runResultCommand(args) {
