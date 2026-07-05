@@ -52,9 +52,9 @@ public struct PairingView: View {
 
       Section("Pairing Code") {
         TextField("123-456", text: $viewModel.code)
-#if os(iOS)
-          .keyboardType(.numberPad)
-#endif
+          #if os(iOS)
+            .keyboardType(.numberPad)
+          #endif
         Button("Pair") {
           Task { await viewModel.submitPairing() }
         }
@@ -71,43 +71,43 @@ public struct PairingView: View {
           .foregroundStyle(.red)
       }
     }
-#if os(iOS) && canImport(VisionKit)
-    .sheet(isPresented: $isScanning) {
-      QRCodeScannerView(
-        onTicketScanned: { ticket in
-          viewModel.ticket = ticket
-          isScanning = false
-        },
-        onError: { error in
-          viewModel.reportScannerError(error)
-          isScanning = false
-        }
-      )
-    }
-#endif
+    #if os(iOS) && canImport(VisionKit)
+      .sheet(isPresented: $isScanning) {
+        QRCodeScannerView(
+          onTicketScanned: { ticket in
+            viewModel.ticket = ticket
+            isScanning = false
+          },
+          onError: { error in
+            viewModel.reportScannerError(error)
+            isScanning = false
+          }
+        )
+      }
+    #endif
   }
 
   @ViewBuilder
   private var ticketTextField: some View {
-#if os(iOS)
-    TextField("iroh endpoint ticket", text: $viewModel.ticket, axis: .vertical)
-      .textInputAutocapitalization(.never)
-      .autocorrectionDisabled()
-#else
-    TextField("iroh endpoint ticket", text: $viewModel.ticket, axis: .vertical)
-      .autocorrectionDisabled()
-#endif
+    #if os(iOS)
+      TextField("iroh endpoint ticket", text: $viewModel.ticket, axis: .vertical)
+        .textInputAutocapitalization(.never)
+        .autocorrectionDisabled()
+    #else
+      TextField("iroh endpoint ticket", text: $viewModel.ticket, axis: .vertical)
+        .autocorrectionDisabled()
+    #endif
   }
 
   @ViewBuilder
   private var scanButton: some View {
-#if os(iOS) && canImport(VisionKit)
-    Button("Scan QR Ticket") {
-      isScanning = true
-    }
-#else
-    Text("Paste the QR ticket from /remote pair.")
-      .foregroundStyle(.secondary)
-#endif
+    #if os(iOS) && canImport(VisionKit)
+      Button("Scan QR Ticket") {
+        isScanning = true
+      }
+    #else
+      Text("Paste the QR ticket from /remote pair.")
+        .foregroundStyle(.secondary)
+    #endif
   }
 }
