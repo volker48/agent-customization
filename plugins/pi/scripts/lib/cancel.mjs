@@ -1,7 +1,13 @@
-import { appendJobLog, findJob, listJobs, readJob, updateJobRecord } from "./jobs.mjs";
-import { isProcessAlive, terminateProcessTree } from "./process-tree.mjs";
+import {
+  ACTIVE_JOB_STATUSES as ACTIVE_STATUSES,
+  appendJobLog,
+  findJob,
+  listJobs,
+  readJob,
+  updateJobRecord,
+} from "./jobs.mjs";
+import { isDeadPid, isProcessAlive, terminateProcessTree } from "./process-tree.mjs";
 
-const ACTIVE_STATUSES = new Set(["queued", "running", "cancelling"]);
 const DEFAULT_CANCEL_TIMEOUT_MS = 2_000;
 
 export async function runCancel(selector = "latest", options = {}) {
@@ -14,7 +20,7 @@ export async function runCancel(selector = "latest", options = {}) {
   );
   if (job.status !== "cancelling") return alreadyFinishedResult(job);
   await appendJobLog(job, "cancelling", { workerPid: job.workerPid, piPid: job.piPid });
-  const cancelled = hasDeadWorkerPid(job)
+  const cancelled = isDeadPid(job.workerPid)
     ? false
     : await waitForCancelled(job.jobFile, options.timeoutMs ?? DEFAULT_CANCEL_TIMEOUT_MS);
   if (!cancelled) await killActiveProcesses(job);
@@ -58,11 +64,6 @@ function cleanupMatches(job, ownerClaudeSessionId) {
     ACTIVE_STATUSES.has(job.status) &&
     job.ownerClaudeSessionId === ownerClaudeSessionId
   );
-}
-
-function hasDeadWorkerPid(job) {
-  const pid = job.workerPid;
-  return Number.isInteger(pid) && pid > 0 && !isProcessAlive(pid);
 }
 
 async function killActiveProcesses(job) {

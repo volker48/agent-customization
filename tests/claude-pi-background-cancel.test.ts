@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { exitedProcessPid } from "./helpers/process.js";
 import { runCancel } from "../plugins/pi/scripts/lib/cancel.mjs";
 import {
   createImplementationJob,
@@ -134,19 +135,6 @@ async function waitForProcessDeath(pid: number) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(`Timed out waiting for process to exit: ${pid}`);
-}
-
-async function exitedProcessPid(): Promise<number> {
-  const child = spawn(process.execPath, ["-e", "process.exit(0)"], {
-    stdio: "ignore",
-  });
-  const pid = child.pid;
-  if (!pid) throw new Error("Failed to start short-lived process");
-  await new Promise<void>((resolve, reject) => {
-    child.on("error", reject);
-    child.on("close", () => resolve());
-  });
-  return pid;
 }
 
 describe("Pi background implementation cancellation", () => {

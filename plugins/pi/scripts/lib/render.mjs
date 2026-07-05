@@ -1,4 +1,4 @@
-const ACTIVE_STATUSES = new Set(["queued", "running", "cancelling"]);
+import { ACTIVE_JOB_STATUSES as ACTIVE_STATUSES } from "./jobs.mjs";
 
 export function renderStatusReport({ jobs, ledgerPath, warnings = [] }) {
   const lines = ["# Pi jobs", `Ledger: ${ledgerPath}`];

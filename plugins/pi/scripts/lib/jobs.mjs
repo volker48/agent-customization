@@ -13,14 +13,14 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
-import { isProcessAlive } from "./process-tree.mjs";
+import { isDeadPid } from "./process-tree.mjs";
 
 export const DEFAULT_DATA_DIR = join(homedir(), ".local", "state", "claude-pi-companion");
 export const RECENT_JOBS_LIMIT = 20;
 
 const JOB_LOCK_POLL_MS = 25;
 const JOB_LOCK_TIMEOUT_MS = 5_000;
-const ACTIVE_JOB_STATUSES = new Set(["queued", "running", "cancelling"]);
+export const ACTIVE_JOB_STATUSES = new Set(["queued", "running", "cancelling"]);
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 export function createImplementationJob(options = {}) {
@@ -153,18 +153,8 @@ function isTerminalJob(job) {
 }
 
 function markStaleJob(job) {
-  if (!hasDeadWorkerPid(job)) return job;
+  if (!ACTIVE_JOB_STATUSES.has(job.status) || !isDeadPid(job.workerPid)) return job;
   return { ...job, stale: true };
-}
-
-function hasDeadWorkerPid(job) {
-  const pid = job.workerPid;
-  return (
-    ACTIVE_JOB_STATUSES.has(job.status) &&
-    Number.isInteger(pid) &&
-    pid > 0 &&
-    !isProcessAlive(pid)
-  );
 }
 
 function hasUsablePiSessionMetadata(job) {

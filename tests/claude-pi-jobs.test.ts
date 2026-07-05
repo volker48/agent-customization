@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 
+import { exitedProcessPid } from "./helpers/process.js";
 import { runImplement } from "../plugins/pi/scripts/lib/implement.mjs";
 import { runResult, runStatus } from "../plugins/pi/scripts/lib/inspect.mjs";
 import {
@@ -37,19 +38,6 @@ async function writeFakePi(script: string): Promise<string> {
   const path = join(dir, "fake-pi.mjs");
   await writeFile(path, script);
   return path;
-}
-
-async function exitedProcessPid(): Promise<number> {
-  const child = spawn(process.execPath, ["-e", "process.exit(0)"], {
-    stdio: "ignore",
-  });
-  const pid = child.pid;
-  if (!pid) throw new Error("Failed to start short-lived process");
-  await new Promise<void>((resolve, reject) => {
-    child.on("error", reject);
-    child.on("close", () => resolve());
-  });
-  return pid;
 }
 
 function fakePiScript(
