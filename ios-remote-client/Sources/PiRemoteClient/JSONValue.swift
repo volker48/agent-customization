@@ -112,4 +112,3 @@ private func escapedJSONScalar(_ scalar: UnicodeScalar) -> String {
     String(scalar)
   }
 }
-

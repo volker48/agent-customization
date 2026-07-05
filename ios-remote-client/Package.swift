@@ -12,7 +12,7 @@ let package = Package(
     .executable(name: "pi-remote-client-tests", targets: ["PiRemoteClientTests"]),
   ],
   dependencies: [
-    .package(url: "https://github.com/n0-computer/iroh-ffi.git", exact: "1.0.0"),
+    .package(url: "https://github.com/n0-computer/iroh-ffi.git", exact: "1.0.0")
   ],
   targets: [
     .target(
