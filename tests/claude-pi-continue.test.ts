@@ -89,6 +89,7 @@ async function storedJob(options: {
   kind?: "implement" | "implement-continuation";
   sessionFile?: string;
   sessionId?: string;
+  status?: string;
   updatedAt: string;
   workspaceRoot: string;
 }) {
@@ -98,8 +99,8 @@ async function storedJob(options: {
     workspaceRoot: options.workspaceRoot,
   });
   Object.assign(job, {
-    status: "completed",
-    phase: "completed",
+    status: options.status ?? "completed",
+    phase: options.status ?? "completed",
     kind: options.kind ?? job.kind,
     model: "openai/gpt-5.5",
     sessionId: options.sessionId,
@@ -172,6 +173,46 @@ describe("Pi implementation continuation", () => {
       result: "Continued implementation. Tests: pnpm test:unit -- continue.",
     });
     expect(result.report).toContain("Parent job: impl-latest");
+  });
+
+  it("skips newer in-flight jobs when continuing latest", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-continue-data-"));
+    const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-continue-workspace-")));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(logPath);
+    const completed = await storedJob({
+      dataDir,
+      id: "impl-completed",
+      sessionFile: "/tmp/completed-session.jsonl",
+      sessionId: "completed-session",
+      updatedAt: "2026-07-04T00:00:00.000Z",
+      workspaceRoot,
+    });
+    await storedJob({
+      dataDir,
+      id: "impl-running",
+      sessionFile: "/tmp/running-session.jsonl",
+      sessionId: "running-session",
+      status: "running",
+      updatedAt: "2026-07-04T00:01:00.000Z",
+      workspaceRoot,
+    });
+
+    await runContinue("latest", {
+      dataDir,
+      instruction: "continue the latest completed job",
+      piCommand: process.execPath,
+      piPrefixArgs: [fakePi],
+      timeoutMs: 1_000,
+      workspaceRoot,
+    });
+    const argv = (await readFile(logPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .find((record) => record.type === "argv").argv;
+
+    expect(argv).toContain(completed.piSessionFile);
   });
 
   it("skips newer non-resumable jobs when continuing latest", async () => {

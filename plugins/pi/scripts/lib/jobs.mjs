@@ -6,6 +6,8 @@ import { basename, dirname, join } from "node:path";
 export const DEFAULT_DATA_DIR = join(homedir(), ".local", "state", "claude-pi-companion");
 export const RECENT_JOBS_LIMIT = 20;
 
+const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled"]);
+
 export function createImplementationJob(options = {}) {
   return createJobRecord({ ...options, idPrefix: "impl", kind: "implement" });
 }
@@ -97,7 +99,8 @@ export async function findResumableImplementationJob(selector = "latest", option
   const result = await listJobs({ ...options, limit: Number.POSITIVE_INFINITY });
   const jobs = result.jobs.filter(isImplementationJob);
   if (selector === "latest" || !selector) {
-    return { ...result, job: jobs.find(hasUsablePiSessionMetadata) ?? null };
+    const terminalJobs = jobs.filter(isTerminalJob);
+    return { ...result, job: terminalJobs.find(hasUsablePiSessionMetadata) ?? null };
   }
   const job = jobs.find((candidate) => candidate.id === selector) ?? null;
   return { ...result, job };
@@ -105,6 +108,10 @@ export async function findResumableImplementationJob(selector = "latest", option
 
 export function isImplementationJob(job) {
   return job?.kind === "implement" || job?.kind === "implement-continuation";
+}
+
+function isTerminalJob(job) {
+  return TERMINAL_JOB_STATUSES.has(job?.status);
 }
 
 function hasUsablePiSessionMetadata(job) {
