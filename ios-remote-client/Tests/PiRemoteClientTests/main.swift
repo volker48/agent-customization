@@ -46,6 +46,7 @@ private func runRemoteClientTests() async throws {
   try await sessionStoreReconnectsAndReattachesAfterFeedError()
   try await sessionStoreReconnectsWhenFeedEndsCleanly()
   try await sessionStoreRefreshLoopTracksSessionRegistry()
+  try await sessionStoreRefreshLoopPausesWhenRegistryIsInactive()
   try await sessionStoreIgnoresSupersededSessionFeed()
 }
 
@@ -494,6 +495,37 @@ private func sessionStoreRefreshLoopTracksSessionRegistry() async throws {
   try expect(sessions == [.init(sessionID: "session-2", name: "Second", cwd: "/two")])
 }
 
+private func sessionStoreRefreshLoopPausesWhenRegistryIsInactive() async throws {
+  let session = RemoteSession(sessionID: "session-1", name: "Work", cwd: "/repo")
+  let transport = CountingListTransport(sessions: [session])
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+  let store = await SessionStore(
+    client: client,
+    reconnectDelayNanoseconds: 0,
+    registryRefreshIntervalNanoseconds: 1_000_000
+  )
+  let visibility = await RegistryPollingVisibility(false)
+
+  let refreshTask = Task {
+    await store.refreshSessionListUntilCancelled {
+      visibility.isVisible
+    }
+  }
+  try await Task.sleep(nanoseconds: 30_000_000)
+  let hiddenRequestCount = await transport.recordedRequestCount()
+  await MainActor.run {
+    visibility.isVisible = true
+  }
+  try await waitUntil {
+    await transport.recordedRequestCount() > hiddenRequestCount
+  }
+  refreshTask.cancel()
+
+  let sessions = await store.sessions
+  try expect(hiddenRequestCount == 0)
+  try expect(sessions == [session])
+}
+
 private func sessionStoreReconnectsWhenFeedEndsCleanly() async throws {
   let transport = ReconnectingAttachTransport(streams: [
     .success([liveEvent(text: "stale")]),
@@ -618,6 +650,56 @@ private actor SwitchingAttachTransport: RemoteTransport {
     await withCheckedContinuation { continuation in
       secondStreamStarted = continuation
     }
+  }
+}
+
+@MainActor
+private final class RegistryPollingVisibility {
+  var isVisible: Bool
+
+  init(_ isVisible: Bool) {
+    self.isVisible = isVisible
+  }
+}
+
+private actor CountingListTransport: RemoteTransport {
+  nonisolated let localNodeID = "node-a"
+
+  private let sessions: [RemoteSession]
+  private var requestCount = 0
+
+  init(sessions: [RemoteSession]) {
+    self.sessions = sessions
+  }
+
+  func request(ticket: String, envelopes: [Envelope]) async throws -> [Envelope] {
+    requestCount += 1
+    return [
+      .control(
+        .init(
+          type: .list,
+          payload: .array(
+            sessions.map { session in
+              .object([
+                .init("sessionId", .string(session.sessionID)),
+                .init("name", .string(session.name)),
+                .init("cwd", .string(session.cwd)),
+              ])
+            })
+        )
+      )
+    ]
+  }
+
+  nonisolated func stream(
+    ticket: String,
+    envelopes: [Envelope]
+  ) -> AsyncThrowingStream<Envelope, Error> {
+    AsyncThrowingStream { continuation in continuation.finish() }
+  }
+
+  func recordedRequestCount() -> Int {
+    requestCount
   }
 }
 
