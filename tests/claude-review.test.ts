@@ -293,7 +293,11 @@ describe("claude review command", () => {
 
   it("does not auto-fix successful wait-mode reviews with missing findings markers", async () => {
     const { pi, command } = createMockPi({
-      stdout: "Finding: fix the edge case",
+      stdout: [
+        CLAUDE_REVIEW_RESULT_START,
+        "Finding: fix the edge case",
+        CLAUDE_REVIEW_RESULT_END,
+      ].join("\n"),
       stderr: "",
       code: 0,
       killed: false,
