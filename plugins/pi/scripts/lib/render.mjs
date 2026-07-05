@@ -28,7 +28,8 @@ export function renderResultReport({ job, selector, ledgerPath, warnings = [] })
     `Kind: ${job.kind}`,
     ...(job.parentJobId ? [`Parent job: ${job.parentJobId}`] : []),
     ...(job.rootJobId ? [`Root job: ${job.rootJobId}`] : []),
-    `Status: ${job.status}`,
+    `Status: ${statusLabel(job)}`,
+    ...staleLines(job),
     `Phase: ${job.phase}`,
     `Model: ${job.model ?? "unknown"}`,
     `Created: ${job.createdAt ?? "unknown"}`,
@@ -56,7 +57,7 @@ export function renderResultReport({ job, selector, ledgerPath, warnings = [] })
 function statusRow(job) {
   return [
     job.id,
-    job.status,
+    statusLabel(job),
     job.phase,
     job.model ?? "unknown",
     job.updatedAt ?? "unknown",
@@ -71,7 +72,18 @@ function statusRow(job) {
 
 function followUpCommand(job) {
   const command = `/pi:result ${job.id}`;
+  if (job.stale) return command;
   return ACTIVE_STATUSES.has(job.status) ? `${command} (running)` : command;
+}
+
+function statusLabel(job) {
+  return job.stale ? `${job.status} (stale)` : job.status;
+}
+
+function staleLines(job) {
+  if (!job.stale) return [];
+  const action = `run /pi:cancel ${job.id} to finalize it`;
+  return [`Stale: worker process is no longer alive; ${action}.`];
 }
 
 function listLines(values, empty) {

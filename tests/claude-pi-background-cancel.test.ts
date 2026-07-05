@@ -136,6 +136,19 @@ async function waitForProcessDeath(pid: number) {
   throw new Error(`Timed out waiting for process to exit: ${pid}`);
 }
 
+async function exitedProcessPid(): Promise<number> {
+  const child = spawn(process.execPath, ["-e", "process.exit(0)"], {
+    stdio: "ignore",
+  });
+  const pid = child.pid;
+  if (!pid) throw new Error("Failed to start short-lived process");
+  await new Promise<void>((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", () => resolve());
+  });
+  return pid;
+}
+
 describe("Pi background implementation cancellation", () => {
   it("declares a Claude SessionEnd hook for scoped session cleanup", async () => {
     const manifest = JSON.parse(await readFile(PLUGIN_MANIFEST, "utf8"));
@@ -233,6 +246,32 @@ describe("Pi background implementation cancellation", () => {
     expect(cancelled.status).toBe(0);
     expect(job.phase).toBe("cancelled");
     expect(commands.map((command) => command.type)).toContain("abort");
+  }, 20_000);
+
+  it("cancels active jobs immediately when the recorded worker is dead", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-bg-data-"));
+    const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-bg-workspace-")));
+    const deadPid = await exitedProcessPid();
+    const job = createImplementationJob({
+      dataDir,
+      workspaceRoot,
+      id: "impl-dead-worker-cancel",
+      status: "running",
+      phase: "running",
+    });
+    Object.assign(job, { workerPid: deadPid, piPid: deadPid });
+    await persistJob(job);
+
+    const startedAt = Date.now();
+    const cancelled = await runCancel(job.id, {
+      dataDir,
+      workspaceRoot,
+      timeoutMs: 3_000,
+    });
+
+    expect(cancelled.job.status).toBe("cancelled");
+    expect(cancelled.job.phase).toBe("cancelled");
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
   }, 20_000);
 
   it("keeps a real completion that wins the cancel race", async () => {

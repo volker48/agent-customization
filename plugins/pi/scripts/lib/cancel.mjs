@@ -14,10 +14,9 @@ export async function runCancel(selector = "latest", options = {}) {
   );
   if (job.status !== "cancelling") return alreadyFinishedResult(job);
   await appendJobLog(job, "cancelling", { workerPid: job.workerPid, piPid: job.piPid });
-  const cancelled = await waitForCancelled(
-    job.jobFile,
-    options.timeoutMs ?? DEFAULT_CANCEL_TIMEOUT_MS,
-  );
+  const cancelled = hasDeadWorkerPid(job)
+    ? false
+    : await waitForCancelled(job.jobFile, options.timeoutMs ?? DEFAULT_CANCEL_TIMEOUT_MS);
   if (!cancelled) await killActiveProcesses(job);
   const latest = await readJob(job.jobFile);
   return { ok: true, job: latest, report: renderCancelReport(latest) };
@@ -59,6 +58,11 @@ function cleanupMatches(job, ownerClaudeSessionId) {
     ACTIVE_STATUSES.has(job.status) &&
     job.ownerClaudeSessionId === ownerClaudeSessionId
   );
+}
+
+function hasDeadWorkerPid(job) {
+  const pid = job.workerPid;
+  return Number.isInteger(pid) && pid > 0 && !isProcessAlive(pid);
 }
 
 async function killActiveProcesses(job) {
