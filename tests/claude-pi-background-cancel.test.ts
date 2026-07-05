@@ -364,5 +364,5 @@ setInterval(() => {}, 1000);
       if (parent.pid && isProcessAlive(parent.pid)) process.kill(parent.pid, "SIGKILL");
       if (isProcessAlive(childPid)) process.kill(childPid, "SIGKILL");
     }
-  });
+  }, 20_000);
 });
