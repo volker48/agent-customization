@@ -43,7 +43,8 @@ export async function runReview(options = {}) {
     options.terminateTimeoutMs ?? DEFAULT_TERMINATE_TIMEOUT_MS,
   );
   await finishReviewJob(job, gitContext, piTerminated);
-  return buildReviewResult({ client, ...outcome, gitContext, job, piTerminated });
+  const ok = job.status === "completed";
+  return buildReviewResult({ client, ...outcome, gitContext, job, ok, piTerminated });
 }
 
 export async function collectGitContext(workspaceRoot, options = {}) {
@@ -107,7 +108,7 @@ async function executeReview(client, job, gitContext, options) {
     errorMessage = error instanceof Error ? error.message : String(error);
     await failJob(job, errorMessage);
   }
-  return { errorMessage, finalText, ok: !errorMessage };
+  return { errorMessage, finalText };
 }
 
 async function promptPiForReview(client, job, gitContext, options) {
@@ -413,7 +414,7 @@ function buildReviewResult(input) {
 function renderReviewReport({ errorMessage, finalText, gitContext, job, ok, piTerminated }) {
   return [
     "# Pi review result",
-    `Status: ${ok ? "completed" : "failed"}`,
+    `Status: ${job.status}`,
     `Job: ${job.id}`,
     `Mode: ${job.mode ?? "review"}`,
     `Target: ${job.target || "working tree"}`,
@@ -423,6 +424,13 @@ function renderReviewReport({ errorMessage, finalText, gitContext, job, ok, piTe
     `Pi RPC termination: ${piTerminated ? "ok" : "failed"}`,
     ...gitContext.notes.map((note) => `Note: ${note}`),
     "",
-    ok ? finalText : `Error: ${errorMessage}`,
+    reviewReportBody({ errorMessage, finalText, job, ok }),
   ].join("\n");
+}
+
+function reviewReportBody({ errorMessage, finalText, job, ok }) {
+  if (job.status === "cancelled" || job.status === "cancelling") {
+    return "Review cancelled before completion.";
+  }
+  return ok ? finalText : `Error: ${errorMessage}`;
 }

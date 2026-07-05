@@ -220,7 +220,7 @@ describe("Claude Code Pi read-only review delegation", () => {
     const logPath = join(dataDir, "fake-pi.jsonl");
     const fakePi = await writeFakePi(cancellingFakePiScript(logPath, dataDir));
 
-    await runReview({
+    const result = await runReview({
       dataDir,
       piCommand: process.execPath,
       piPrefixArgs: [fakePi],
@@ -229,6 +229,11 @@ describe("Claude Code Pi read-only review delegation", () => {
     });
     const { job } = await findJob("latest", { dataDir, workspaceRoot: repo });
 
+    expect(result.ok).not.toBe(true);
+    expect(result.report).toContain("Status: cancelling");
+    expect(result.report).not.toContain("Status: completed");
+    expect(result.report).toContain("Review cancelled before completion.");
+    expect(result.report).not.toContain("Review finding: fix it.");
     expect(job?.status).toBe("cancelling");
     expect(job?.result).toBeUndefined();
   });
