@@ -13,6 +13,7 @@ export interface ClaudeReviewDetails {
   autoFix: boolean;
   stdout: string;
   stderr: string;
+  hasFindings?: boolean | null;
   exitCode?: number | null;
   jobId?: string;
   backend?: string;
@@ -89,6 +90,9 @@ function renderSafeClaudeReviewMarkdown(safeDetails: ClaudeReviewDetails): strin
   if (safeDetails.contextMessage) {
     lines.push(`- Review context: ${safeDetails.contextMessage}`);
   }
+  if (safeDetails.hasFindings !== undefined && safeDetails.hasFindings !== null) {
+    lines.push(`- Findings: \`${safeDetails.hasFindings ? "yes" : "no"}\``);
+  }
   if (safeDetails.startedAt) {
     lines.push(`- Started: \`${safeDetails.startedAt}\``);
   }
@@ -149,6 +153,7 @@ export function jobToClaudeReviewDetails(
     autoFix: job.autoFix,
     stdout: output,
     stderr: job.stderr,
+    hasFindings: job.hasFindings,
     exitCode: job.exitCode,
     jobId: job.id,
     backend: job.backend,

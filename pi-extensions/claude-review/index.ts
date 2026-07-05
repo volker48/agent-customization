@@ -17,6 +17,7 @@ import {
 import {
   cancelClaudeBackgroundJob,
   claudeBackgroundArgs,
+  extractMarkedReviewResult,
   readClaudeBackgroundLogs,
   refreshClaudeBackgroundJob,
   startClaudeBackgroundReview,
@@ -75,43 +76,31 @@ function sendReviewOnly(pi: ExtensionAPI, details: ClaudeReviewDetails): void {
 }
 
 function toReviewDetails(result: ExecResult, options: ClaudeReviewOptions): ClaudeReviewDetails {
+  const markedResult = extractMarkedReviewResult(result.stdout);
   return {
     status: result.killed ? "timeout" : result.code === 0 ? "review" : "failed",
     level: options.level,
     contextMessage: options.contextMessage,
     autoFix: options.autoFix,
-    stdout: result.stdout,
+    stdout: markedResult?.review ?? result.stdout,
     stderr: result.stderr,
     exitCode: result.code,
+    hasFindings: markedResult?.hasFindings,
   };
 }
 
-const NO_FINDINGS_SUMMARIES = new Set([
-  "",
-  "(none)",
-  "none",
-  "no findings",
-  "no findings reported",
-  "review complete - no findings",
-]);
-
 function reviewHasFindings(details: ClaudeReviewDetails): boolean {
-  return !NO_FINDINGS_SUMMARIES.has(normalizeReviewSummary(details.stdout));
-}
-
-function normalizeReviewSummary(review: string): string {
-  return review
-    .trim()
-    .toLowerCase()
-    .replace(/[—–]/g, "-")
-    .replace(/\s*-\s*/g, " - ")
-    .replace(/[.!]+$/g, "")
-    .replace(/\s+/g, " ");
+  return details.hasFindings === true;
 }
 
 function maybeNotifyNoFindings(ctx: ExtensionCommandContext, details: ClaudeReviewDetails): void {
-  if (!reviewHasFindings(details)) {
+  if (details.hasFindings === false) {
     ctx.ui.notify("Claude review returned no findings; no auto-fix prompt sent", "info");
+  } else if (details.hasFindings == null) {
+    ctx.ui.notify(
+      "Claude review did not include a findings marker; no auto-fix prompt sent",
+      "warning",
+    );
   }
 }
 
@@ -148,7 +137,7 @@ async function handleWaitClaudeReviewCommand(
   ctx: ExtensionCommandContext,
 ): Promise<void> {
   const controller = new AbortController();
-  const reviewPrompt = buildCodeReviewPrompt(options);
+  const reviewPrompt = buildCodeReviewPrompt(options, { resultMarkers: true });
 
   updateLoader(ctx, "Claude review: waiting for Pi to become idle…", controller);
   try {

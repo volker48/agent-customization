@@ -40,6 +40,7 @@ export interface ClaudeReviewJob {
   stdout: string;
   stderr: string;
   lastLog: string;
+  hasFindings?: boolean | null;
   reviewSource?: ClaudeReviewSource | null;
   errorMessage?: string | null;
   rawStartOutput?: string;
@@ -111,6 +112,7 @@ export async function createJob(input: CreateClaudeReviewJobInput): Promise<Clau
     stdout: "",
     stderr: "",
     lastLog: "",
+    hasFindings: null,
     reviewSource: null,
     errorMessage: null,
   };
