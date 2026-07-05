@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import {
@@ -18,6 +19,7 @@ const WRITE_CAPABLE_TOOLS = "read,grep,find,ls,bash,edit,write";
 const DEFAULT_AGENT_END_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_TERMINATE_TIMEOUT_MS = 10_000;
 const DEFAULT_CANCEL_POLL_MS = 100;
+const TERMINAL_STATUSES = new Set(["cancelled", "completed", "failed"]);
 const execFileAsync = promisify(execFile);
 
 export async function startBackgroundImplement(options = {}) {
@@ -36,7 +38,7 @@ export async function startBackgroundImplement(options = {}) {
   const child = spawn(
     process.execPath,
     [
-      new URL("../pi-companion.mjs", import.meta.url).pathname,
+      fileURLToPath(new URL("../pi-companion.mjs", import.meta.url)),
       "implement",
       "--worker",
       "--job-file",
@@ -131,7 +133,7 @@ async function executeImplementation(client, job, brief, options) {
   try {
     agentEndWaiter = await promptPi(client, job, brief, options);
     const agentEndEvent = await agentEndWaiter.promise;
-    if (job.status === "cancelling") await cancelJob(job, "Pi RPC abort completed");
+    if (await jobIsCancelling(job)) await cancelJob(job, "Pi RPC abort completed");
     else {
       finalText = await getFinalText(client, agentEndEvent);
       await completeJob(job, finalText);
@@ -139,7 +141,7 @@ async function executeImplementation(client, job, brief, options) {
   } catch (error) {
     agentEndWaiter?.cancel();
     errorMessage = error instanceof Error ? error.message : String(error);
-    if (job.status === "cancelling") await cancelJob(job, errorMessage);
+    if (await jobIsCancelling(job)) await cancelJob(job, errorMessage);
     else await failJob(job, errorMessage);
   } finally {
     cancellation.cancel();
@@ -172,32 +174,45 @@ async function promptPi(client, job, brief, options) {
 }
 
 async function completeJob(job, finalText) {
-  await updateJob(job, {
-    status: "completed",
-    phase: "completed",
-    result: finalText,
-    summary: firstNonEmptyLine(finalText),
-    testsRun: extractTestEvidence(finalText),
+  await updateJobRecord(job, (current) => {
+    if (current.status === "cancelling" || TERMINAL_STATUSES.has(current.status)) return null;
+    return {
+      status: "completed",
+      phase: "completed",
+      result: finalText,
+      summary: firstNonEmptyLine(finalText),
+      testsRun: extractTestEvidence(finalText),
+    };
   });
 }
 
 async function failJob(job, errorMessage) {
-  await updateJob(job, {
-    status: "failed",
-    phase: "failed",
-    errorMessage,
-    summary: `Failed: ${errorMessage}`,
+  await updateJobRecord(job, (current) => {
+    if (current.status === "cancelling") return cancellationChanges(errorMessage);
+    if (TERMINAL_STATUSES.has(current.status)) return null;
+    return {
+      status: "failed",
+      phase: "failed",
+      errorMessage,
+      summary: `Failed: ${errorMessage}`,
+    };
   });
 }
 
 async function cancelJob(job, reason) {
-  await updateJob(job, {
+  await updateJobRecord(job, (current) =>
+    TERMINAL_STATUSES.has(current.status) ? null : cancellationChanges(reason),
+  );
+}
+
+function cancellationChanges(reason) {
+  return {
     status: "cancelled",
     phase: "cancelled",
     cancelledAt: new Date().toISOString(),
     summary: "Cancelled by Claude session request.",
     errorMessage: reason,
-  });
+  };
 }
 
 async function finishJob(job, piTerminated) {
@@ -237,29 +252,53 @@ function ownerClaudeSessionId(options) {
 function watchCancellation(client, job, options) {
   let stopped = false;
   let aborting = false;
+  let killTimer = null;
   const timer = setInterval(async () => {
     if (stopped || aborting || job.status === "cancelled") return;
     aborting = true;
-    const latest = await readJob(job.jobFile).catch(() => null);
-    if (latest?.status !== "cancelling") {
+    try {
+      const latest = await readJob(job.jobFile).catch(() => null);
+      if (latest?.status !== "cancelling") {
+        aborting = false;
+        return;
+      }
+      await updateJobRecord(job, (current) =>
+        current.status === "cancelling" ? { status: "cancelling", phase: "aborting" } : null,
+      );
+      if (job.status !== "cancelling") {
+        aborting = false;
+        return;
+      }
+      await appendJobLog(job, "abort-requested", { piPid: job.piPid });
+      void client.abort().catch(async (error) => {
+        aborting = false;
+        await appendJobLog(job, "abort-failed", { errorMessage: errorMessage(error) }).catch(
+          () => {},
+        );
+      });
+      killTimer = setTimeout(() => {
+        killTimer = null;
+        void terminateCancellationProcess(job);
+      }, options.cancelKillTimeoutMs ?? 1_000);
+    } catch (error) {
       aborting = false;
-      return;
+      await appendJobLog(job, "abort-watch-failed", { errorMessage: errorMessage(error) }).catch(
+        () => {},
+      );
     }
-    await updateJob(job, { status: "cancelling", phase: "aborting" });
-    await appendJobLog(job, "abort-requested", { piPid: job.piPid });
-    client.abort().catch((error) =>
-      appendJobLog(job, "abort-failed", {
-        errorMessage: error instanceof Error ? error.message : String(error),
-      }),
-    );
-    setTimeout(() => terminateCancellationProcess(job), options.cancelKillTimeoutMs ?? 1_000);
   }, options.cancelPollMs ?? DEFAULT_CANCEL_POLL_MS);
   return {
     cancel: () => {
       stopped = true;
       clearInterval(timer);
+      if (killTimer) clearTimeout(killTimer);
     },
   };
+}
+
+async function jobIsCancelling(job) {
+  const latest = await readJob(job.jobFile).catch(() => job);
+  return latest.status === "cancelling";
 }
 
 async function terminateCancellationProcess(job) {
@@ -405,6 +444,10 @@ function testEvidenceFromText(text) {
 
 async function updateJob(job, changes) {
   await updateJobRecord(job, changes);
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function detectChangedFiles(workspaceRoot) {

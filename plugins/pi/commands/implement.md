@@ -4,10 +4,11 @@ argument-hint: "(--wait|--background) [--model provider/model] <implementation b
 ---
 
 Run the write-capable Pi implementation delegate from the current project. The companion parses
-leading `--wait`, `--background`, and `--model provider/model` flags from stdin, so the implementation brief still
-goes through stdin instead of shell interpolation:
+leading `--wait`, `--background`, and `--model provider/model` flags from stdin, so the
+implementation brief still goes through stdin instead of shell interpolation.
 
-Foreground form: `node "${CLAUDE_PLUGIN_ROOT}/scripts/pi-companion.mjs" implement --wait`.
+Both `--wait` and `--background` are typed as part of `$ARGUMENTS`; they are not separate
+CLI flags in this command template.
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/pi-companion.mjs" implement <<'PI_IMPLEMENT_BRIEF'

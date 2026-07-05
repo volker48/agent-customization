@@ -9,7 +9,10 @@ export async function runCancel(selector = "latest", options = {}) {
   if (!result.job) return missingResult(result, selector);
   const job = result.job;
   if (!ACTIVE_STATUSES.has(job.status)) return alreadyFinishedResult(job);
-  await updateJobRecord(job, { status: "cancelling", phase: "cancelling" });
+  await updateJobRecord(job, (current) =>
+    ACTIVE_STATUSES.has(current.status) ? { status: "cancelling", phase: "cancelling" } : null,
+  );
+  if (job.status !== "cancelling") return alreadyFinishedResult(job);
   await appendJobLog(job, "cancelling", { workerPid: job.workerPid, piPid: job.piPid });
   const cancelled = await waitForCancelled(
     job.jobFile,
@@ -27,15 +30,27 @@ export async function cleanupActiveJobs(options = {}) {
   const activeJobs = result.jobs.filter((candidate) =>
     cleanupMatches(candidate, ownerClaudeSessionId),
   );
-  for (const job of activeJobs) {
-    const outcome = await runCancel(job.id, options);
-    cancelled.push(`${job.id}: ${outcome.job.status}`);
-  }
+  const outcomes = await Promise.all(
+    activeJobs.map(async (job) => {
+      try {
+        return { job, outcome: await runCancel(job.id, options) };
+      } catch (error) {
+        return { error, job };
+      }
+    }),
+  );
+  for (const outcome of outcomes) cancelled.push(cleanupOutcomeLine(outcome));
   return {
     ok: true,
     cancelled,
     report: renderCleanupReport(cancelled, ownerClaudeSessionId),
   };
+}
+
+function cleanupOutcomeLine({ error, job, outcome }) {
+  if (error) return `${job.id}: failed (${errorMessage(error)})`;
+  if (outcome?.job) return `${job.id}: ${outcome.job.status}`;
+  return `${job.id}: not found`;
 }
 
 function cleanupMatches(job, ownerClaudeSessionId) {
@@ -88,6 +103,10 @@ function missingResult(result, selector) {
 
 function alreadyFinishedResult(job) {
   return { ok: true, job, report: renderCancelReport(job) };
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function renderCancelReport(job) {

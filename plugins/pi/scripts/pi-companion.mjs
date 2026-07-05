@@ -285,7 +285,12 @@ function parseSessionCleanupArgs(args) {
 
 function parseHookInput(input) {
   if (!input.trim()) return { sessionId: currentClaudeSessionId() };
-  const payload = JSON.parse(input);
+  let payload;
+  try {
+    payload = JSON.parse(input);
+  } catch {
+    return { sessionId: currentClaudeSessionId() };
+  }
   return {
     cwd: typeof payload.cwd === "string" ? payload.cwd : undefined,
     sessionId:

@@ -11,6 +11,7 @@ import {
   updateJobRecord,
 } from "../plugins/pi/scripts/lib/jobs.mjs";
 import { runResult, runStatus } from "../plugins/pi/scripts/lib/inspect.mjs";
+import { isProcessAlive, terminateProcessTree } from "../plugins/pi/scripts/lib/process-tree.mjs";
 
 const COMPANION = join(process.cwd(), "plugins/pi/scripts/pi-companion.mjs");
 const PLUGIN_MANIFEST = join(process.cwd(), "plugins/pi/.claude-plugin/plugin.json");
@@ -31,16 +32,24 @@ async function runCompanion(args: string[], input: string, env: NodeJS.ProcessEn
     stderr += chunk.toString();
   });
   child.stdin.end(input);
-  const status = await new Promise<number | null>((resolve) => child.on("exit", resolve));
+  const status = await new Promise<number | null>((resolve) => child.on("close", resolve));
   return { status, stderr, stdout };
 }
 
-async function writeFakePi(script: string): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), "fake-pi-background-"));
-  const path = join(dir, "fake-pi.mjs");
+async function writeExecutableScript(
+  prefix: string,
+  filename: string,
+  script: string,
+): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), prefix));
+  const path = join(dir, filename);
   await writeFile(path, `#!/usr/bin/env node\n${script}`);
   await chmod(path, 0o755);
   return path;
+}
+
+async function writeFakePi(script: string): Promise<string> {
+  return writeExecutableScript("fake-pi-background-", "fake-pi.mjs", script);
 }
 
 function fakePiScript(logPath: string, abortFinishes: boolean): string {
@@ -106,6 +115,25 @@ async function waitForLogCommands(path: string) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(`Timed out waiting for fake Pi log: ${path}`);
+}
+
+async function waitForPid(path: string) {
+  const deadline = Date.now() + 4_000;
+  while (Date.now() < deadline) {
+    const pid = Number.parseInt(await readFile(path, "utf8").catch(() => ""), 10);
+    if (Number.isInteger(pid) && isProcessAlive(pid)) return pid;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for process pid: ${path}`);
+}
+
+async function waitForProcessDeath(pid: number) {
+  const deadline = Date.now() + 4_000;
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(pid)) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for process to exit: ${pid}`);
 }
 
 describe("Pi background implementation cancellation", () => {
@@ -269,5 +297,72 @@ describe("Pi background implementation cancellation", () => {
     expect(cleanup.stdout).toContain(`${jobId}: cancelled`);
     expect(job.status).toBe("cancelled");
     expect(otherJob.job?.status).toBe("running");
+  });
+
+  it("session cleanup falls back to the environment for malformed hook input", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-bg-data-"));
+    const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-bg-workspace-")));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(fakePiScript(logPath, true));
+    const env = {
+      ...process.env,
+      CLAUDE_CODE_SESSION_ID: "claude-session-a",
+      PI_CLI: fakePi,
+      PI_COMPANION_DATA_DIR: dataDir,
+    };
+
+    const started = await runCompanion(
+      ["implement", "--background"],
+      "cleanup malformed hook task",
+      env,
+      workspaceRoot,
+    );
+    const jobId = extractJobId(started.stdout);
+    await waitForStatus(dataDir, workspaceRoot, jobId, "running");
+    const cleanup = await runCompanion(["session-cleanup"], "{not json", env, workspaceRoot);
+    const job = await waitForStatus(dataDir, workspaceRoot, jobId, "cancelled");
+
+    expect(cleanup.status).toBe(0);
+    expect(cleanup.stdout).toContain(`${jobId}: cancelled`);
+    expect(job.status).toBe("cancelled");
+  });
+
+  it("terminates descendants that outlive the root process", async () => {
+    const pidFile = join(await mkdtemp(join(tmpdir(), "pi-tree-")), "child.pid");
+    const childScript = await writeExecutableScript(
+      "pi-tree-child-",
+      "child.mjs",
+      `
+import { writeFileSync } from "node:fs";
+writeFileSync(process.argv[2], String(process.pid));
+process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+`,
+    );
+    const parentScript = await writeExecutableScript(
+      "pi-tree-parent-",
+      "parent.mjs",
+      `
+import { spawn } from "node:child_process";
+const child = spawn(process.execPath, [${JSON.stringify(childScript)}, process.argv[2]], {
+  stdio: "ignore",
+});
+child.unref();
+process.on("SIGTERM", () => process.exit(0));
+setInterval(() => {}, 1000);
+`,
+    );
+    const parent = spawn(process.execPath, [parentScript, pidFile], { stdio: "ignore" });
+    const childPid = await waitForPid(pidFile);
+
+    try {
+      await expect(
+        terminateProcessTree(parent.pid ?? 0, { killTimeoutMs: 500, timeoutMs: 200 }),
+      ).resolves.toBe(true);
+      await waitForProcessDeath(childPid);
+    } finally {
+      if (parent.pid && isProcessAlive(parent.pid)) process.kill(parent.pid, "SIGKILL");
+      if (isProcessAlive(childPid)) process.kill(childPid, "SIGKILL");
+    }
   });
 });
