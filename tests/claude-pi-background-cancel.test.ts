@@ -151,6 +151,33 @@ describe("Pi background implementation cancellation", () => {
     ]);
   });
 
+  it("stores background implementation briefs in the job file", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-bg-data-"));
+    const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-bg-workspace-")));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(fakePiScript(logPath, true));
+    const env = { ...process.env, PI_CLI: fakePi, PI_COMPANION_DATA_DIR: dataDir };
+
+    const started = await runCompanion(
+      ["implement", "--background"],
+      "persist this background brief",
+      env,
+      workspaceRoot,
+    );
+    const jobId = extractJobId(started.stdout);
+    await waitForStatus(dataDir, workspaceRoot, jobId, "running");
+    const result = await runResult(jobId, { dataDir, workspaceRoot });
+    if (!result.job) throw new Error(`Missing job: ${jobId}`);
+    const job = JSON.parse(await readFile(result.job.jobFile, "utf8"));
+
+    expect(started.status).toBe(0);
+    expect(job.brief).toBe("persist this background brief");
+    expect(result.report).not.toContain("persist this background brief");
+
+    await runCancel(jobId, { dataDir, workspaceRoot, timeoutMs: 500 });
+    await waitForStatus(dataDir, workspaceRoot, jobId, "cancelled");
+  }, 20_000);
+
   it("starts a background job and updates status/result ledgers", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "pi-bg-data-"));
     const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-bg-workspace-")));

@@ -101,6 +101,7 @@ describe("Pi implementation job audit ledger", () => {
       status: "completed",
       phase: "completed",
       workspaceRoot,
+      brief: "Implement auditable job records.",
       sessionId: "audit-session",
       piSessionFile: "/tmp/audit-session.jsonl",
       model: "openai-codex/gpt-5.5",

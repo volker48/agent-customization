@@ -27,6 +27,7 @@ export async function startBackgroundImplement(options = {}) {
   const model = selectedModel(options);
   const job = createImplementationJob({
     ...options,
+    brief,
     model,
     ownerClaudeSessionId: ownerClaudeSessionId(options),
     phase: "queued",
@@ -46,7 +47,7 @@ export async function startBackgroundImplement(options = {}) {
     ],
     {
       detached: true,
-      env: { ...process.env, PI_IMPLEMENT_BRIEF: brief, PI_IMPLEMENT_MODEL: model },
+      env: implementWorkerEnv(model),
       stdio: "ignore",
     },
   );
@@ -58,7 +59,7 @@ export async function startBackgroundImplement(options = {}) {
 export async function runImplementWorker(options = {}) {
   const job = await readJob(options.jobFile);
   const model = options.model ?? job.requestedModel ?? job.model;
-  return runImplement({ ...options, brief: process.env.PI_IMPLEMENT_BRIEF, job, model });
+  return runImplement({ ...options, brief: jobBrief(job), job, model });
 }
 
 export async function runImplement(options = {}) {
@@ -68,6 +69,7 @@ export async function runImplement(options = {}) {
     options.job ??
     createImplementationJob({
       ...options,
+      brief,
       model,
       ownerClaudeSessionId: ownerClaudeSessionId(options),
       requestedModel: model,
@@ -233,6 +235,17 @@ function normalizeBrief(brief) {
   const normalized = typeof brief === "string" ? brief.trim() : "";
   if (!normalized) throw new Error("Implementation brief is required");
   return normalized;
+}
+
+function jobBrief(job) {
+  if (typeof job.brief === "string" && job.brief.trim()) return job.brief;
+  return process.env.PI_IMPLEMENT_BRIEF;
+}
+
+function implementWorkerEnv(model) {
+  const env = { ...process.env, PI_IMPLEMENT_MODEL: model };
+  delete env.PI_IMPLEMENT_BRIEF;
+  return env;
 }
 
 function selectedModel(options) {

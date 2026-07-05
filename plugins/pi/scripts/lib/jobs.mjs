@@ -63,6 +63,7 @@ function createJobRecord(options = {}) {
     model: options.model,
     requestedModel: options.requestedModel ?? options.model,
     ownerClaudeSessionId: options.ownerClaudeSessionId,
+    ...(typeof options.brief === "string" ? { brief: options.brief } : {}),
     changedFiles: [],
     testsRun: [],
     ...(options.parentJobId ? { parentJobId: options.parentJobId } : {}),
