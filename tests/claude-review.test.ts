@@ -11,12 +11,15 @@ import claudeReviewExtension, {
   parseClaudeReviewArgs,
 } from "../pi-extensions/claude-review/index.js";
 import {
+  CLAUDE_REVIEW_HAS_FINDINGS_END,
+  CLAUDE_REVIEW_HAS_FINDINGS_START,
   CLAUDE_REVIEW_RESULT_END,
   CLAUDE_REVIEW_RESULT_START,
 } from "../pi-extensions/claude-review/args.js";
 import {
   cancelClaudeBackgroundJob,
   extractMarkedReview,
+  extractMarkedReviewResult,
   readClaudeBackgroundLogs,
   sanitizeClaudeLog,
   refreshClaudeBackgroundJob,
@@ -89,9 +92,19 @@ function createContext(): MockCommandContext {
   };
 }
 
-function createTranscriptLine(review: string): string {
-  const text = [CLAUDE_REVIEW_RESULT_START, review, CLAUDE_REVIEW_RESULT_END].join("\n");
-  return `${JSON.stringify({ text })}\n`;
+function markedReviewOutput(review: string, hasFindings: boolean): string {
+  return [
+    CLAUDE_REVIEW_HAS_FINDINGS_START,
+    String(hasFindings),
+    CLAUDE_REVIEW_HAS_FINDINGS_END,
+    CLAUDE_REVIEW_RESULT_START,
+    review,
+    CLAUDE_REVIEW_RESULT_END,
+  ].join("\n");
+}
+
+function createTranscriptLine(review: string, hasFindings = true): string {
+  return `${JSON.stringify({ text: markedReviewOutput(review, hasFindings) })}\n`;
 }
 
 function createBackgroundJob(overrides: Partial<ClaudeReviewJob> = {}): ClaudeReviewJob {
@@ -147,6 +160,15 @@ describe("claude review arguments", () => {
     expect(buildCodeReviewPrompt(options)).toBe("/code-review max inspect the current branch");
   });
 
+  it("asks Claude for machine-readable review result markers", () => {
+    const options = parseClaudeReviewArgs("high inspect the current branch");
+    const prompt = buildCodeReviewPrompt(options, { resultMarkers: true });
+
+    expect(prompt).toContain(CLAUDE_REVIEW_HAS_FINDINGS_START);
+    expect(prompt).toContain("true|false");
+    expect(prompt).toContain(CLAUDE_REVIEW_RESULT_START);
+  });
+
   it("separates the background prompt from variadic Claude tool options", () => {
     expect(claudeBackgroundArgs("/code-review high", "review-session", "Read")).toEqual([
       "--bg",
@@ -192,7 +214,7 @@ describe("claude review command", () => {
   it("runs Claude Code and asks Pi to fix successful review findings", async () => {
     process.env.PI_CLAUDE_REVIEW_BIN = "fake-claude";
     const { pi, command } = createMockPi({
-      stdout: "Finding: fix the edge case",
+      stdout: markedReviewOutput("Finding: fix the edge case", true),
       stderr: "",
       code: 0,
       killed: false,
@@ -205,7 +227,11 @@ describe("claude review command", () => {
     expect(ctx.waitForIdle).toHaveBeenCalledOnce();
     expect(pi.exec).toHaveBeenCalledWith(
       "fake-claude",
-      claudeArgs("/code-review high read issue #23"),
+      claudeArgs(
+        buildCodeReviewPrompt(parseClaudeReviewArgs("high read issue #23"), {
+          resultMarkers: true,
+        }),
+      ),
       expect.objectContaining({ cwd: "/repo", timeout: 20 * 60 * 1000 }),
     );
     expect(pi.sendUserMessage).toHaveBeenCalledWith(
@@ -237,11 +263,11 @@ describe("claude review command", () => {
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
   });
 
-  it.each(["(none)", "No findings reported.", "Review complete — no findings."])(
-    "does not trigger Pi when a wait-mode review returns no findings: %s",
+  it.each(["(none)", "No findings reported.", "Nothing actionable here."])(
+    "does not trigger Pi when a wait-mode review marks no findings: %s",
     async (stdout) => {
       const { pi, command } = createMockPi({
-        stdout,
+        stdout: markedReviewOutput(stdout, false),
         stderr: "",
         code: 0,
         killed: false,
@@ -254,7 +280,7 @@ describe("claude review command", () => {
       expect(pi.sendMessage).toHaveBeenCalledWith(
         expect.objectContaining({
           customType: "claude-review",
-          details: expect.objectContaining({ stdout }),
+          details: expect.objectContaining({ stdout, hasFindings: false }),
         }),
       );
       expect(pi.sendUserMessage).not.toHaveBeenCalled();
@@ -264,6 +290,30 @@ describe("claude review command", () => {
       );
     },
   );
+
+  it("does not auto-fix successful wait-mode reviews with missing findings markers", async () => {
+    const { pi, command } = createMockPi({
+      stdout: "Finding: fix the edge case",
+      stderr: "",
+      code: 0,
+      killed: false,
+    });
+    claudeReviewExtension(pi as never);
+    const ctx = createContext();
+
+    await command().handler("--wait low", ctx);
+
+    expect(pi.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        details: expect.objectContaining({ hasFindings: undefined }),
+      }),
+    );
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      "Claude review did not include a findings marker; no auto-fix prompt sent",
+      "warning",
+    );
+  });
 
   it("surfaces non-zero review output without triggering Pi", async () => {
     const { pi, command } = createMockPi({
@@ -444,11 +494,13 @@ describe("claude review command", () => {
       createTranscriptLine(cleanReview),
       "utf8",
     );
+    const startupOutput = "backgrounded · session-123";
     const job = await writeJob(
       createBackgroundJob({
         status: "running",
-        stdout: "",
+        stdout: startupOutput,
         lastLog: "",
+        rawStartOutput: startupOutput,
         autoFix: true,
       }),
     );
@@ -469,12 +521,15 @@ describe("claude review command", () => {
 
     await command("claude-review-result").handler(job.id, ctx);
 
+    const stored = await readJob(job.id);
+    expect(stored.stdout).toBe(cleanReview);
+    expect(stored.hasFindings).toBe(true);
     expect(pi.sendUserMessage).toHaveBeenCalledWith(expect.stringContaining(cleanReview));
     expect(pi.sendUserMessage).toHaveBeenCalledWith(expect.not.stringContaining("fixand"));
   });
 
-  it.each(["(none)", "No findings reported.", "Review complete — no findings."])(
-    "does not auto-fix background reviews that return no findings: %s",
+  it.each(["(none)", "No findings reported.", "Nothing actionable here."])(
+    "does not auto-fix background reviews that mark no findings: %s",
     async (review) => {
       process.env.PI_CLAUDE_REVIEW_BIN = "fake-claude";
       const homeDir = await mkdtemp(join(tmpdir(), "claude-home-"));
@@ -486,7 +541,7 @@ describe("claude review command", () => {
       await mkdir(transcriptDir, { recursive: true });
       await writeFile(
         join(transcriptDir, "timeline.jsonl"),
-        createTranscriptLine(review),
+        createTranscriptLine(review, false),
         "utf8",
       );
       const job = await writeJob(
@@ -515,7 +570,9 @@ describe("claude review command", () => {
       await command("claude-review-result").handler(job.id, ctx);
 
       expect(pi.sendMessage).toHaveBeenCalledWith(
-        expect.objectContaining({ details: expect.objectContaining({ stdout: review }) }),
+        expect.objectContaining({
+          details: expect.objectContaining({ stdout: review, hasFindings: false }),
+        }),
       );
       expect(pi.sendUserMessage).not.toHaveBeenCalled();
       expect(ctx.ui.notify).toHaveBeenCalledWith(
@@ -706,11 +763,7 @@ describe("claude review command", () => {
     const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
     tempDirs.push(jobDir);
     process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
-    const markedReview = [
-      CLAUDE_REVIEW_RESULT_START,
-      "partial review",
-      CLAUDE_REVIEW_RESULT_END,
-    ].join("\n");
+    const markedReview = markedReviewOutput("partial review", true);
     const { pi } = createMockPi({
       stdout: markedReview,
       stderr: "",
@@ -765,11 +818,7 @@ describe("claude review command", () => {
     const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
     tempDirs.push(jobDir);
     process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
-    const markedReview = [
-      CLAUDE_REVIEW_RESULT_START,
-      "final review",
-      CLAUDE_REVIEW_RESULT_END,
-    ].join("\n");
+    const markedReview = markedReviewOutput("final review", true);
     const { pi } = createMockPi({
       stdout: markedReview,
       stderr: "",
@@ -920,6 +969,27 @@ ${CLAUDE_REVIEW_RESULT_END}`;
     expect(
       extractMarkedReview(`user prompt:\n${promptedPlaceholder}\nassistant:\n${realReview}`),
     ).toBe("Finding: fix the edge case");
+  });
+
+  it("extracts machine-readable findings markers", () => {
+    expect(extractMarkedReviewResult(markedReviewOutput("No action needed", false))).toEqual({
+      review: "No action needed",
+      hasFindings: false,
+    });
+  });
+
+  it("does not reuse findings markers from earlier review blocks", () => {
+    const mixedOutput = [
+      markedReviewOutput("first review", true),
+      CLAUDE_REVIEW_RESULT_START,
+      "later review",
+      CLAUDE_REVIEW_RESULT_END,
+    ].join("\n");
+
+    expect(extractMarkedReviewResult(mixedOutput)).toEqual({
+      review: "later review",
+      hasFindings: undefined,
+    });
   });
 
   it("strips terminal controls before extracting review markers", () => {

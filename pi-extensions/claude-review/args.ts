@@ -1,5 +1,7 @@
 export const DEFAULT_REVIEW_LEVEL = "medium";
 export const REVIEW_LEVELS = ["low", "medium", "high", "max"] as const;
+export const CLAUDE_REVIEW_HAS_FINDINGS_START = "<CLAUDE_REVIEW_HAS_FINDINGS>";
+export const CLAUDE_REVIEW_HAS_FINDINGS_END = "</CLAUDE_REVIEW_HAS_FINDINGS>";
 export const CLAUDE_REVIEW_RESULT_START = "<CLAUDE_REVIEW_RESULT>";
 export const CLAUDE_REVIEW_RESULT_END = "</CLAUDE_REVIEW_RESULT>";
 
@@ -144,7 +146,11 @@ export function buildCodeReviewPrompt(
   return [
     prompt,
     "",
-    "When you finish, print the final review between these exact tags so another process can retrieve it later:",
+    "When you finish, print these exact machine-readable tags so another process can retrieve the result later:",
+    "Set the findings value to true only when the review includes at least one actionable finding; otherwise set it to false.",
+    CLAUDE_REVIEW_HAS_FINDINGS_START,
+    "true|false",
+    CLAUDE_REVIEW_HAS_FINDINGS_END,
     CLAUDE_REVIEW_RESULT_START,
     "<your concise, actionable review or no-findings summary>",
     CLAUDE_REVIEW_RESULT_END,

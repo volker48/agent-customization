@@ -4,7 +4,12 @@ import { join } from "node:path";
 
 import type { ExecResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import { CLAUDE_REVIEW_RESULT_END, CLAUDE_REVIEW_RESULT_START } from "./args.js";
+import {
+  CLAUDE_REVIEW_HAS_FINDINGS_END,
+  CLAUDE_REVIEW_HAS_FINDINGS_START,
+  CLAUDE_REVIEW_RESULT_END,
+  CLAUDE_REVIEW_RESULT_START,
+} from "./args.js";
 import {
   type ClaudeReviewJob,
   type ClaudeReviewJobStatus,
@@ -38,6 +43,11 @@ const MISSING_MARKERS_ERROR =
 
 interface ClaudeAgentRecord {
   [key: string]: unknown;
+}
+
+export interface MarkedReviewResult {
+  review: string;
+  hasFindings?: boolean;
 }
 
 export function claudeBackgroundArgs(
@@ -241,25 +251,28 @@ async function applyClaudeLogOutput(
   result: ClaudeLogOutput,
 ): Promise<ClaudeReviewJob> {
   const normalizedStdout = normalizeClaudeOutput(result.stdout);
-  const markedReview = extractMarkedReviewFromNormalized(normalizedStdout);
+  const markedResult = extractMarkedReviewResultFromNormalized(normalizedStdout);
   let status = job.status;
   let stdout = job.stdout;
   let completedAt = job.completedAt;
   let errorMessage = job.errorMessage;
   let reviewSource = job.reviewSource;
+  let hasFindings = job.hasFindings;
   if (result.code !== 0) {
     status = "failed";
     completedAt = completedAt ?? new Date().toISOString();
     reviewSource = null;
     errorMessage = `Failed to read Claude logs with exit code ${result.code}`;
-  } else if (markedReview) {
+  } else if (markedResult) {
     if (!isTerminalJobStatus(job.status)) {
       status = "review";
-      stdout = markedReview;
+      stdout = markedResult.review;
+      hasFindings = markedResult.hasFindings ?? null;
       reviewSource = "marked-output";
       completedAt = completedAt ?? new Date().toISOString();
-    } else if (!stdout.trim()) {
-      stdout = markedReview;
+    } else if (!stdout.trim() || (job.status === "review" && !hasPersistedReview(job))) {
+      stdout = markedResult.review;
+      hasFindings = markedResult.hasFindings ?? null;
       reviewSource = "marked-output";
     }
   } else if (job.status === "review" && !hasPersistedReview(job)) {
@@ -276,6 +289,7 @@ async function applyClaudeLogOutput(
     stdout,
     stderr: result.stderr,
     lastLog: truncateClaudeLog(normalizedStdout),
+    hasFindings,
     reviewSource,
     exitCode: job.exitCode,
     completedAt,
@@ -285,9 +299,9 @@ async function applyClaudeLogOutput(
 
 async function readClaudeTranscript(job: ClaudeReviewJob): Promise<string | undefined> {
   for (const path of await claudeTranscriptPaths(job)) {
-    const markedReview = await readMarkedReviewFromJsonl(path);
-    if (markedReview) {
-      return `${CLAUDE_REVIEW_RESULT_START}\n${markedReview}\n${CLAUDE_REVIEW_RESULT_END}`;
+    const markedResult = await readMarkedReviewFromJsonl(path);
+    if (markedResult) {
+      return formatMarkedReviewResult(markedResult);
     }
   }
   return undefined;
@@ -311,22 +325,22 @@ async function claudeTranscriptPaths(job: ClaudeReviewJob): Promise<string[]> {
   return [...paths];
 }
 
-async function readMarkedReviewFromJsonl(path: string): Promise<string | undefined> {
+async function readMarkedReviewFromJsonl(path: string): Promise<MarkedReviewResult | undefined> {
   const content = await readFile(path, "utf8").catch(() => undefined);
   if (!content) {
     return undefined;
   }
 
-  let latest: string | undefined;
+  let latest: MarkedReviewResult | undefined;
   for (const line of content.split(/\r?\n/)) {
     const record = parseJson(line);
     if (!isRecord(record)) {
       continue;
     }
     for (const text of extractRecordTexts(record)) {
-      const review = extractMarkedReview(text);
-      if (review && !review.includes("<your concise, actionable review")) {
-        latest = review;
+      const result = extractMarkedReviewResult(text);
+      if (result && !isPromptPlaceholder(result.review)) {
+        latest = result;
       }
     }
   }
@@ -636,15 +650,64 @@ function pickNumber(record: ClaudeAgentRecord, keys: string[]): number | undefin
 }
 
 export function extractMarkedReview(output: string): string | undefined {
-  return extractMarkedReviewFromNormalized(normalizeClaudeOutput(output));
+  return extractMarkedReviewResult(output)?.review;
 }
 
-function extractMarkedReviewFromNormalized(output: string): string | undefined {
+export function extractMarkedReviewResult(output: string): MarkedReviewResult | undefined {
+  return extractMarkedReviewResultFromNormalized(normalizeClaudeOutput(output));
+}
+
+function extractMarkedReviewResultFromNormalized(output: string): MarkedReviewResult | undefined {
   const start = output.lastIndexOf(CLAUDE_REVIEW_RESULT_START);
   const end = output.indexOf(CLAUDE_REVIEW_RESULT_END, start + CLAUDE_REVIEW_RESULT_START.length);
   if (start === -1 || end === -1 || end <= start) {
     return undefined;
   }
 
-  return output.slice(start + CLAUDE_REVIEW_RESULT_START.length, end).trim();
+  return {
+    review: output.slice(start + CLAUDE_REVIEW_RESULT_START.length, end).trim(),
+    hasFindings: extractHasFindingsMarker(output, start),
+  };
+}
+
+function extractHasFindingsMarker(output: string, beforeIndex: number): boolean | undefined {
+  const previousResultEnd = output.lastIndexOf(CLAUDE_REVIEW_RESULT_END, beforeIndex - 1);
+  const markerFloor =
+    previousResultEnd === -1 ? 0 : previousResultEnd + CLAUDE_REVIEW_RESULT_END.length;
+  const markerStart = output.lastIndexOf(CLAUDE_REVIEW_HAS_FINDINGS_START, beforeIndex);
+  if (markerStart === -1 || markerStart < markerFloor) {
+    return undefined;
+  }
+  const valueStart = markerStart + CLAUDE_REVIEW_HAS_FINDINGS_START.length;
+  const markerEnd = output.indexOf(CLAUDE_REVIEW_HAS_FINDINGS_END, valueStart);
+  if (markerEnd === -1 || markerEnd > beforeIndex) {
+    return undefined;
+  }
+
+  const value = output.slice(valueStart, markerEnd).trim().toLowerCase();
+  if (value === "true") {
+    return true;
+  }
+  if (value === "false") {
+    return false;
+  }
+  return undefined;
+}
+
+function formatMarkedReviewResult(result: MarkedReviewResult): string {
+  const findings =
+    result.hasFindings === undefined
+      ? []
+      : [
+          CLAUDE_REVIEW_HAS_FINDINGS_START,
+          String(result.hasFindings),
+          CLAUDE_REVIEW_HAS_FINDINGS_END,
+        ];
+  return [...findings, CLAUDE_REVIEW_RESULT_START, result.review, CLAUDE_REVIEW_RESULT_END].join(
+    "\n",
+  );
+}
+
+function isPromptPlaceholder(review: string): boolean {
+  return review.includes("<your concise, actionable review");
 }
