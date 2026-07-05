@@ -22,12 +22,17 @@ const execFileAsync = promisify(execFile);
 
 export async function startBackgroundImplement(options = {}) {
   const brief = normalizeBrief(options.brief);
-  const job = createImplementationJob({ ...options, status: "queued", phase: "queued" });
-  await persistJob(job);
-  await appendJobLog(job, "queued", {
-    briefLength: brief.length,
-    model: options.model ?? process.env.PI_IMPLEMENT_MODEL ?? DEFAULT_INTENDED_MODEL,
+  const model = selectedModel(options);
+  const job = createImplementationJob({
+    ...options,
+    model,
+    ownerClaudeSessionId: ownerClaudeSessionId(options),
+    phase: "queued",
+    requestedModel: model,
+    status: "queued",
   });
+  await persistJob(job);
+  await appendJobLog(job, "queued", { briefLength: brief.length, model });
   const child = spawn(
     process.execPath,
     [
@@ -37,7 +42,11 @@ export async function startBackgroundImplement(options = {}) {
       "--job-file",
       job.jobFile,
     ],
-    { detached: true, env: { ...process.env, PI_IMPLEMENT_BRIEF: brief }, stdio: "ignore" },
+    {
+      detached: true,
+      env: { ...process.env, PI_IMPLEMENT_BRIEF: brief, PI_IMPLEMENT_MODEL: model },
+      stdio: "ignore",
+    },
   );
   child.unref();
   await updateJob(job, { workerPid: child.pid });
@@ -46,21 +55,36 @@ export async function startBackgroundImplement(options = {}) {
 
 export async function runImplementWorker(options = {}) {
   const job = await readJob(options.jobFile);
-  return runImplement({ ...options, brief: process.env.PI_IMPLEMENT_BRIEF, job });
+  const model = options.model ?? job.requestedModel ?? job.model;
+  return runImplement({ ...options, brief: process.env.PI_IMPLEMENT_BRIEF, job, model });
 }
 
 export async function runImplement(options = {}) {
   const brief = normalizeBrief(options.brief);
-  const job = options.job ?? createImplementationJob(options);
-  return runJobWithPi(job, brief, options);
+  const model = selectedModel(options);
+  const job =
+    options.job ??
+    createImplementationJob({
+      ...options,
+      model,
+      ownerClaudeSessionId: ownerClaudeSessionId(options),
+      requestedModel: model,
+    });
+  return runJobWithPi(job, brief, { ...options, model });
 }
 
 export async function runContinue(selector = "latest", options = {}) {
   const instruction = normalizeInstruction(options.instruction);
   const parent = await resolveContinuationParent(selector, options);
   validateContinuationParent(parent.job, selector);
-  const job = createContinuationJob(parent.job, options);
-  return runJobWithPi(job, instruction, { ...options, parentJob: parent.job });
+  const model = selectedModel({ ...options, parentJob: parent.job });
+  const job = createContinuationJob(parent.job, {
+    ...options,
+    model,
+    ownerClaudeSessionId: ownerClaudeSessionId(options),
+    requestedModel: model,
+  });
+  return runJobWithPi(job, instruction, { ...options, model, parentJob: parent.job });
 }
 
 async function runJobWithPi(job, brief, options) {
@@ -196,6 +220,16 @@ function normalizeBrief(brief) {
   return normalized;
 }
 
+function selectedModel(options) {
+  return (
+    options.model ?? options.parentJob?.model ?? process.env.PI_IMPLEMENT_MODEL ?? DEFAULT_INTENDED_MODEL
+  );
+}
+
+function ownerClaudeSessionId(options) {
+  return options.ownerClaudeSessionId ?? process.env.CLAUDE_SESSION_ID;
+}
+
 function watchCancellation(client, job, options) {
   let stopped = false;
   let aborting = false;
@@ -246,12 +280,6 @@ function buildPiArgs(job, options) {
     "--tools",
     WRITE_CAPABLE_TOOLS,
   ];
-}
-
-function selectedModel(options) {
-  return (
-    options.model ?? options.parentJob?.model ?? process.env.PI_IMPLEMENT_MODEL ?? DEFAULT_INTENDED_MODEL
-  );
 }
 
 function sessionArgs(parentJob) {
@@ -422,6 +450,7 @@ function renderBackgroundReport(job) {
     "Status: queued",
     `Job: ${job.id}`,
     `Ledger: ${job.jobFile}`,
+    `Model: ${job.model ?? "unknown"}`,
     "",
     `Follow up: /pi:status or /pi:result ${job.id}`,
     `Cancel: /pi:cancel ${job.id}`,

@@ -21,17 +21,29 @@ export async function runCancel(selector = "latest", options = {}) {
 }
 
 export async function cleanupActiveJobs(options = {}) {
+  const ownerClaudeSessionId = options.ownerClaudeSessionId;
   const result = await listJobs({ ...options, limit: Number.POSITIVE_INFINITY });
   const cancelled = [];
-  for (const job of result.jobs.filter((candidate) => ACTIVE_STATUSES.has(candidate.status))) {
+  const activeJobs = result.jobs.filter((candidate) =>
+    cleanupMatches(candidate, ownerClaudeSessionId),
+  );
+  for (const job of activeJobs) {
     const outcome = await runCancel(job.id, options);
     cancelled.push(`${job.id}: ${outcome.job.status}`);
   }
   return {
     ok: true,
     cancelled,
-    report: ["# Pi session cleanup", ...cancelled.map((line) => `- ${line}`)].join("\n"),
+    report: renderCleanupReport(cancelled, ownerClaudeSessionId),
   };
+}
+
+function cleanupMatches(job, ownerClaudeSessionId) {
+  return (
+    Boolean(ownerClaudeSessionId) &&
+    ACTIVE_STATUSES.has(job.status) &&
+    job.ownerClaudeSessionId === ownerClaudeSessionId
+  );
 }
 
 async function killActiveProcesses(job) {
@@ -82,6 +94,13 @@ function renderCancelReport(job) {
   return ["# Pi cancel", `Job: ${job.id}`, `Status: ${job.status}`, `Phase: ${job.phase}`].join(
     "\n",
   );
+}
+
+function renderCleanupReport(cancelled, ownerClaudeSessionId) {
+  const lines = ["# Pi session cleanup", `Claude session: ${ownerClaudeSessionId ?? "unknown"}`];
+  if (cancelled.length === 0) lines.push("No active Pi jobs matched this Claude session.");
+  else lines.push(...cancelled.map((line) => `- ${line}`));
+  return lines.join("\n");
 }
 
 function sleep(ms) {

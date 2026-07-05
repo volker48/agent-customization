@@ -48,6 +48,9 @@ function createJobRecord(options = {}) {
     logFile: join(workspaceRootPath, "logs", `${id}.jsonl`),
     createdAt: now,
     updatedAt: now,
+    model: options.model,
+    requestedModel: options.requestedModel ?? options.model,
+    ownerClaudeSessionId: options.ownerClaudeSessionId,
     changedFiles: [],
     testsRun: [],
     ...(options.parentJobId ? { parentJobId: options.parentJobId } : {}),
@@ -73,8 +76,10 @@ export async function readJob(path) {
 }
 
 export async function updateJobRecord(job, changes) {
-  Object.assign(job, changes, { updatedAt: new Date().toISOString() });
-  await persistJob(job);
+  const current = await readJob(job.jobFile).catch(() => job);
+  const updated = { ...current, ...changes, updatedAt: new Date().toISOString() };
+  Object.assign(job, updated);
+  await persistJob(updated);
   return job;
 }
 

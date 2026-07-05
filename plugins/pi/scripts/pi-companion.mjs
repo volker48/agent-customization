@@ -48,7 +48,7 @@ async function main() {
     return;
   }
   if (command === "session-cleanup") {
-    await printResult(await cleanupActiveJobs());
+    await runSessionCleanupCommand(args);
     return;
   }
   if (command === "result") {
@@ -250,11 +250,46 @@ function isContinuationSelector(value) {
   return value === "latest" || value.startsWith("impl-") || value.startsWith("cont-");
 }
 
+function parseRequiredValue(value) {
+  if (!value || value.startsWith("--")) throw new Error("Missing required option value");
+  return value;
+}
+
 async function runCancelCommand(args) {
   if (args.length > 1) throw new Error(CANCEL_USAGE);
   const inputSelector = args[0] ?? (await readStdin()).trim();
   const selector = parseResultSelector(inputSelector);
   await printResult(await runCancel(selector));
+}
+
+async function runSessionCleanupCommand(args) {
+  const parsedArgs = parseSessionCleanupArgs(args);
+  const hookInput = parseHookInput(await readStdin());
+  await printResult(
+    await cleanupActiveJobs({
+      ownerClaudeSessionId: parsedArgs.ownerClaudeSessionId ?? hookInput.sessionId,
+      workspaceRoot: hookInput.cwd,
+    }),
+  );
+}
+
+function parseSessionCleanupArgs(args) {
+  let ownerClaudeSessionId;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--claude-session-id") ownerClaudeSessionId = parseRequiredValue(args[++index]);
+    else throw new Error("Usage: pi-companion.mjs session-cleanup [--claude-session-id id]");
+  }
+  return { ownerClaudeSessionId };
+}
+
+function parseHookInput(input) {
+  if (!input.trim()) return { sessionId: process.env.CLAUDE_SESSION_ID };
+  const payload = JSON.parse(input);
+  return {
+    cwd: typeof payload.cwd === "string" ? payload.cwd : undefined,
+    sessionId: typeof payload.session_id === "string" ? payload.session_id : undefined,
+  };
 }
 
 async function runResultCommand(args) {

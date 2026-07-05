@@ -55,6 +55,7 @@ function emit(message) { process.stdout.write(JSON.stringify(message) + "\\n"); 
 function record(command) {
   appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(command) + "\\n");
 }
+record({ type: "argv", argv: process.argv.slice(2) });
 process.stdin.on("data", (chunk) => {
   buffer += chunk;
   while (buffer.includes("\\n")) {
@@ -95,6 +96,16 @@ async function waitForStatus(
   throw new Error(`Timed out waiting for ${jobId} to become ${status}`);
 }
 
+async function waitForLogCommands(path: string) {
+  const deadline = Date.now() + 4_000;
+  while (Date.now() < deadline) {
+    const log = await readFile(path, "utf8").catch(() => "");
+    if (log.trim()) return log.trim().split("\n").map((line) => JSON.parse(line));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for fake Pi log: ${path}`);
+}
+
 describe("Pi background implementation cancellation", () => {
   it("starts a background job and updates status/result ledgers", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "pi-bg-data-"));
@@ -105,17 +116,25 @@ describe("Pi background implementation cancellation", () => {
 
     const started = await runCompanion(
       ["implement", "--background"],
-      "background task",
+      "--model anthropic/claude-sonnet-4 background task",
       env,
       workspaceRoot,
     );
     const jobId = extractJobId(started.stdout);
+    await waitForStatus(dataDir, workspaceRoot, jobId, "running");
     const status = await runStatus({ dataDir, workspaceRoot });
+    const commands = await waitForLogCommands(logPath);
+    const argv = commands.find((command) => command.type === "argv")?.argv ?? [];
 
     expect(started.status).toBe(0);
     expect(started.stdout).toContain("Status: queued");
+    expect(started.stdout).toContain("Model: anthropic/claude-sonnet-4");
     expect(status.report).toContain(jobId);
-    expect(["queued", "running", "cancelling", "cancelled"]).toContain(status.jobs[0].status);
+    expect(argv).toContain("--model");
+    expect(argv).toContain("anthropic/claude-sonnet-4");
+
+    await runCancel(jobId, { dataDir, workspaceRoot, timeoutMs: 500 });
+    await waitForStatus(dataDir, workspaceRoot, jobId, "cancelled");
   });
 
   it("cancels through Pi RPC abort before marking the job cancelled", async () => {
@@ -195,12 +214,23 @@ describe("Pi background implementation cancellation", () => {
     expect(log).toContain('"type":"abort"');
   });
 
-  it("session cleanup cancels active jobs for the workspace", async () => {
+  it("session cleanup cancels active jobs owned by the ending Claude session", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "pi-bg-data-"));
     const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-bg-workspace-")));
     const logPath = join(dataDir, "fake-pi.jsonl");
     const fakePi = await writeFakePi(fakePiScript(logPath, true));
-    const env = { ...process.env, PI_CLI: fakePi, PI_COMPANION_DATA_DIR: dataDir };
+    const env = {
+      ...process.env,
+      CLAUDE_SESSION_ID: "claude-session-a",
+      PI_CLI: fakePi,
+      PI_COMPANION_DATA_DIR: dataDir,
+    };
+    const unrelated = createImplementationJob({
+      dataDir,
+      ownerClaudeSessionId: "claude-session-b",
+      workspaceRoot,
+    });
+    await persistJob(unrelated);
 
     const started = await runCompanion(
       ["implement", "--background"],
@@ -210,10 +240,17 @@ describe("Pi background implementation cancellation", () => {
     );
     const jobId = extractJobId(started.stdout);
     await waitForStatus(dataDir, workspaceRoot, jobId, "running");
-    const cleanup = await cleanupActiveJobs({ dataDir, workspaceRoot, timeoutMs: 2_000 });
+    const cleanup = await cleanupActiveJobs({
+      dataDir,
+      ownerClaudeSessionId: "claude-session-a",
+      workspaceRoot,
+      timeoutMs: 500,
+    });
     const job = await waitForStatus(dataDir, workspaceRoot, jobId, "cancelled");
+    const otherJob = await runResult(unrelated.id, { dataDir, workspaceRoot });
 
     expect(cleanup.cancelled).toEqual([`${jobId}: cancelled`]);
     expect(job.status).toBe("cancelled");
+    expect(otherJob.job?.status).toBe("running");
   });
 });
