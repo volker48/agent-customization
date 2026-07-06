@@ -838,21 +838,23 @@ function githubApiHeaders(): Record<string, string> {
 
 async function fetchGithubJson(url: string, signal?: AbortSignal): Promise<unknown> {
   const response = await fetch(url, { headers: githubApiHeaders(), signal });
-  if (!response.ok) {
-    const message = await readGithubApiErrorMessage(response);
-    if (isGithubRateLimitResponse(response, message)) {
-      throw new Error("GitHub API rate limit hit; set GITHUB_TOKEN");
-    }
-    const suffix = message ? `: ${message}` : "";
-    const status = `GitHub API returned ${response.status} ${response.statusText}${suffix}`;
-    throw new Error(status.trim());
-  }
+  if (!response.ok) await throwGithubApiResponseError(response);
   try {
     return await response.json();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`GitHub API returned invalid JSON from ${url}: ${message}`);
   }
+}
+
+async function throwGithubApiResponseError(response: Response): Promise<never> {
+  const message = await readGithubApiErrorMessage(response);
+  if (isGithubRateLimitResponse(response, message)) {
+    throw new Error("GitHub API rate limit hit; set GITHUB_TOKEN");
+  }
+  const suffix = message ? `: ${message}` : "";
+  const status = `GitHub API returned ${response.status} ${response.statusText}${suffix}`;
+  throw new Error(status.trim());
 }
 
 async function readGithubApiErrorMessage(response: Response): Promise<string> {
@@ -1042,10 +1044,11 @@ async function fetchGithubReadme(
   repo: GitHubRepoRoot,
   signal?: AbortSignal,
 ): Promise<string | undefined> {
-  const url = `https://raw.githubusercontent.com/${repo.owner}/${repo.repo}/HEAD/README.md`;
-  const response = await fetch(url, { signal });
+  const url = `https://api.github.com/repos/${repo.owner}/${repo.repo}/readme`;
+  const headers = { ...githubApiHeaders(), Accept: "application/vnd.github.raw" };
+  const response = await fetch(url, { headers, signal });
   if (response.status === 404) return undefined;
-  if (!response.ok) throw new Error(`GitHub README returned ${response.status}`);
+  if (!response.ok) await throwGithubApiResponseError(response);
   return response.text();
 }
 

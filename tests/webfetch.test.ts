@@ -723,6 +723,7 @@ describe("webfetch extension", () => {
   });
 
   it("returns orientation for GitHub repository root URLs", async () => {
+    process.env.GITHUB_TOKEN = "secret-token";
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(
@@ -758,6 +759,10 @@ describe("webfetch extension", () => {
 
     const details = result.details as WebFetchTestDetails | undefined;
     const output = result.content[0]?.text ?? "";
+    const metadataInit = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const readmeInit = fetchMock.mock.calls[2]?.[1] as RequestInit;
+    const metadataHeaders = metadataInit.headers as Record<string, string>;
+    const readmeHeaders = readmeInit.headers as Record<string, string>;
 
     expect(result.isError).toBeUndefined();
     expect(output).toContain("acme/widgets");
@@ -774,9 +779,10 @@ describe("webfetch extension", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(fetchMock.mock.calls[0]?.[0]).toBe("https://api.github.com/repos/acme/widgets");
     expect(fetchMock.mock.calls[1]?.[0]).toBe("https://api.github.com/repos/acme/widgets/contents");
-    expect(fetchMock.mock.calls[2]?.[0]).toBe(
-      "https://raw.githubusercontent.com/acme/widgets/HEAD/README.md",
-    );
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("https://api.github.com/repos/acme/widgets/readme");
+    expect(metadataHeaders.Authorization).toBe("Bearer secret-token");
+    expect(readmeHeaders.Authorization).toBe("Bearer secret-token");
+    expect(readmeHeaders.Accept).toBe("application/vnd.github.raw");
   });
 
   it("returns GitHub repository orientation when the repo has no README", async () => {
@@ -817,11 +823,22 @@ describe("webfetch extension", () => {
     expect(output).toContain("  src/");
     expect(output).not.toContain("README:");
     expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("https://api.github.com/repos/acme/widgets/readme");
   });
 
   it("falls back gracefully with a clear GitHub API rate-limit note", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        Response.json({
+          description: "Widget toolkit.",
+          default_branch: "main",
+          language: "TypeScript",
+          topics: [],
+          homepage: "",
+        }),
+      )
+      .mockResolvedValueOnce(Response.json([{ name: "src", type: "dir" }]))
       .mockResolvedValueOnce(
         Response.json(
           { message: "API rate limit exceeded for 203.0.113.1." },
@@ -850,7 +867,9 @@ describe("webfetch extension", () => {
     expect(result.content[0]?.text).toContain("Fallback body.");
     expect(details?.smartNotes?.[0]).toContain("GitHub API rate limit hit; set GITHUB_TOKEN");
     expect(fetchMock.mock.calls[0]?.[0]).toBe("https://api.github.com/repos/acme/widgets");
-    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("https://api.github.com/repos/acme/widgets/contents");
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("https://api.github.com/repos/acme/widgets/readme");
+    expect(fetchMock.mock.calls[3]?.[0]).toBe(
       "https://raw.githubusercontent.com/acme/widgets/HEAD/README.md",
     );
   });
