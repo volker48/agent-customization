@@ -722,13 +722,31 @@ describe("webfetch extension", () => {
     expect(details?.probeBytesRead).toBeGreaterThan(0);
   });
 
-  it("fetches README source markdown for GitHub repository root URLs", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response("# Project README\n\nLoaded from README source.", {
-        status: 200,
-        headers: { "Content-Type": "text/plain; charset=utf-8" },
-      }),
-    );
+  it("returns orientation for GitHub repository root URLs", async () => {
+    process.env.GITHUB_TOKEN = "secret-token";
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        Response.json({
+          description: "Widget toolkit.",
+          default_branch: "main",
+          language: "TypeScript",
+          topics: ["cli", "agent"],
+          homepage: "https://widgets.example",
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json([
+          { name: "docs", type: "dir" },
+          { name: "package.json", type: "file" },
+        ]),
+      )
+      .mockResolvedValueOnce(
+        new Response("# Project README\n\nLoaded from README source.", {
+          status: 200,
+          headers: { "Content-Type": "text/plain; charset=utf-8" },
+        }),
+      );
 
     const { pi, getTool } = createMockPi();
     webfetchExtension(pi as never);
@@ -740,21 +758,126 @@ describe("webfetch extension", () => {
     );
 
     const details = result.details as WebFetchTestDetails | undefined;
+    const output = result.content[0]?.text ?? "";
+    const metadataInit = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const readmeInit = fetchMock.mock.calls[2]?.[1] as RequestInit;
+    const metadataHeaders = metadataInit.headers as Record<string, string>;
+    const readmeHeaders = readmeInit.headers as Record<string, string>;
 
     expect(result.isError).toBeUndefined();
-    expect(result.content[0]?.text).toContain("# Project README");
-    expect(details?.finalUrl).toBe(
-      "https://raw.githubusercontent.com/acme/widgets/HEAD/README.md",
+    expect(output).toContain("acme/widgets");
+    expect(output).toContain("Widget toolkit.");
+    expect(output).toContain("default_branch: main");
+    expect(output).toContain("language: TypeScript   topics: cli, agent");
+    expect(output).toContain("homepage: https://widgets.example");
+    expect(output).toContain("  docs/");
+    expect(output).toContain("# Project README");
+    expect(output.indexOf("acme/widgets")).toBeLessThan(output.indexOf("default_branch: main"));
+    expect(output.indexOf("default_branch: main")).toBeLessThan(output.indexOf("  docs/"));
+    expect(output.indexOf("  docs/")).toBeLessThan(output.indexOf("# Project README"));
+    expect(details?.finalUrl).toBe("https://github.com/acme/widgets");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://api.github.com/repos/acme/widgets");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("https://api.github.com/repos/acme/widgets/contents");
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("https://api.github.com/repos/acme/widgets/readme");
+    expect(metadataHeaders.Authorization).toBe("Bearer secret-token");
+    expect(readmeHeaders.Authorization).toBe("Bearer secret-token");
+    expect(readmeHeaders.Accept).toBe("application/vnd.github.raw");
+  });
+
+  it("returns GitHub repository orientation when the repo has no README", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        Response.json({
+          description: "Widget toolkit.",
+          default_branch: "main",
+          language: "TypeScript",
+          topics: [],
+          homepage: "",
+        }),
+      )
+      .mockResolvedValueOnce(Response.json([{ name: "src", type: "dir" }]))
+      .mockResolvedValueOnce(
+        new Response("not found", {
+          status: 404,
+          statusText: "Not Found",
+          headers: { "Content-Type": "text/plain; charset=utf-8" },
+        }),
+      );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_github_repo_no_readme",
+      { url: "https://github.com/acme/widgets" },
+      new AbortController().signal,
     );
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+
+    const output = result.content[0]?.text ?? "";
+
+    expect(result.isError).toBeUndefined();
+    expect(output).toContain("acme/widgets");
+    expect(output).toContain("default_branch: main");
+    expect(output).toContain("  src/");
+    expect(output).not.toContain("README:");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("https://api.github.com/repos/acme/widgets/readme");
+  });
+
+  it("falls back gracefully with a clear GitHub API rate-limit note", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        Response.json({
+          description: "Widget toolkit.",
+          default_branch: "main",
+          language: "TypeScript",
+          topics: [],
+          homepage: "",
+        }),
+      )
+      .mockResolvedValueOnce(Response.json([{ name: "src", type: "dir" }]))
+      .mockResolvedValueOnce(
+        Response.json(
+          { message: "API rate limit exceeded for 203.0.113.1." },
+          { status: 403, statusText: "Forbidden", headers: { "x-ratelimit-remaining": "0" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response("# Project README\n\nFallback body.", {
+          status: 200,
+          headers: { "Content-Type": "text/plain; charset=utf-8" },
+        }),
+      );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_github_repo_rate_limited",
+      { url: "https://github.com/acme/widgets" },
+      new AbortController().signal,
+    );
+
+    const details = result.details as WebFetchTestDetails | undefined;
+
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0]?.text).toContain("Fallback body.");
+    expect(details?.smartNotes?.[0]).toContain("GitHub API rate limit hit; set GITHUB_TOKEN");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://api.github.com/repos/acme/widgets");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("https://api.github.com/repos/acme/widgets/contents");
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("https://api.github.com/repos/acme/widgets/readme");
+    expect(fetchMock.mock.calls[3]?.[0]).toBe(
       "https://raw.githubusercontent.com/acme/widgets/HEAD/README.md",
     );
   });
 
-  it("falls back to GitHub HTML when README source lookup is unavailable", async () => {
+  it("falls back to GitHub HTML when orientation and README lookup are unavailable", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new Error("metadata unavailable"))
       .mockResolvedValueOnce(
         new Response("not found", {
           status: 404,
@@ -783,16 +906,19 @@ describe("webfetch extension", () => {
     expect(result.isError).toBeUndefined();
     expect(result.content[0]?.text).toContain("Rendered fallback");
     expect(details?.finalUrl).toBe("https://github.com/acme/widgets");
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+    expect(details?.smartNotes?.[0]).toContain("GitHub orientation failed");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://api.github.com/repos/acme/widgets");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
       "https://raw.githubusercontent.com/acme/widgets/HEAD/README.md",
     );
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("https://github.com/acme/widgets");
+    expect(fetchMock.mock.calls[2]?.[0]).toBe("https://github.com/acme/widgets");
   });
 
-  it("falls back to GitHub HTML when README source lookup throws", async () => {
+  it("falls back to GitHub HTML when orientation and README lookup throw", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new Error("metadata lookup failed"))
       .mockRejectedValueOnce(new Error("raw lookup failed"))
       .mockResolvedValueOnce(
         new Response("<html><body><article><h1>Rendered after throw</h1></article></body></html>", {
@@ -812,7 +938,7 @@ describe("webfetch extension", () => {
 
     expect(result.isError).toBeUndefined();
     expect(result.content[0]?.text).toContain("Rendered after throw");
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("fetches raw content for GitHub blob URLs", async () => {
