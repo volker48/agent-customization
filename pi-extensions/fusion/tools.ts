@@ -41,7 +41,7 @@ function createWebSearchTool(config: FusionConfig): FusionTool {
 function createWebfetchTool(config: FusionConfig): FusionTool {
   return {
     name: "webfetch",
-    description: "Fetch an HTTP(S) URL and return text content.",
+    description: "Fetch HTTP(S) text; handles GitHub links and URL #fragments directly.",
     parameters: Type.Object({
       url: Type.String({ minLength: 1 }),
       maxChars: Type.Optional(Type.Integer({ minimum: MIN_MAX_CHARS, maximum: MAX_MAX_CHARS })),
