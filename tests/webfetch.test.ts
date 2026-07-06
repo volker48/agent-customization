@@ -1,6 +1,7 @@
-import { access, rm } from "node:fs/promises";
+import { access, readFile, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import { Readability } from "@mozilla/readability";
 import TurndownService from "turndown";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -59,6 +60,14 @@ type WebFetchTestDetails = {
   originalHtmlBytes?: number;
 };
 
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+    return;
+  }
+  process.env[name] = value;
+}
+
 function createMockPi() {
   let tool: RegisteredTool | undefined;
 
@@ -81,19 +90,21 @@ function createMockPi() {
 
 describe("webfetch extension", () => {
   const originalPrivateHostOverride = process.env.WEBFETCH_ALLOW_PRIVATE_HOSTS;
+  const originalGithubToken = process.env.GITHUB_TOKEN;
+  const originalGhToken = process.env.GH_TOKEN;
 
   beforeEach(() => {
     vi.restoreAllMocks();
     delete process.env.WEBFETCH_ALLOW_PRIVATE_HOSTS;
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
-    if (originalPrivateHostOverride === undefined) {
-      delete process.env.WEBFETCH_ALLOW_PRIVATE_HOSTS;
-      return;
-    }
-    process.env.WEBFETCH_ALLOW_PRIVATE_HOSTS = originalPrivateHostOverride;
+    restoreEnv("WEBFETCH_ALLOW_PRIVATE_HOSTS", originalPrivateHostOverride);
+    restoreEnv("GITHUB_TOKEN", originalGithubToken);
+    restoreEnv("GH_TOKEN", originalGhToken);
   });
 
   it("registers webfetch tool", () => {
@@ -388,6 +399,210 @@ describe("webfetch extension", () => {
     expect(result.content[0]?.text).toContain("Output truncated");
   });
 
+  it("compacts converted markdown images, whitespace, and blank lines", async () => {
+    const html = [
+      "<html><body><h1>Compact</h1>",
+      '<p><img alt="Diagram" src="data:image/png;base64,AAAAAA"></p>',
+      '<p><img alt="Logo" src="https://example.com/logo.png"></p>',
+      "<p>Alpha   </p>",
+      "<div><br><br><br></div>",
+      "<p>Omega</p></body></html>",
+    ].join("");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(html, { status: 200, headers: { "Content-Type": "text/html" } }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_compact_markdown",
+      { url: "https://example.com/compact" },
+      new AbortController().signal,
+    );
+
+    const body = result.content[0]?.text ?? "";
+    expect(body).toContain("![Diagram]");
+    expect(body).toContain("![Logo]");
+    expect(body).not.toContain("data:image/png");
+    expect(body).not.toContain("https://example.com/logo.png");
+    expect(body).not.toMatch(/\n{3,}/);
+    expect(body.split("\n").some((line) => /\s$/.test(line))).toBe(false);
+  });
+
+  it("prunes boilerplate in full-page fallback conversion", async () => {
+    vi.spyOn(Readability.prototype, "parse").mockReturnValue(null);
+    const html = [
+      "<html><body>",
+      "<nav><h2>Navigation menu</h2><a>Products</a></nav>",
+      "<main><h1>Main Content</h1><table><tr><td>Keep useful content</td></tr></table></main>",
+      "<footer>Legal footer noise</footer>",
+      "</body></html>",
+    ].join("");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(html, { status: 200, headers: { "Content-Type": "text/html" } }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_pruned_fallback",
+      { url: "https://example.com/pruned" },
+      new AbortController().signal,
+    );
+
+    const body = result.content[0]?.text ?? "";
+    expect(body).toContain("# Main Content");
+    expect(body).toContain("Keep useful content");
+    expect(body).not.toContain("Navigation menu");
+    expect(body).not.toContain("Legal footer noise");
+    expect((result.details as WebFetchTestDetails).conversionMethod).toBe("full-page");
+  });
+
+  it("adds a capped outline when converted markdown is truncated", async () => {
+    const sections = Array.from({ length: 35 }, (_, index) => {
+      const lines = Array.from({ length: 70 }, (__, line) => `<p>${index + 1}.${line}</p>`);
+      return [`<h2>Section ${index + 1}</h2>`, ...lines].join("");
+    }).join("");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(`<html><body>${sections}</body></html>`, {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_converted_outline",
+      { url: "https://example.com/outline", maxChars: 100000 },
+      new AbortController().signal,
+    );
+
+    const details = result.details as WebFetchTestDetails;
+    const fullOutputPath = details.fullOutputPath;
+    if (!fullOutputPath) throw new Error("Expected full output path");
+
+    try {
+      const saved = await readFile(fullOutputPath, "utf8");
+      const headings = saved
+        .split("\n")
+        .map((line, index) => ({ line, lineNumber: index + 1 }))
+        .filter(({ line }) => /^#{1,6} /.test(line));
+      const output = result.content[0]?.text ?? "";
+
+      expect(details.truncated).toBe(true);
+      expect(output).toContain("[Outline of full content");
+      for (const heading of headings.slice(0, 30)) {
+        expect(output).toContain(`  ${heading.lineNumber}: ${heading.line}`);
+      }
+      expect(output).toContain("  ...and 5 more headings");
+      expect(output).not.toContain(`  ${headings[30]?.lineNumber}: ${headings[30]?.line}`);
+    } finally {
+      await rm(dirname(fullOutputPath), { recursive: true, force: true });
+    }
+  });
+
+  it("extracts matching URL fragments from converted markdown sections", async () => {
+    const html = [
+      "<html><body><h1>Guide</h1><p>Intro text.</p>",
+      "<h2>Installation</h2><p>Install text.</p>",
+      "<h2>Configuration</h2><p>Config text.</p><h3>Advanced</h3><p>Advanced text.</p>",
+      "<h2>Usage</h2><p>Usage text.</p></body></html>",
+    ].join("");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(html, { status: 200, headers: { "Content-Type": "text/html" } }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_fragment_match",
+      { url: "https://example.com/guide#configuration" },
+      new AbortController().signal,
+    );
+
+    const details = result.details as WebFetchTestDetails;
+    const output = result.content[0]?.text ?? "";
+    expect(output).toContain('[Extracted section "#configuration"');
+    expect(output).toContain("## Configuration");
+    expect(output).toContain("Config text.");
+    expect(output).toContain("### Advanced");
+    expect(output).not.toContain("## Installation");
+    expect(output).not.toContain("## Usage");
+    expect(details.fullOutputPath).toBeTruthy();
+
+    if (details.fullOutputPath) {
+      await rm(dirname(details.fullOutputPath), { recursive: true, force: true });
+    }
+  });
+
+  it("matches GitHub-style duplicate heading URL fragments", async () => {
+    const html = [
+      "<html><body><h1>Guide</h1>",
+      "<h2>Usage</h2><p>First usage.</p>",
+      "<h2>Usage</h2><p>Second usage.</p>",
+      "</body></html>",
+    ].join("");
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async () =>
+        new Response(html, { status: 200, headers: { "Content-Type": "text/html" } }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const firstResult = await getTool().execute(
+      "call_fragment_first_duplicate",
+      { url: "https://example.com/guide#usage" },
+      new AbortController().signal,
+    );
+    const secondResult = await getTool().execute(
+      "call_fragment_second_duplicate",
+      { url: "https://example.com/guide#usage-1" },
+      new AbortController().signal,
+    );
+
+    const firstOutput = firstResult.content[0]?.text ?? "";
+    const secondOutput = secondResult.content[0]?.text ?? "";
+    expect(firstOutput).toContain("First usage.");
+    expect(firstOutput).not.toContain("Second usage.");
+    expect(secondOutput).toContain("Second usage.");
+    expect(secondOutput).not.toContain("First usage.");
+
+    for (const result of [firstResult, secondResult]) {
+      const fullOutputPath = (result.details as WebFetchTestDetails).fullOutputPath;
+      if (fullOutputPath) {
+        await rm(dirname(fullOutputPath), { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("notes unmatched URL fragments without dropping converted content", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("<html><body><h1>Guide</h1><p>Intro.</p></body></html>", {
+        status: 200,
+        headers: { "Content-Type": "text/html" },
+      }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_fragment_missing",
+      { url: "https://example.com/guide#missing" },
+      new AbortController().signal,
+    );
+
+    const output = result.content[0]?.text ?? "";
+    expect(output).toContain("# Guide");
+    expect(output).toContain('[URL fragment "#missing" did not match any heading.]');
+  });
+
   it("supports Accept override, custom headers, and redacts sensitive header diagnostics", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response('{"ok":true}', {
@@ -628,6 +843,138 @@ describe("webfetch extension", () => {
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       "https://raw.githubusercontent.com/acme/widgets/main/docs/README.md",
     );
+  });
+
+  it("renders GitHub issue URLs through the REST API", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        Response.json({
+          number: 42,
+          title: "Fix widgets",
+          state: "open",
+          user: { login: "octo" },
+          labels: [{ name: "bug" }, { name: "help wanted" }],
+          created_at: "2024-01-01T00:00:00Z",
+          updated_at: "2024-01-02T00:00:00Z",
+          comments: 1,
+          body: "Issue body text.",
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json([
+          {
+            user: { login: "maintainer" },
+            created_at: "2024-01-03T00:00:00Z",
+            body: "Comment body text.",
+          },
+        ]),
+      );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_github_issue",
+      { url: "https://github.com/acme/widgets/issues/42" },
+      new AbortController().signal,
+    );
+
+    const details = result.details as WebFetchTestDetails;
+    const output = result.content[0]?.text ?? "";
+    const firstInit = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const firstHeaders = firstInit.headers as Record<string, string>;
+
+    expect(output).toContain("# Fix widgets (#42)");
+    expect(output).toContain("State: open");
+    expect(output).toContain("Author: @octo");
+    expect(output).toContain("Labels: bug, help wanted");
+    expect(output).toContain("Issue body text.");
+    expect(output).toContain("**@maintainer** (2024-01-03T00:00:00Z):");
+    expect(output).toContain("Comment body text.");
+    expect(details.alternateUrlUsed).toBe(
+      "https://api.github.com/repos/acme/widgets/issues/42",
+    );
+    expect(details.smartNotes?.[0]).toContain("REST API");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "https://api.github.com/repos/acme/widgets/issues/42",
+    );
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      "https://api.github.com/repos/acme/widgets/issues/42/comments?per_page=30",
+    );
+    expect(firstHeaders.Authorization).toBeUndefined();
+    expect(firstHeaders["User-Agent"]).toBe("pi-webfetch");
+  });
+
+  it("falls back from GitHub API failures without leaking token to HTML fetch", async () => {
+    process.env.GITHUB_TOKEN = "secret-token";
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response("rate limited", {
+          status: 403,
+          statusText: "Forbidden",
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response("<html><body><h1>Issue HTML fallback</h1></body></html>", {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        }),
+      );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_github_issue_fallback",
+      { url: "https://github.com/acme/widgets/issues/42#discussion" },
+      new AbortController().signal,
+    );
+
+    const apiInit = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const htmlInit = fetchMock.mock.calls[1]?.[1] as RequestInit;
+    const apiHeaders = apiInit.headers as Record<string, string>;
+    const htmlHeaders = htmlInit.headers as Record<string, string>;
+    const details = result.details as WebFetchTestDetails;
+
+    expect(result.content[0]?.text).toContain("Issue HTML fallback");
+    expect(details.smartNotes?.[0]).toContain("GitHub API fetch failed");
+    expect(apiHeaders.Authorization).toBe("Bearer secret-token");
+    expect(htmlHeaders.Authorization).toBeUndefined();
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("https://github.com/acme/widgets/issues/42");
+  });
+
+  it("renders merged GitHub pull request state from the issue API", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      Response.json({
+        number: 7,
+        title: "Add feature",
+        state: "closed",
+        user: { login: "contributor" },
+        labels: [],
+        created_at: "2024-02-01T00:00:00Z",
+        updated_at: "2024-02-02T00:00:00Z",
+        comments: 0,
+        body: "PR body text.",
+        pull_request: { merged_at: "2024-02-03T00:00:00Z" },
+      }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_github_pr",
+      { url: "https://github.com/acme/widgets/pull/7" },
+      new AbortController().signal,
+    );
+
+    const output = result.content[0]?.text ?? "";
+    expect(output).toContain("# Add feature (#7)");
+    expect(output).toContain("State: merged");
+    expect(output).toContain("Author: @contributor");
   });
 
   it("smart strategy auto-follows markdown alternates from Link headers", async () => {

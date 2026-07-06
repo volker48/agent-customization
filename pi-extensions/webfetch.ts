@@ -15,8 +15,9 @@ export default function webfetchExtension(pi: ExtensionAPI) {
     label: "Web Fetch",
     description:
       "Fetch HTTP(S) pages without JS rendering. Defaults to an Accept header that prefers " +
-      "markdown over HTML, supports GitHub repository and blob links directly, supports " +
-      "optional header overrides, probe mode, and a smart strategy that probes first and can " +
+      "markdown over HTML, handles GitHub repo/blob/issue/PR links directly, extracts " +
+      "converted sections from URL #fragments, supports optional header overrides, probe " +
+      "mode, and a smart strategy that probes first and can " +
       "follow alternate markdown links. Returns only text-like content " +
       "types. Output is truncated to " +
       `${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)} (whichever is hit first), ` +

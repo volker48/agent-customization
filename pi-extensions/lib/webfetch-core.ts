@@ -36,6 +36,11 @@ const DEFAULT_PROBE_MAX_BYTES = 8192;
 const MAX_HTML_CONVERT_BYTES = 5 * 1024 * 1024;
 const MIN_READABILITY_LENGTH = 200;
 const MAX_REDIRECTS = 10;
+const MAX_OUTLINE_HEADINGS = 30;
+const GITHUB_API_VERSION = "2022-11-28";
+const GITHUB_BODY_MAX_CHARS = 6000;
+const GITHUB_COMMENT_MAX_CHARS = 2000;
+const GITHUB_COMMENT_PAGE_SIZE = 30;
 
 const FETCH_MODES = ["full", "probe"] as const;
 type FetchMode = (typeof FETCH_MODES)[number];
@@ -97,8 +102,9 @@ export interface WebFetchInput {
 export const WebFetchParams = Type.Object({
   url: Type.String({
     description:
-      "Website URL to access (http:// or https://). GitHub repo roots and blob file URLs " +
-      "can be passed directly. If scheme is omitted, https:// is assumed.",
+      "Website URL to access (http:// or https://). GitHub repo, blob, issue, and PR " +
+      "links can be passed directly; #fragments extract converted page sections. If scheme " +
+      "is omitted, https:// is assumed.",
     minLength: 1,
   }),
   maxChars: Type.Optional(
@@ -238,6 +244,31 @@ interface HtmlMarkdownConversion {
   byline?: string;
   siteName?: string;
   conversionMethod: Exclude<ConversionMethod, "none">;
+}
+
+interface ExtractedMarkdownSection {
+  text: string;
+  startLine: number;
+  endLine: number;
+}
+
+interface GitHubIssuePayload {
+  number: number;
+  title: string;
+  state: string;
+  userLogin: string;
+  labels: string[];
+  createdAt: string;
+  updatedAt: string;
+  comments: number;
+  body: string;
+  pullRequestMergedAt?: string;
+}
+
+interface GitHubCommentPayload {
+  userLogin: string;
+  createdAt: string;
+  body: string;
 }
 
 interface FetchAttemptSuccess {
@@ -754,6 +785,151 @@ function buildGithubDirectCandidate(parsed: URL): SmartCandidate | undefined {
   };
 }
 
+function buildGithubIssueApiUrl(parsed: URL): string | undefined {
+  if (parsed.hostname.toLowerCase() !== "github.com") return undefined;
+
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  if (segments.length !== 4) return undefined;
+  const [owner, repo, kind, number] = segments;
+  if (!owner || !repo || !number || !/^\d+$/.test(number)) return undefined;
+  if (kind !== "issues" && kind !== "pull") return undefined;
+
+  return `https://api.github.com/repos/${owner}/${repo}/issues/${number}`;
+}
+
+function githubApiHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github+json",
+    "User-Agent": "pi-webfetch",
+    "X-GitHub-Api-Version": GITHUB_API_VERSION,
+  };
+  const token = process.env.GITHUB_TOKEN?.trim() || process.env.GH_TOKEN?.trim();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
+async function fetchGithubJson(url: string, signal?: AbortSignal): Promise<unknown> {
+  const response = await fetch(url, { headers: githubApiHeaders(), signal });
+  if (!response.ok) {
+    throw new Error(`GitHub API returned ${response.status} ${response.statusText}`.trim());
+  }
+  try {
+    return await response.json();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`GitHub API returned invalid JSON from ${url}: ${message}`);
+  }
+}
+
+function readRecord(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} was not an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function readString(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function readNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function parseGithubIssuePayload(value: unknown): GitHubIssuePayload {
+  const object = readRecord(value, "GitHub issue payload");
+  const user = readRecord(object.user, "GitHub issue user");
+  return {
+    number: readNumber(object.number),
+    title: readString(object.title),
+    state: readString(object.state),
+    userLogin: readString(user.login),
+    labels: parseGithubLabels(object.labels),
+    createdAt: readString(object.created_at),
+    updatedAt: readString(object.updated_at),
+    comments: readNumber(object.comments),
+    body: readString(object.body),
+    pullRequestMergedAt: readString(readRecordOrEmpty(object.pull_request).merged_at) || undefined,
+  };
+}
+
+function readRecordOrEmpty(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function parseGithubLabels(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((label) => readString(readRecordOrEmpty(label).name)).filter(Boolean);
+}
+
+function parseGithubComments(value: unknown): GitHubCommentPayload[] {
+  if (!Array.isArray(value)) throw new Error("GitHub comments payload was not an array");
+  return value.map((comment) => {
+    const object = readRecord(comment, "GitHub comment payload");
+    const user = readRecord(object.user, "GitHub comment user");
+    return {
+      userLogin: readString(user.login),
+      createdAt: readString(object.created_at),
+      body: readString(object.body),
+    };
+  });
+}
+
+function capMarkdownText(text: string, maxChars: number, note: string): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n\n[${note}]`;
+}
+
+function renderGithubIssueMarkdown(
+  issue: GitHubIssuePayload,
+  comments: GitHubCommentPayload[],
+): string {
+  const state = issue.pullRequestMergedAt ? "merged" : issue.state;
+  const labels = issue.labels.length > 0 ? issue.labels.join(", ") : "none";
+  const lines = [
+    `# ${issue.title} (#${issue.number})`,
+    "",
+    `State: ${state}`,
+    `Author: @${issue.userLogin}`,
+    `Labels: ${labels}`,
+    `Created: ${issue.createdAt}`,
+    `Updated: ${issue.updatedAt}`,
+    `Comments: ${issue.comments}`,
+    "",
+    capMarkdownText(issue.body || "(no body)", GITHUB_BODY_MAX_CHARS, "body truncated"),
+  ];
+  return [...lines, ...renderGithubComments(issue.comments, comments)].join("\n");
+}
+
+function renderGithubComments(total: number, comments: GitHubCommentPayload[]): string[] {
+  if (comments.length === 0) return [];
+  const lines = ["", "---"];
+  if (total > comments.length)
+    lines.push("", `[showing first ${comments.length} of ${total} comments]`);
+  for (const comment of comments) {
+    lines.push(
+      "",
+      `**@${comment.userLogin}** (${comment.createdAt}):`,
+      "",
+      capMarkdownText(comment.body, GITHUB_COMMENT_MAX_CHARS, "comment truncated"),
+    );
+  }
+  return lines;
+}
+
+async function fetchGithubIssueMarkdown(
+  apiUrl: string,
+  signal: AbortSignal | undefined,
+): Promise<string> {
+  const issue = parseGithubIssuePayload(await fetchGithubJson(apiUrl, signal));
+  const commentsUrl = `${apiUrl}/comments?per_page=${GITHUB_COMMENT_PAGE_SIZE}`;
+  const comments =
+    issue.comments > 0 ? parseGithubComments(await fetchGithubJson(commentsUrl, signal)) : [];
+  return renderGithubIssueMarkdown(issue, comments);
+}
+
 function buildWordPressApiCandidate(url: string): SmartCandidate | undefined {
   let parsed: URL;
   try {
@@ -1050,6 +1226,8 @@ function buildStreamedText(args: {
   maxChars: number;
   fullOutputPath: string;
   headTruncation: TruncationResult | undefined;
+  outlineText?: string;
+  keepFullOutput?: boolean;
 }): StreamedResponseText {
   const charTruncated = args.headText.length > args.maxChars;
   const truncated = Boolean(args.headTruncation) || charTruncated;
@@ -1061,6 +1239,7 @@ function buildStreamedText(args: {
       truncated: false,
       charTruncated: false,
       totalCharacters: args.totalCharacters,
+      fullOutputPath: args.keepFullOutput ? args.fullOutputPath : undefined,
       converted: false,
       conversionMethod: "none",
     };
@@ -1074,8 +1253,10 @@ function buildStreamedText(args: {
     fullOutputPath: args.fullOutputPath,
   });
 
+  const outline = args.outlineText ? `\n${args.outlineText}` : "";
+
   return {
-    text: `${limitedText}\n\n${notice}`,
+    text: `${limitedText}\n\n${notice}${outline}`,
     truncated: true,
     charTruncated,
     totalCharacters: args.totalCharacters,
@@ -1123,14 +1304,28 @@ function getTurndownService(): TurndownServiceLike {
   return turndownService;
 }
 
+function compactMarkdown(markdown: string): string {
+  return markdown
+    .replace(/!\[([^\]\n]*)\]\((?:\\.|[^)\n])*\)/g, "![$1]")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function htmlToMarkdown(html: string): string {
-  return getTurndownService().turndown(html).trim();
+  return compactMarkdown(getTurndownService().turndown(html));
 }
 
 function htmlWithBaseUrl(html: string, baseUrl: string): string {
   const baseTag = `<base href="${baseUrl.replace(/"/g, "&quot;")}">`;
   if (/<head\b[^>]*>/i.test(html)) {
     return html.replace(/<head\b([^>]*)>/i, `<head$1>${baseTag}`);
+  }
+
+  if (/<html\b[^>]*>/i.test(html)) {
+    return html.replace(/<html\b([^>]*)>/i, `<html$1><head>${baseTag}</head>`);
   }
 
   return `${baseTag}${html}`;
@@ -1167,6 +1362,27 @@ function buildMarkdownHeader(meta: HtmlMarkdownConversion, finalUrl: string): st
   return `${lines.join("\n")}\n\n`;
 }
 
+function pruneFallbackDocument(document: Document): void {
+  const selectors = [
+    "script",
+    "style",
+    "noscript",
+    "svg",
+    "iframe",
+    "canvas",
+    "form",
+    "nav",
+    "header",
+    "footer",
+    "aside",
+    '[role="navigation"]',
+    '[aria-hidden="true"]',
+  ];
+  for (const element of document.querySelectorAll(selectors.join(","))) {
+    element.remove();
+  }
+}
+
 function convertHtmlToMarkdown(args: {
   html: string;
   baseUrl: string;
@@ -1178,6 +1394,7 @@ function convertHtmlToMarkdown(args: {
 
   const { parseHTML } = loadConverterDeps();
   const { document } = parseHTML(htmlWithBaseUrl(args.html, args.baseUrl));
+  pruneFallbackDocument(document);
   const bodyHtml = document.body?.innerHTML || args.html;
   const markdown = htmlToMarkdown(bodyHtml);
   if (!markdown) {
@@ -1220,6 +1437,35 @@ async function readTextWithinLimit(
   return { text: new TextDecoder().decode(Buffer.concat(chunks)), bytes };
 }
 
+async function writeTempOutput(text: string): Promise<{ tempDir: string; fullOutputPath: string }> {
+  const tempDir = await mkdtemp(join(tmpdir(), "pi-webfetch-"));
+  const fullOutputPath = join(tempDir, "output.txt");
+  const outputFile = await open(fullOutputPath, "w");
+  try {
+    await outputFile.write(text);
+  } finally {
+    await outputFile.close();
+  }
+  return { tempDir, fullOutputPath };
+}
+
+function buildMarkdownOutline(markdown: string): string | undefined {
+  const headings = markdown
+    .split("\n")
+    .map((line, index) => ({ line, lineNumber: index + 1 }))
+    .filter(({ line }) => /^#{1,6} /.test(line));
+  if (headings.length === 0) return undefined;
+
+  const visible = headings.slice(0, MAX_OUTLINE_HEADINGS);
+  const lines = ["[Outline of full content (line: heading in saved file):"];
+  lines.push(...visible.map((heading) => `  ${heading.lineNumber}: ${heading.line}`));
+  if (headings.length > MAX_OUTLINE_HEADINGS) {
+    lines.push(`  ...and ${headings.length - MAX_OUTLINE_HEADINGS} more headings`);
+  }
+  lines.push("]");
+  return lines.join("\n");
+}
+
 async function buildFullTextResult(args: {
   text: string;
   maxChars: number;
@@ -1227,29 +1473,29 @@ async function buildFullTextResult(args: {
   conversionMethod: ConversionMethod;
   originalHtmlBytes?: number;
   jsShellDetectionText?: string;
+  savedText?: string;
+  keepFullOutput?: boolean;
+  pathPlaceholder?: string;
 }): Promise<StreamedResponseText> {
-  const head = truncateHead(args.text, {
+  const { tempDir, fullOutputPath } = await writeTempOutput(args.savedText ?? args.text);
+  const text = args.pathPlaceholder
+    ? args.text.replace(args.pathPlaceholder, fullOutputPath)
+    : args.text;
+  const head = truncateHead(text, {
     maxLines: DEFAULT_MAX_LINES,
     maxBytes: DEFAULT_MAX_BYTES,
   });
-  const tempDir = await mkdtemp(join(tmpdir(), "pi-webfetch-"));
-  const fullOutputPath = join(tempDir, "output.txt");
-  const outputFile = await open(fullOutputPath, "w");
-  try {
-    await outputFile.write(args.text);
-  } finally {
-    await outputFile.close();
-  }
-
   const streamed = buildStreamedText({
     headText: head.content,
-    totalCharacters: args.text.length,
+    totalCharacters: text.length,
     maxChars: args.maxChars,
     fullOutputPath,
     headTruncation: head.truncated ? head : undefined,
+    outlineText: args.converted ? buildMarkdownOutline(args.savedText ?? args.text) : undefined,
+    keepFullOutput: args.keepFullOutput ?? false,
   });
 
-  if (!streamed.truncated) {
+  if (!streamed.truncated && !args.keepFullOutput) {
     await rm(tempDir, { recursive: true, force: true });
   }
 
@@ -1262,6 +1508,71 @@ async function buildFullTextResult(args: {
   };
 }
 
+function decodeUrlFragment(fragment: string): string {
+  try {
+    return decodeURIComponent(fragment.replace(/^#/, ""));
+  } catch {
+    return fragment.replace(/^#/, "");
+  }
+}
+
+function slugifyHeading(value: string): string {
+  return value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-");
+}
+
+function headingFromLine(line: string): { level: number; text: string } | undefined {
+  const match = /^(#{1,6}) (.+)$/.exec(line);
+  if (!match?.[1] || !match[2]) return undefined;
+  return { level: match[1].length, text: match[2].replace(/\s+#+$/, "").trim() };
+}
+
+function nextGithubHeadingAnchor(headingText: string, slugCounts: Map<string, number>): string {
+  const baseSlug = slugifyHeading(headingText);
+  const duplicateIndex = slugCounts.get(baseSlug) ?? 0;
+  slugCounts.set(baseSlug, duplicateIndex + 1);
+  return duplicateIndex === 0 ? baseSlug : `${baseSlug}-${duplicateIndex}`;
+}
+
+function extractMarkdownSection(
+  markdown: string,
+  fragment: string,
+): ExtractedMarkdownSection | undefined {
+  const target = decodeUrlFragment(fragment);
+  const slug = slugifyHeading(target);
+  const lines = markdown.split("\n");
+  const slugCounts = new Map<string, number>();
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const heading = headingFromLine(lines[index] ?? "");
+    if (!heading) continue;
+    const anchor = nextGithubHeadingAnchor(heading.text, slugCounts);
+    if (anchor !== slug && heading.text.toLowerCase() !== target.toLowerCase()) {
+      continue;
+    }
+
+    const endIndex = findSectionEndLine(lines, index + 1, heading.level);
+    return {
+      text: lines.slice(index, endIndex).join("\n"),
+      startLine: index + 1,
+      endLine: endIndex,
+    };
+  }
+
+  return undefined;
+}
+
+function findSectionEndLine(lines: string[], startIndex: number, level: number): number {
+  for (let index = startIndex; index < lines.length; index += 1) {
+    const heading = headingFromLine(lines[index] ?? "");
+    if (heading && heading.level <= level) return index;
+  }
+  return lines.length;
+}
+
 async function readFullResponseText(args: {
   response: Response;
   maxChars: number;
@@ -1269,6 +1580,7 @@ async function readFullResponseText(args: {
   contentLength?: number;
   finalUrl: string;
   raw: boolean;
+  fragment?: string;
 }): Promise<StreamedResponseText> {
   const canConvert =
     !args.raw &&
@@ -1300,8 +1612,30 @@ async function readFullResponseText(args: {
       });
     }
 
+    const fullMarkdown = `${buildMarkdownHeader(conversion, args.finalUrl)}${conversion.markdown}`;
+    const section = args.fragment ? extractMarkdownSection(fullMarkdown, args.fragment) : undefined;
+    if (args.fragment && section) {
+      const note =
+        `[Extracted section "#${decodeUrlFragment(args.fragment)}" ` +
+        `(lines ${section.startLine}-${section.endLine} of full page saved to {path})]`;
+      return buildFullTextResult({
+        text: `${note}\n\n${section.text}`,
+        maxChars: args.maxChars,
+        converted: true,
+        conversionMethod: conversion.conversionMethod,
+        originalHtmlBytes: html.bytes,
+        jsShellDetectionText: html.text,
+        savedText: fullMarkdown,
+        keepFullOutput: true,
+        pathPlaceholder: "{path}",
+      });
+    }
+
+    const noMatchNote = args.fragment
+      ? `\n\n[URL fragment "#${decodeUrlFragment(args.fragment)}" did not match any heading.]`
+      : "";
     return buildFullTextResult({
-      text: `${buildMarkdownHeader(conversion, args.finalUrl)}${conversion.markdown}`,
+      text: `${fullMarkdown}${noMatchNote}`,
       maxChars: args.maxChars,
       converted: true,
       conversionMethod: conversion.conversionMethod,
@@ -1476,6 +1810,7 @@ async function fetchAttempt(args: {
   requestHeaders: Record<string, string>;
   signal?: AbortSignal;
   raw?: boolean;
+  fragment?: string;
 }): Promise<FetchAttemptResult> {
   const { response, finalUrl, redirectChain } = await fetchWithRedirects({
     url: args.url,
@@ -1517,6 +1852,7 @@ async function fetchAttempt(args: {
           contentLength,
           finalUrl,
           raw: args.raw ?? false,
+          fragment: args.fragment,
         });
 
   return {
@@ -1532,6 +1868,29 @@ async function fetchAttempt(args: {
       streamed,
       jsShellDetection: detectJsShell(contentType, streamed.jsShellDetectionText ?? streamed.text),
     },
+  };
+}
+
+async function buildSyntheticTextAttempt(args: {
+  text: string;
+  maxChars: number;
+  finalUrl: string;
+}): Promise<FetchAttemptSuccess> {
+  const streamed = await buildFullTextResult({
+    text: args.text,
+    maxChars: args.maxChars,
+    converted: false,
+    conversionMethod: "none",
+  });
+  return {
+    status: 200,
+    statusText: "OK",
+    contentType: "text/markdown; charset=utf-8",
+    linkHeader: null,
+    finalUrl: args.finalUrl,
+    redirectChain: [args.finalUrl],
+    streamed,
+    jsShellDetection: { detected: false, signals: [] },
   };
 }
 
@@ -1797,6 +2156,9 @@ export async function executeWebfetch(
     });
   }
 
+  const requestedFragment = targetUrl.hash ? decodeUrlFragment(targetUrl.hash) : undefined;
+  targetUrl.hash = "";
+
   const blockReason = getPrivateHostBlockReason(targetUrl.hostname);
   if (blockReason) {
     return createToolResult({
@@ -1823,6 +2185,29 @@ export async function executeWebfetch(
 
   try {
     const targetUrlString = targetUrl.toString();
+    const githubApiNotes: string[] = [];
+    const githubIssueApiUrl = buildGithubIssueApiUrl(targetUrl);
+    if (githubIssueApiUrl) {
+      try {
+        const markdown = await fetchGithubIssueMarkdown(githubIssueApiUrl, signal);
+        const attempt = await buildSyntheticTextAttempt({
+          text: markdown,
+          maxChars,
+          finalUrl: githubIssueApiUrl,
+        });
+        return buildResultFromAttempt({
+          attempt,
+          isError: false,
+          alternateUrlUsed: githubIssueApiUrl,
+          smartNotes: [`Fetched GitHub issue/PR via REST API: ${githubIssueApiUrl}`],
+        });
+      } catch (error) {
+        if (isAbortError(error, signal)) throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        githubApiNotes.push(`GitHub API fetch failed; fell back to HTML: ${message}`);
+      }
+    }
+
     const githubCandidate = buildGithubDirectCandidate(targetUrl);
 
     if (githubCandidate) {
@@ -1862,21 +2247,25 @@ export async function executeWebfetch(
         requestHeaders: preparedHeaders.requestHeaders,
         signal,
         raw: params.raw ?? false,
+        fragment: requestedFragment,
       });
 
       if (directAttempt.kind === "unsupported-content") {
         return buildUnsupportedContentResult({
           attempt: directAttempt.value,
+          smartNotes: githubApiNotes,
         });
       }
 
       return buildResultFromAttempt({
         attempt: directAttempt.value,
         isError: directAttempt.value.status < 200 || directAttempt.value.status >= 300,
+        smartNotes: githubApiNotes,
       });
     }
 
     const smartNotes: string[] = [
+      ...githubApiNotes,
       "Smart strategy: performed initial probe fetch before full retrieval.",
     ];
 
@@ -1938,6 +2327,7 @@ export async function executeWebfetch(
         requestHeaders: preparedHeaders.requestHeaders,
         signal,
         raw: params.raw ?? false,
+        fragment: requestedFragment,
       });
 
       if (alternateAttemptResult.kind === "unsupported-content") {
@@ -1983,6 +2373,7 @@ export async function executeWebfetch(
       requestHeaders: preparedHeaders.requestHeaders,
       signal,
       raw: params.raw ?? false,
+      fragment: requestedFragment,
     });
 
     if (primaryAttemptResult.kind === "unsupported-content") {
