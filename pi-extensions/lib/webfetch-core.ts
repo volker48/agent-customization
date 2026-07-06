@@ -1530,6 +1530,13 @@ function headingFromLine(line: string): { level: number; text: string } | undefi
   return { level: match[1].length, text: match[2].replace(/\s+#+$/, "").trim() };
 }
 
+function nextGithubHeadingAnchor(headingText: string, slugCounts: Map<string, number>): string {
+  const baseSlug = slugifyHeading(headingText);
+  const duplicateIndex = slugCounts.get(baseSlug) ?? 0;
+  slugCounts.set(baseSlug, duplicateIndex + 1);
+  return duplicateIndex === 0 ? baseSlug : `${baseSlug}-${duplicateIndex}`;
+}
+
 function extractMarkdownSection(
   markdown: string,
   fragment: string,
@@ -1537,14 +1544,13 @@ function extractMarkdownSection(
   const target = decodeUrlFragment(fragment);
   const slug = slugifyHeading(target);
   const lines = markdown.split("\n");
+  const slugCounts = new Map<string, number>();
 
   for (let index = 0; index < lines.length; index += 1) {
     const heading = headingFromLine(lines[index] ?? "");
     if (!heading) continue;
-    if (
-      slugifyHeading(heading.text) !== slug &&
-      heading.text.toLowerCase() !== target.toLowerCase()
-    ) {
+    const anchor = nextGithubHeadingAnchor(heading.text, slugCounts);
+    if (anchor !== slug && heading.text.toLowerCase() !== target.toLowerCase()) {
       continue;
     }
 

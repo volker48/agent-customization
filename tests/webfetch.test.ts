@@ -403,6 +403,7 @@ describe("webfetch extension", () => {
     const html = [
       "<html><body><h1>Compact</h1>",
       '<p><img alt="Diagram" src="data:image/png;base64,AAAAAA"></p>',
+      '<p><img alt="Logo" src="https://example.com/logo.png"></p>',
       "<p>Alpha   </p>",
       "<div><br><br><br></div>",
       "<p>Omega</p></body></html>",
@@ -422,7 +423,9 @@ describe("webfetch extension", () => {
 
     const body = result.content[0]?.text ?? "";
     expect(body).toContain("![Diagram]");
+    expect(body).toContain("![Logo]");
     expect(body).not.toContain("data:image/png");
+    expect(body).not.toContain("https://example.com/logo.png");
     expect(body).not.toMatch(/\n{3,}/);
     expect(body.split("\n").some((line) => /\s$/.test(line))).toBe(false);
   });
@@ -534,6 +537,47 @@ describe("webfetch extension", () => {
 
     if (details.fullOutputPath) {
       await rm(dirname(details.fullOutputPath), { recursive: true, force: true });
+    }
+  });
+
+  it("matches GitHub-style duplicate heading URL fragments", async () => {
+    const html = [
+      "<html><body><h1>Guide</h1>",
+      "<h2>Usage</h2><p>First usage.</p>",
+      "<h2>Usage</h2><p>Second usage.</p>",
+      "</body></html>",
+    ].join("");
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async () =>
+        new Response(html, { status: 200, headers: { "Content-Type": "text/html" } }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const firstResult = await getTool().execute(
+      "call_fragment_first_duplicate",
+      { url: "https://example.com/guide#usage" },
+      new AbortController().signal,
+    );
+    const secondResult = await getTool().execute(
+      "call_fragment_second_duplicate",
+      { url: "https://example.com/guide#usage-1" },
+      new AbortController().signal,
+    );
+
+    const firstOutput = firstResult.content[0]?.text ?? "";
+    const secondOutput = secondResult.content[0]?.text ?? "";
+    expect(firstOutput).toContain("First usage.");
+    expect(firstOutput).not.toContain("Second usage.");
+    expect(secondOutput).toContain("Second usage.");
+    expect(secondOutput).not.toContain("First usage.");
+
+    for (const result of [firstResult, secondResult]) {
+      const fullOutputPath = (result.details as WebFetchTestDetails).fullOutputPath;
+      if (fullOutputPath) {
+        await rm(dirname(fullOutputPath), { recursive: true, force: true });
+      }
     }
   });
 
