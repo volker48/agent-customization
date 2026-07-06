@@ -271,6 +271,24 @@ interface GitHubCommentPayload {
   body: string;
 }
 
+interface GitHubRepoRoot {
+  owner: string;
+  repo: string;
+}
+
+interface GitHubRepositoryPayload {
+  description: string;
+  defaultBranch: string;
+  language: string;
+  topics: string[];
+  homepage: string;
+}
+
+interface GitHubRepositoryTreeEntry {
+  name: string;
+  type: string;
+}
+
 interface FetchAttemptSuccess {
   status: number;
   statusText: string;
@@ -750,6 +768,16 @@ function buildGithubRawCandidate(url: string): SmartCandidate | undefined {
   return buildGithubDirectCandidate(parsed);
 }
 
+function buildGithubRepoRoot(parsed: URL): GitHubRepoRoot | undefined {
+  if (parsed.hostname.toLowerCase() !== "github.com") return undefined;
+
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  const [owner, repo] = segments;
+  if (segments.length !== 2 || !owner || !repo) return undefined;
+
+  return { owner, repo };
+}
+
 function buildGithubDirectCandidate(parsed: URL): SmartCandidate | undefined {
   if (parsed.hostname.toLowerCase() !== "github.com") {
     return undefined;
@@ -762,7 +790,7 @@ function buildGithubDirectCandidate(parsed: URL): SmartCandidate | undefined {
     return undefined;
   }
 
-  if (segments.length === 2) {
+  if (buildGithubRepoRoot(parsed)) {
     return {
       url: `https://raw.githubusercontent.com/${owner}/${repo}/HEAD/README.md`,
       source: "github-raw",
@@ -811,7 +839,13 @@ function githubApiHeaders(): Record<string, string> {
 async function fetchGithubJson(url: string, signal?: AbortSignal): Promise<unknown> {
   const response = await fetch(url, { headers: githubApiHeaders(), signal });
   if (!response.ok) {
-    throw new Error(`GitHub API returned ${response.status} ${response.statusText}`.trim());
+    const message = await readGithubApiErrorMessage(response);
+    if (isGithubRateLimitResponse(response, message)) {
+      throw new Error("GitHub API rate limit hit; set GITHUB_TOKEN");
+    }
+    const suffix = message ? `: ${message}` : "";
+    const status = `GitHub API returned ${response.status} ${response.statusText}${suffix}`;
+    throw new Error(status.trim());
   }
   try {
     return await response.json();
@@ -819,6 +853,25 @@ async function fetchGithubJson(url: string, signal?: AbortSignal): Promise<unkno
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`GitHub API returned invalid JSON from ${url}: ${message}`);
   }
+}
+
+async function readGithubApiErrorMessage(response: Response): Promise<string> {
+  try {
+    const text = await response.text();
+    if (!text) return "";
+    try {
+      return readString(readRecordOrEmpty(JSON.parse(text)).message) || text;
+    } catch {
+      return text;
+    }
+  } catch {
+    return "";
+  }
+}
+
+function isGithubRateLimitResponse(response: Response, message: string): boolean {
+  const remaining = response.headers.get("x-ratelimit-remaining")?.trim();
+  return response.status === 403 && (remaining === "0" || /rate limit/i.test(message));
 }
 
 function readRecord(value: unknown, label: string): Record<string, unknown> {
@@ -877,6 +930,32 @@ function parseGithubComments(value: unknown): GitHubCommentPayload[] {
   });
 }
 
+function parseGithubStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => readString(item)).filter(Boolean);
+}
+
+function parseGithubRepositoryPayload(value: unknown): GitHubRepositoryPayload {
+  const object = readRecord(value, "GitHub repository payload");
+  return {
+    description: readString(object.description),
+    defaultBranch: readString(object.default_branch),
+    language: readString(object.language),
+    topics: parseGithubStringArray(object.topics),
+    homepage: readString(object.homepage),
+  };
+}
+
+function parseGithubRepositoryTree(value: unknown): GitHubRepositoryTreeEntry[] {
+  if (!Array.isArray(value)) throw new Error("GitHub repository contents payload was not an array");
+  return value
+    .map((entry) => {
+      const object = readRecord(entry, "GitHub repository contents entry");
+      return { name: readString(object.name), type: readString(object.type) };
+    })
+    .filter((entry) => entry.name && (entry.type === "file" || entry.type === "dir"));
+}
+
 function capMarkdownText(text: string, maxChars: number, note: string): string {
   if (text.length <= maxChars) return text;
   return `${text.slice(0, maxChars)}\n\n[${note}]`;
@@ -928,6 +1007,58 @@ async function fetchGithubIssueMarkdown(
   const comments =
     issue.comments > 0 ? parseGithubComments(await fetchGithubJson(commentsUrl, signal)) : [];
   return renderGithubIssueMarkdown(issue, comments);
+}
+
+function renderGithubRepositoryOrientation(args: {
+  repo: GitHubRepoRoot;
+  metadata: GitHubRepositoryPayload;
+  tree: GitHubRepositoryTreeEntry[];
+  readme?: string;
+}): string {
+  const lines = [`${args.repo.owner}/${args.repo.repo}`];
+  if (args.metadata.description) lines.push(args.metadata.description);
+  lines.push(`default_branch: ${args.metadata.defaultBranch}`);
+  lines.push(...renderGithubRepositoryMetadataLines(args.metadata));
+  lines.push("", "tree:", ...args.tree.map(renderGithubRepositoryTreeEntry));
+  if (args.readme?.trim()) lines.push("", "README:", "", args.readme.trimEnd());
+  return lines.join("\n");
+}
+
+function renderGithubRepositoryMetadataLines(metadata: GitHubRepositoryPayload): string[] {
+  const parts: string[] = [];
+  if (metadata.language) parts.push(`language: ${metadata.language}`);
+  if (metadata.topics.length > 0) parts.push(`topics: ${metadata.topics.join(", ")}`);
+  const lines = parts.length > 0 ? [parts.join("   ")] : [];
+  if (metadata.homepage) lines.push(`homepage: ${metadata.homepage}`);
+  return lines;
+}
+
+function renderGithubRepositoryTreeEntry(entry: GitHubRepositoryTreeEntry): string {
+  const suffix = entry.type === "dir" ? "/" : "";
+  return `  ${entry.name}${suffix}`;
+}
+
+async function fetchGithubReadme(
+  repo: GitHubRepoRoot,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  const url = `https://raw.githubusercontent.com/${repo.owner}/${repo.repo}/HEAD/README.md`;
+  const response = await fetch(url, { signal });
+  if (response.status === 404) return undefined;
+  if (!response.ok) throw new Error(`GitHub README returned ${response.status}`);
+  return response.text();
+}
+
+async function fetchGithubRepositoryOrientation(
+  repo: GitHubRepoRoot,
+  signal: AbortSignal | undefined,
+): Promise<string> {
+  const apiUrl = `https://api.github.com/repos/${repo.owner}/${repo.repo}`;
+  const metadata = parseGithubRepositoryPayload(await fetchGithubJson(apiUrl, signal));
+  const treeUrl = `${apiUrl}/contents`;
+  const tree = parseGithubRepositoryTree(await fetchGithubJson(treeUrl, signal));
+  const readme = await fetchGithubReadme(repo, signal);
+  return renderGithubRepositoryOrientation({ repo, metadata, tree, readme });
 }
 
 function buildWordPressApiCandidate(url: string): SmartCandidate | undefined {
@@ -2208,6 +2339,29 @@ export async function executeWebfetch(
       }
     }
 
+    const githubRepoRoot = buildGithubRepoRoot(targetUrl);
+    if (githubRepoRoot) {
+      const apiUrl = `https://api.github.com/repos/${githubRepoRoot.owner}/${githubRepoRoot.repo}`;
+      try {
+        const markdown = await fetchGithubRepositoryOrientation(githubRepoRoot, signal);
+        const attempt = await buildSyntheticTextAttempt({
+          text: markdown,
+          maxChars,
+          finalUrl: targetUrlString,
+        });
+        return buildResultFromAttempt({
+          attempt,
+          isError: false,
+          alternateUrlUsed: apiUrl,
+          smartNotes: [`Fetched GitHub repository orientation via REST API: ${apiUrl}`],
+        });
+      } catch (error) {
+        if (isAbortError(error, signal)) throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        githubApiNotes.push(`GitHub orientation failed; fell back to README/HTML: ${message}`);
+      }
+    }
+
     const githubCandidate = buildGithubDirectCandidate(targetUrl);
 
     if (githubCandidate) {
@@ -2230,6 +2384,7 @@ export async function executeWebfetch(
             isError: false,
             alternateCandidates: [githubCandidate],
             alternateUrlUsed: githubCandidate.url,
+            smartNotes: githubApiNotes,
           });
         }
       } catch (error) {
