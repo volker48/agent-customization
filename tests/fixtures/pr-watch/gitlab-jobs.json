@@ -1,0 +1,8 @@
+[
+  { "name": "test", "status": "success" },
+  { "name": "lint", "status": "failed" },
+  { "name": "deploy", "status": "manual" },
+  { "name": "build", "status": "running" },
+  { "name": "skip-docs", "status": "skipped" },
+  { "name": "cancelled", "status": "canceled" }
+]

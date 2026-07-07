@@ -1,0 +1,12 @@
+{
+  "iid": 42,
+  "title": "Add GitLab support",
+  "state": "opened",
+  "draft": false,
+  "source_branch": "feature/gitlab",
+  "target_branch": "main",
+  "sha": "abcdef1234567890abcdef1234567890abcdef12",
+  "web_url": "https://gitlab.example.com/group/subgroup/project/-/merge_requests/42",
+  "project_id": 1234,
+  "head_pipeline": { "id": 9876 }
+}

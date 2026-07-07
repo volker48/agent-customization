@@ -1,0 +1,49 @@
+[
+  {
+    "notes": [
+      {
+        "body": "### First unresolved bug\n\n**Medium Severity**\n\n<!-- DESCRIPTION START -->\nUse the new path and line from the GitLab note.\n<!-- DESCRIPTION END -->",
+        "resolvable": true,
+        "resolved": false,
+        "created_at": "2026-07-06T13:00:00Z",
+        "author": { "username": "cursor" },
+        "position": { "new_path": "src/gitlab.ts", "new_line": 27 }
+      }
+    ]
+  },
+  {
+    "notes": [
+      {
+        "body": "### Resolved bug\n\n**Low Severity**\n\n<!-- DESCRIPTION START -->\nThis one has already been resolved.\n<!-- DESCRIPTION END -->",
+        "resolvable": true,
+        "resolved": true,
+        "created_at": "2026-07-06T13:10:00Z",
+        "author": { "username": "cursor" },
+        "position": { "old_path": "src/old.ts", "old_line": 9 }
+      }
+    ]
+  },
+  {
+    "notes": [
+      {
+        "body": "Human discussion must be ignored.",
+        "resolvable": true,
+        "resolved": false,
+        "created_at": "2026-07-06T13:20:00Z",
+        "author": { "username": "human" },
+        "position": { "new_path": "src/human.ts", "new_line": 1 }
+      }
+    ]
+  },
+  {
+    "notes": [
+      {
+        "body": "<!-- BUGBOT_REVIEW -->\nCursor Bugbot has reviewed your changes using default effort and found 2 potential issues.",
+        "resolvable": false,
+        "resolved": false,
+        "created_at": "2026-07-06T14:00:00Z",
+        "author": { "username": "cursor" }
+      }
+    ]
+  }
+]

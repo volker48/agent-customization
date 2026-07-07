@@ -1,0 +1,12 @@
+{
+  "iid": 43,
+  "title": "Merged GitLab MR",
+  "state": "merged",
+  "draft": false,
+  "source_branch": "feature/done",
+  "target_branch": "main",
+  "sha": "1111111111111111111111111111111111111111",
+  "web_url": "https://gitlab.com/group/project/-/merge_requests/43",
+  "project_id": 5678,
+  "head_pipeline": null
+}
