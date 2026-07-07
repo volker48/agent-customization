@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import learnExtension, {
   buildLearnPrompt,
-  PI_EXTENSION_AUTHORING_STANDARDS,
+  SKILL_AUTHORING_STANDARDS,
 } from "../pi-extensions/learn.js";
 
 type RegisteredCommand = {
@@ -52,15 +52,15 @@ describe("buildLearnPrompt", () => {
     const prompt = buildLearnPrompt("   \n  ");
 
     expect(prompt).toContain("workflow we just went through in this conversation");
-    expect(prompt).toContain("reusable Pi coding-agent extension");
+    expect(prompt).toContain("reusable agent skill");
   });
 
-  it("includes the Pi extension authoring standards", () => {
+  it("includes the skill authoring standards", () => {
     const prompt = buildLearnPrompt("learn this workflow");
 
-    expect(prompt).toContain(PI_EXTENSION_AUTHORING_STANDARDS);
-    expect(prompt).toContain("Keep implementation in TypeScript. Do not add Python.");
-    expect(prompt).toContain("Add or update Vitest tests");
+    expect(prompt).toContain(SKILL_AUTHORING_STANDARDS);
+    expect(prompt).toContain("Create ONE reusable agent skill, not a Pi extension");
+    expect(prompt).toContain("Save the skill as a SKILL.md file under skills/<skill-name>/");
   });
 
   it("separates sources from requirements", () => {
@@ -68,15 +68,15 @@ describe("buildLearnPrompt", () => {
     const lower = prompt.toLowerCase();
 
     expect(lower).toContain("sources to gather");
-    expect(lower).toContain("requirements that shape the extension");
+    expect(lower).toContain("requirements that shape the skill");
     expect(lower).toContain("never fetch the first source and ignore the rest");
   });
 
-  it("instructs the agent to create one TypeScript extension with tests", () => {
+  it("instructs the agent to create one skill under skills", () => {
     const prompt = buildLearnPrompt("our release checklist");
 
-    expect(prompt).toContain("Build ONE focused Pi coding-agent extension in TypeScript");
-    expect(prompt).toContain("Save the code in the repo and add/update tests");
+    expect(prompt).toContain("Author ONE focused SKILL.md under skills/<skill-name>/");
+    expect(prompt).toContain("supporting scripts, templates, or references");
   });
 });
 
@@ -88,7 +88,7 @@ describe("learn extension", () => {
 
     expect(pi.registerCommand).toHaveBeenCalledWith("learn", expect.any(Object));
     expect(command().description).toBe(
-      "Build a reusable Pi extension from docs, code, or this chat",
+      "Learn a reusable skill from docs, code, or this chat",
     );
   });
 
@@ -101,7 +101,7 @@ describe("learn extension", () => {
 
     expect(pi.sendUserMessage).toHaveBeenCalledWith(buildLearnPrompt(request));
     expect(ctx.ui.notify).toHaveBeenCalledWith(
-      "Learning a Pi extension from what you described…",
+      "Learning a skill from what you described…",
       "info",
     );
   });
@@ -114,7 +114,7 @@ describe("learn extension", () => {
 
     expect(pi.sendUserMessage).toHaveBeenCalledWith(buildLearnPrompt(""));
     expect(ctx.ui.notify).toHaveBeenCalledWith(
-      "Learning a Pi extension from this conversation…",
+      "Learning a skill from this conversation…",
       "info",
     );
   });
