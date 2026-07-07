@@ -55,7 +55,7 @@ Relevant tests: `tests/autoname.test.ts`.
 
 ### Learn
 
-`pi-extensions/learn.ts` registers `/learn`, which turns a user request or the current conversation into a prompt asking Pi to create one reusable TypeScript Pi extension. The prompt encodes repository authoring standards: put code under `pi-extensions/`, add Vitest tests under `tests/`, use `.js` import specifiers, validate args, and avoid unrelated changes.
+`pi-extensions/learn.ts` registers `/learn`, which turns a user request or the current conversation into a prompt asking Pi to create one reusable agent skill. The prompt follows the Hermes-style stable behavior: gather open-ended sources, honor trailing requirements after paths/URLs, and save one `SKILL.md` under `skills/<skill-name>/` with optional `scripts/`, `templates/`, or `references/` support files instead of creating another Pi extension.
 
 Relevant tests: `tests/learn.test.ts`.
 
