@@ -7,6 +7,7 @@ import {
   evaluateSettled,
   exitCodeFor,
   hoistSharedPreamble,
+  REVIEW_QUERY,
   parseNitpicks,
   parsePrView,
   parseReviewData,
@@ -43,6 +44,15 @@ function findingWith(overrides: Partial<Finding>): Finding {
     ...overrides,
   };
 }
+
+describe("REVIEW_QUERY", () => {
+  it("paginates review threads for complete finding snapshots", () => {
+    expect(REVIEW_QUERY).toContain("$reviewThreadsCursor: String");
+    expect(REVIEW_QUERY).toContain("reviewThreads(first: 100, after: $reviewThreadsCursor)");
+    expect(REVIEW_QUERY).toContain("hasNextPage");
+    expect(REVIEW_QUERY).toContain("endCursor");
+  });
+});
 
 describe("parsePrView", () => {
   it("parses a real gh pr view payload into a snapshot", () => {

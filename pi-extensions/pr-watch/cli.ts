@@ -22,6 +22,22 @@ type Command = "status" | "findings" | "wait";
 
 type ValueFlag = "repo" | "bots" | "timeoutSecs" | "intervalSecs";
 
+type ReviewQueryResponse = {
+  data: {
+    repository: {
+      pullRequest: {
+        reviewThreads: {
+          pageInfo: {
+            hasNextPage: boolean;
+            endCursor: string | null;
+          };
+          nodes: unknown[];
+        };
+      };
+    };
+  };
+};
+
 export type CliOptions = {
   command: Command;
   pr?: string;
@@ -51,6 +67,7 @@ const PR_VIEW_FIELDS = [
   "commits",
   "url",
 ];
+const GH_MAX_BUFFER = 16 * 1024 * 1024;
 
 const BOOL_FLAGS: Record<string, "all" | "nitpicks" | "noReviews"> = {
   "--all": "all",
@@ -70,6 +87,7 @@ class CliError extends Error {
   constructor(
     message: string,
     readonly exitCode: number,
+    readonly retryable = false,
   ) {
     super(message);
   }
@@ -217,12 +235,17 @@ function runFindings(opts: CliOptions): number {
 async function runWait(opts: CliOptions): Promise<number> {
   const deadline = Date.now() + opts.timeoutSecs * 1000;
   while (true) {
-    const snapshot = fetchSnapshot(opts);
-    const settle = evaluateSettled(snapshot, settleOptions(opts));
-    if (settle.settled) return finishWait(snapshot, settle, opts);
-    if (Date.now() >= deadline) {
-      process.stdout.write(`${renderStatus(snapshot, settle, "TIMEOUT")}\n`);
-      return 3;
+    try {
+      const snapshot = fetchSnapshot(opts);
+      const settle = evaluateSettled(snapshot, settleOptions(opts));
+      if (settle.settled) return finishWait(snapshot, settle, opts);
+      if (Date.now() >= deadline) {
+        process.stdout.write(`${waitOutput(snapshot, settle, opts, "TIMEOUT")}\n`);
+        return 3;
+      }
+    } catch (error) {
+      if (!(error instanceof CliError) || !error.retryable) throw error;
+      if (Date.now() >= deadline) throw error;
     }
     await sleep(Math.min(opts.intervalSecs * 1000, Math.max(deadline - Date.now(), 0)));
   }
@@ -233,11 +256,20 @@ function finishWait(
   settle: ReturnType<typeof evaluateSettled>,
   opts: CliOptions,
 ): number {
-  const findings = selectedFindings(snapshot, opts);
-  const blocks = [renderStatus(snapshot, settle)];
-  if (unresolvedFindings(snapshot).length > 0) blocks.push(renderFindings(findings, "findings"));
-  process.stdout.write(`${blocks.join("\n\n")}\n`);
+  process.stdout.write(`${waitOutput(snapshot, settle, opts)}\n`);
   return exitCodeFor(snapshot, settle);
+}
+
+function waitOutput(
+  snapshot: PrSnapshot,
+  settle: ReturnType<typeof evaluateSettled>,
+  opts: CliOptions,
+  label?: string,
+): string {
+  const findings = selectedFindings(snapshot, opts);
+  const blocks = [renderStatus(snapshot, settle, label)];
+  if (unresolvedFindings(snapshot).length > 0) blocks.push(renderFindings(findings, "findings"));
+  return blocks.join("\n\n");
 }
 
 function selectedFindings(snapshot: PrSnapshot, opts: CliOptions): Finding[] {
@@ -250,7 +282,7 @@ function settleOptions(opts: CliOptions): SettleOptions {
 
 function fetchSnapshot(opts: CliOptions): PrSnapshot {
   const snapshot = parsePrViewJson(runGhJson(prViewArgs(opts), "gh pr view"));
-  const reviews = parseReviewJson(runGhJson(reviewArgs(snapshot), "gh api graphql"), opts.bots);
+  const reviews = fetchReviewData(snapshot, opts.bots);
   return {
     ...snapshot,
     botReviews: reviews.botReviews,
@@ -266,8 +298,8 @@ function prViewArgs(opts: CliOptions): string[] {
   return args;
 }
 
-function reviewArgs(snapshot: PrSnapshot): string[] {
-  return [
+function reviewArgs(snapshot: PrSnapshot, reviewThreadsCursor: string | null): string[] {
+  const args = [
     "api",
     "graphql",
     "-f",
@@ -279,16 +311,38 @@ function reviewArgs(snapshot: PrSnapshot): string[] {
     "-F",
     `number=${snapshot.number}`,
   ];
+  if (reviewThreadsCursor) args.push("-F", `reviewThreadsCursor=${reviewThreadsCursor}`);
+  return args;
+}
+
+function fetchReviewData(snapshot: PrSnapshot, bots: string[]): ReturnType<typeof parseReviewData> {
+  const first = reviewQueryResponse(runGhJson(reviewArgs(snapshot, null), "gh api graphql"));
+  let pageInfo = first.data.repository.pullRequest.reviewThreads.pageInfo;
+  while (pageInfo.hasNextPage) {
+    if (!pageInfo.endCursor) throw ghError("gh api graphql pagination", "", null, false);
+    const next = reviewQueryResponse(
+      runGhJson(reviewArgs(snapshot, pageInfo.endCursor), "gh api graphql"),
+    );
+    first.data.repository.pullRequest.reviewThreads.nodes.push(
+      ...next.data.repository.pullRequest.reviewThreads.nodes,
+    );
+    pageInfo = next.data.repository.pullRequest.reviewThreads.pageInfo;
+  }
+  return parseReviewJson(first, bots);
+}
+
+function reviewQueryResponse(raw: unknown): ReviewQueryResponse {
+  return raw as ReviewQueryResponse;
 }
 
 function runGhJson(args: string[], context: string): unknown {
-  const result = spawnSync("gh", args, { encoding: "utf8" });
-  if (result.error) throw ghError(context, "", result.error);
-  if (result.status !== 0) throw ghError(context, result.stderr, null);
+  const result = spawnSync("gh", args, { encoding: "utf8", maxBuffer: GH_MAX_BUFFER });
+  if (result.error) throw ghError(context, "", result.error, false);
+  if (result.status !== 0) throw ghError(context, result.stderr, null, true);
   try {
     return JSON.parse(result.stdout);
   } catch (error) {
-    throw ghError(`${context} returned invalid JSON`, result.stderr, error);
+    throw ghError(`${context} returned invalid JSON`, result.stderr, error, false);
   }
 }
 
@@ -296,7 +350,7 @@ function parsePrViewJson(raw: unknown): PrSnapshot {
   try {
     return parsePrView(raw);
   } catch (error) {
-    throw ghError("could not parse gh pr view output", "", error);
+    throw ghError("could not parse gh pr view output", "", error, false);
   }
 }
 
@@ -304,15 +358,20 @@ function parseReviewJson(raw: unknown, bots: string[]): ReturnType<typeof parseR
   try {
     return parseReviewData(raw, bots);
   } catch (error) {
-    throw ghError("could not parse gh api graphql output", "", error);
+    throw ghError("could not parse gh api graphql output", "", error, false);
   }
 }
 
-function ghError(context: string, stderr: string | null | undefined, cause: unknown): CliError {
+function ghError(
+  context: string,
+  stderr: string | null | undefined,
+  cause: unknown,
+  retryable: boolean,
+): CliError {
   const lines = [`${context} failed`];
   if (stderr?.trim()) lines.push(stderr.trimEnd());
   if (cause instanceof Error) lines.push(cause.message);
-  return new CliError(lines.join("\n"), 4);
+  return new CliError(lines.join("\n"), 4, retryable);
 }
 
 function writeUsage(message: string): void {

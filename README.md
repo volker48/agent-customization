@@ -87,16 +87,16 @@ OpenCode event names used as folder names: `session.created`, `session.compacted
 
 Each agent harness has its own event naming convention:
 
-| Concept | Pi (snake_case) | OpenCode (dot.notation) | Claude Code (PascalCase) |
-|---|---|---|---|
-| Session created | `session_start` | `session.created` | `SessionStart` |
-| Session ended | `session_shutdown` | — | `SessionEnd` |
-| Agent finished | `agent_end` | `session.idle` | `Stop` |
-| Before tool runs | `tool_call` | `tool.execute.before` | `PreToolUse` |
-| After tool runs | `tool_result` | `tool.execute.after` | `PostToolUse` |
-| User input | `input` | `tui.prompt.append` | `UserPromptSubmit` |
-| Compaction | `session_compact` | `session.compacted` | `PreCompact` |
-| User shell cmd | `user_bash` | `tui.command.execute` | — |
+| Concept          | Pi (snake_case)    | OpenCode (dot.notation) | Claude Code (PascalCase) |
+| ---------------- | ------------------ | ----------------------- | ------------------------ |
+| Session created  | `session_start`    | `session.created`       | `SessionStart`           |
+| Session ended    | `session_shutdown` | —                       | `SessionEnd`             |
+| Agent finished   | `agent_end`        | `session.idle`          | `Stop`                   |
+| Before tool runs | `tool_call`        | `tool.execute.before`   | `PreToolUse`             |
+| After tool runs  | `tool_result`      | `tool.execute.after`    | `PostToolUse`            |
+| User input       | `input`            | `tui.prompt.append`     | `UserPromptSubmit`       |
+| Compaction       | `session_compact`  | `session.compacted`     | `PreCompact`             |
+| User shell cmd   | `user_bash`        | `tui.command.execute`   | —                        |
 
 Rather than duplicating sound files into separate folders for each convention, the **`create-sound-symlinks.sh`** script creates symlinks from both OpenCode and Claude Code event names to the corresponding Pi event directories:
 
@@ -155,11 +155,11 @@ mkdir -p ~/Documents/sounds/{session_start,session_shutdown,agent_start,agent_en
 
 All three implementations support:
 
-| Variable | Default | Description |
-|---|---|---|
-| `SOUNDS_BASE` (Claude Code only) | `~/Documents/sounds` | Base directory for sound folders |
-| `SOUND_MIN_INTERVAL_MS` | `250` | Minimum milliseconds between sounds (cooldown) |
-| `SOUND_DEBUG` | `0` | Set to `1` to print debug logs to stderr |
+| Variable                         | Default              | Description                                    |
+| -------------------------------- | -------------------- | ---------------------------------------------- |
+| `SOUNDS_BASE` (Claude Code only) | `~/Documents/sounds` | Base directory for sound folders               |
+| `SOUND_MIN_INTERVAL_MS`          | `250`                | Minimum milliseconds between sounds (cooldown) |
+| `SOUND_DEBUG`                    | `0`                  | Set to `1` to print debug logs to stderr       |
 
 ## Other Extensions
 
@@ -198,8 +198,9 @@ Watches a GitHub pull request through `gh`, waits for terminal checks and bot
 reviews, and distills bot review threads into compact findings. It provides
 `pr-watch status`, `pr-watch findings`, and `pr-watch wait`.
 
-Exit codes are: `0` settled clean, `1` settled with unresolved findings, `2`
-checks failed, `3` pending or timed out, and `4` usage or `gh` error.
+For `status` and `wait`, exit codes are: `0` settled clean, `1` settled with
+unresolved findings, `2` checks failed, `3` pending or timed out, and `4` usage
+or `gh` error. `findings` exits `0` on a successful listing.
 
 ```bash
 # Run from a background shell/tool (for example, Claude Code run_in_background).

@@ -65,7 +65,7 @@ const BOT_SHORT_NAMES: Record<string, string> = {
 };
 
 export const REVIEW_QUERY = `
-query($owner: String!, $name: String!, $number: Int!) {
+query($owner: String!, $name: String!, $number: Int!, $reviewThreadsCursor: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       reviews(last: 50) {
@@ -77,7 +77,11 @@ query($owner: String!, $name: String!, $number: Int!) {
           commit { oid }
         }
       }
-      reviewThreads(first: 100) {
+      reviewThreads(first: 100, after: $reviewThreadsCursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
         nodes {
           isResolved
           isOutdated
@@ -188,6 +192,10 @@ type GraphqlReviewData = {
         }>;
       };
       reviewThreads: {
+        pageInfo: {
+          hasNextPage: boolean;
+          endCursor: string | null;
+        };
         nodes: Array<{
           isResolved: boolean;
           isOutdated: boolean;

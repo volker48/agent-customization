@@ -51,14 +51,16 @@ through the `gh` CLI — auth, base URLs, and pagination are its problem.
 2. At least one configured bot has reviewed the current head: a review whose `commit` is the head
    OID or whose `submittedAt` is at or after the head commit's `committedDate`. `--no-reviews`
    drops condition 2 (CI-only wait). Bots that stay silent when satisfied (Codex posts nothing on
-   a clean re-review) are why condition 2 is satisfied by *any* configured bot rather than all.
+   a clean re-review) are why condition 2 is satisfied by _any_ configured bot rather than all.
 
 A merged or closed PR is settled unconditionally — nothing new can land on it, so `wait` returns
 immediately instead of hanging until timeout.
 
 **Distillation contract.** Findings come from unresolved, non-outdated review threads authored by
-configured bots (resolution state via GraphQL `reviewThreads`; there is no REST equivalent). Each
-finding renders as `path:line [bot severity]`, a title line, and a detail block:
+configured bots (resolution state via GraphQL `reviewThreads`; there is no REST equivalent).
+`reviewThreads` is paginated until exhausted before findings are computed; the bot-review landed
+signal reads the latest 50 reviews. Each finding renders as `path:line [bot severity]`, a title
+line, and a detail block:
 
 - **CodeRabbit** — severity from the `_🟠 Major_`-style header, title from the first bold line,
   detail from the `🤖 Prompt for AI Agents` fenced block (it is CodeRabbit's own distillation —
@@ -77,9 +79,10 @@ findings. The final line is always machine-stable
 (`SETTLED findings=<n> checks=<passed>/<total>` or `PENDING …`/`TIMEOUT …`) so a caller can grep
 one line instead of parsing the block.
 
-**Exit codes.** `0` settled-clean, `1` settled with unresolved findings, `2` checks failed,
-`3` not settled / timed out, `4` usage or `gh` error. An agent can branch on the code without
-reading output at all.
+**Exit codes.** For `status` and `wait`, `0` means settled-clean, `1` settled with unresolved
+findings, `2` checks failed, `3` not settled / timed out, and `4` usage or `gh` error. `findings`
+returns `0` for a successful listing. An agent can branch on the code without reading output at
+all.
 
 ## Considered options
 
