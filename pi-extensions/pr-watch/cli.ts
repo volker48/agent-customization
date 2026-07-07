@@ -277,7 +277,7 @@ function selectedFindings(snapshot: PrSnapshot, opts: CliOptions): Finding[] {
 }
 
 function settleOptions(opts: CliOptions): SettleOptions {
-  return { noReviews: opts.noReviews };
+  return { noReviews: opts.noReviews, bots: opts.bots };
 }
 
 function fetchSnapshot(opts: CliOptions): PrSnapshot {

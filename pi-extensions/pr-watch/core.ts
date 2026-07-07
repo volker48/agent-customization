@@ -49,6 +49,7 @@ export type PrSnapshot = {
 
 export type SettleOptions = {
   noReviews?: boolean;
+  bots?: string[];
 };
 
 export type SettleResult = {
@@ -413,13 +414,21 @@ export function hoistSharedPreamble(findings: Finding[]): {
   };
 }
 
+// A bot's own status context on the head commit is its per-commit "done" signal: CodeRabbit
+// posts no review when a re-review finds nothing, but still flips its context to SUCCESS.
+function botCheckLanded(snapshot: PrSnapshot, bots: string[]): boolean {
+  const names = new Set(bots.flatMap((b) => [b.toLowerCase(), botShortName(b)]));
+  return snapshot.checks.some((c) => c.state !== "pending" && names.has(c.name.toLowerCase()));
+}
+
 export function evaluateSettled(snapshot: PrSnapshot, opts: SettleOptions = {}): SettleResult {
   const checksPending = snapshot.checks.filter((c) => c.state === "pending").length;
-  const reviewLanded = snapshot.botReviews.some(
-    (r) =>
-      r.commitOid === snapshot.headOid ||
-      (snapshot.headCommittedAt != null && r.submittedAt >= snapshot.headCommittedAt),
-  );
+  const reviewLanded =
+    snapshot.botReviews.some(
+      (r) =>
+        r.commitOid === snapshot.headOid ||
+        (snapshot.headCommittedAt != null && r.submittedAt >= snapshot.headCommittedAt),
+    ) || botCheckLanded(snapshot, opts.bots ?? DEFAULT_BOTS);
   // A merged/closed PR will never receive new checks or reviews; waiting on it must not hang.
   const terminal = snapshot.state !== "OPEN";
   const settled = terminal || (checksPending === 0 && (reviewLanded || opts.noReviews === true));

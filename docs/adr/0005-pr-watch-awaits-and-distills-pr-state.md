@@ -49,9 +49,12 @@ through the `gh` CLI — auth, base URLs, and pagination are its problem.
    CodeRabbit's own `StatusContext` participates here, which makes "CodeRabbit is still reviewing"
    a first-class pending state.
 2. At least one configured bot has reviewed the current head: a review whose `commit` is the head
-   OID or whose `submittedAt` is at or after the head commit's `committedDate`. `--no-reviews`
-   drops condition 2 (CI-only wait). Bots that stay silent when satisfied (Codex posts nothing on
-   a clean re-review) are why condition 2 is satisfied by _any_ configured bot rather than all.
+   OID or whose `submittedAt` is at or after the head commit's `committedDate`, or a terminal
+   status check on the head named after a configured bot (CodeRabbit posts no review when a
+   re-review finds nothing, but still flips its per-commit `StatusContext` to SUCCESS).
+   `--no-reviews` drops condition 2 (CI-only wait). Bots that stay silent when satisfied (Codex
+   posts nothing on a clean re-review) are why condition 2 is satisfied by _any_ configured bot
+   rather than all.
 
 A merged or closed PR is settled unconditionally — nothing new can land on it, so `wait` returns
 immediately instead of hanging until timeout.

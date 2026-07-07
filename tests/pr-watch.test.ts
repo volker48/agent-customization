@@ -248,10 +248,12 @@ describe("hoistSharedPreamble", () => {
 });
 
 describe("evaluateSettled", () => {
+  // Checks pinned to a non-bot name: a bot-named check is itself a review-landed signal.
   const base = snapshotWith({
     state: "OPEN",
     headOid: "feedface".padEnd(40, "0"),
     headCommittedAt: "2026-07-06T12:00:00Z",
+    checks: [{ name: "ci", state: "passed" as const }],
   });
 
   it("is not settled while any check is pending", () => {
@@ -299,6 +301,21 @@ describe("evaluateSettled", () => {
   it("settles on checks alone with noReviews", () => {
     expect(evaluateSettled({ ...base, botReviews: [] }).settled).toBe(false);
     expect(evaluateSettled({ ...base, botReviews: [] }, { noReviews: true }).settled).toBe(true);
+  });
+
+  it("counts a terminal bot-named check as that bot reviewing the head", () => {
+    const silentRereview = {
+      ...base,
+      checks: [
+        { name: "ci", state: "passed" as const },
+        { name: "CodeRabbit", state: "passed" as const },
+      ],
+      botReviews: [],
+    };
+    expect(evaluateSettled(silentRereview)).toMatchObject({ settled: true, reviewLanded: true });
+    expect(evaluateSettled(silentRereview, { bots: ["chatgpt-codex-connector"] }).settled).toBe(
+      false,
+    );
   });
 
   it("treats merged and closed PRs as settled so wait cannot hang", () => {
