@@ -12,6 +12,7 @@ export type GitLabMrParseResult = {
   snapshot: PrSnapshot;
   projectId: string;
   pipelineId: string | null;
+  host: string;
 };
 
 type GitLabMergeRequest = {
@@ -59,15 +60,16 @@ export function createGitLabProvider(): ForgeProvider {
     name: "gitlab",
     fetchSnapshot(opts) {
       const mr = parseGitLabMrJson(runJson("glab", mrViewArgs(opts), "glab mr view"));
-      const checks = mr.pipelineId ? fetchPipelineJobs(mr.projectId, mr.pipelineId) : [];
+      const checks = mr.pipelineId ? fetchPipelineJobs(mr.projectId, mr.pipelineId, mr.host) : [];
       const discussions = runJsonPages(
         "glab",
-        (page, perPage) => discussionsArgs(mr.projectId, mr.snapshot.number, page, perPage),
+        (page, perPage) =>
+          discussionsArgs(mr.projectId, mr.snapshot.number, mr.host, page, perPage),
         "glab api discussions",
       ) as GitLabDiscussion[];
       const commit = runJson(
         "glab",
-        commitArgs(mr.projectId, mr.snapshot.headOid),
+        commitArgs(mr.projectId, mr.snapshot.headOid, mr.host),
         "glab api commit",
       ) as GitLabCommit;
       return {
@@ -83,10 +85,11 @@ export function createGitLabProvider(): ForgeProvider {
 
 export function parseGitLabMr(raw: unknown): GitLabMrParseResult {
   const mr = raw as GitLabMergeRequest;
-  const { owner, repo } = parseGitLabProjectPath(mr.web_url ?? "");
+  const project = parseGitLabProject(mr.web_url ?? "");
   return {
     projectId: String(mr.project_id),
     pipelineId: mr.head_pipeline?.id == null ? null : String(mr.head_pipeline.id),
+    host: project.host,
     snapshot: {
       number: mr.iid,
       title: mr.title,
@@ -96,8 +99,8 @@ export function parseGitLabMr(raw: unknown): GitLabMrParseResult {
       baseRefName: mr.target_branch,
       headOid: mr.sha,
       headCommittedAt: null,
-      owner,
-      repo,
+      owner: project.owner,
+      repo: project.repo,
       checks: [],
       botReviews: [],
       findings: [],
@@ -137,10 +140,13 @@ function gitLabThreads(discussions: GitLabDiscussion[]): ReviewThread[] {
     const first = discussion.notes[0];
     if (!first?.resolvable) return [];
     const position = first.position;
+    const path = position?.new_path ?? position?.old_path;
+    const line = position?.new_line ?? position?.old_line;
+    if (!path || line == null) return [];
     return [
       {
-        path: position?.new_path ?? position?.old_path ?? "?",
-        line: position?.new_line ?? position?.old_line ?? null,
+        path,
+        line,
         startLine: null,
         author: first.author?.username ?? "",
         body: first.body,
@@ -174,11 +180,11 @@ function gitLabJobState(status: string): PrCheck["state"] {
   return "pending";
 }
 
-function parseGitLabProjectPath(webUrl: string): { owner: string; repo: string } {
-  const match = /^https?:\/\/[^/]+\/(.+?)\/-\/merge_requests\//.exec(webUrl);
-  if (!match) return { owner: "", repo: "" };
-  const parts = match[1].split("/");
-  return { owner: parts.slice(0, -1).join("/"), repo: parts.at(-1) ?? "" };
+function parseGitLabProject(webUrl: string): { host: string; owner: string; repo: string } {
+  const match = /^https?:\/\/([^/]+)\/(.+?)\/-\/merge_requests\//.exec(webUrl);
+  if (!match) return { host: "", owner: "", repo: "" };
+  const parts = match[2].split("/");
+  return { host: match[1], owner: parts.slice(0, -1).join("/"), repo: parts.at(-1) ?? "" };
 }
 
 function mrViewArgs(opts: { pr?: string; repo?: string }): string[] {
@@ -189,32 +195,51 @@ function mrViewArgs(opts: { pr?: string; repo?: string }): string[] {
   return args;
 }
 
-function fetchPipelineJobs(projectId: string, pipelineId: string): PrCheck[] {
+function fetchPipelineJobs(projectId: string, pipelineId: string, host: string): PrCheck[] {
   return parseGitLabJobsJson(
     runJsonPages(
       "glab",
-      (page, perPage) => jobsArgs(projectId, pipelineId, page, perPage),
+      (page, perPage) => jobsArgs(projectId, pipelineId, host, page, perPage),
       "glab api pipeline jobs",
     ),
   );
 }
 
-function jobsArgs(projectId: string, pipelineId: string, page: number, perPage: number): string[] {
-  return [
-    "api",
+function jobsArgs(
+  projectId: string,
+  pipelineId: string,
+  host: string,
+  page: number,
+  perPage: number,
+): string[] {
+  return glabApiArgs(
     `projects/${projectId}/pipelines/${pipelineId}/jobs?per_page=${perPage}&page=${page}`,
-  ];
+    host,
+  );
 }
 
-function discussionsArgs(projectId: string, iid: number, page: number, perPage: number): string[] {
-  return [
-    "api",
+function discussionsArgs(
+  projectId: string,
+  iid: number,
+  host: string,
+  page: number,
+  perPage: number,
+): string[] {
+  return glabApiArgs(
     `projects/${projectId}/merge_requests/${iid}/discussions?per_page=${perPage}&page=${page}`,
-  ];
+    host,
+  );
 }
 
-function commitArgs(projectId: string, sha: string): string[] {
-  return ["api", `projects/${projectId}/repository/commits/${sha}`];
+function commitArgs(projectId: string, sha: string, host: string): string[] {
+  return glabApiArgs(`projects/${projectId}/repository/commits/${sha}`, host);
+}
+
+function glabApiArgs(path: string, host: string): string[] {
+  const args = ["api"];
+  if (host) args.push("--hostname", host);
+  args.push(path);
+  return args;
 }
 
 function parseGitLabMrJson(raw: unknown): GitLabMrParseResult {

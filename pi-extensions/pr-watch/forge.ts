@@ -17,6 +17,7 @@ export type ForgeProvider = {
 };
 
 const CLI_MAX_BUFFER = 16 * 1024 * 1024;
+const CLI_TIMEOUT_MS = 30_000;
 
 export class CliError extends Error {
   constructor(
@@ -46,8 +47,14 @@ export function autoDetectForge(): ForgeName {
 }
 
 export function runJson(command: string, args: string[], context: string): unknown {
-  const result = spawnSync(command, args, { encoding: "utf8", maxBuffer: CLI_MAX_BUFFER });
-  if (result.error) throw cliError(context, "", result.error, false);
+  const result = spawnSync(command, args, {
+    encoding: "utf8",
+    maxBuffer: CLI_MAX_BUFFER,
+    timeout: CLI_TIMEOUT_MS,
+  });
+  if (result.error) throw cliError(context, "", result.error, isRetryableSpawnError(result.error));
+  if (result.signal)
+    throw cliError(`${context} terminated by ${result.signal}`, result.stderr, null, true);
   if (result.status !== 0) throw cliError(context, result.stderr, null, true);
   try {
     return JSON.parse(result.stdout);
@@ -88,6 +95,10 @@ export function parseJsonFailure(context: string, cause: unknown): CliError {
 
 export function paginationFailure(context: string): CliError {
   return cliError(context, "", null, false);
+}
+
+function isRetryableSpawnError(error: Error): boolean {
+  return "code" in error && error.code === "ETIMEDOUT";
 }
 
 function jsonArrayPage(raw: unknown, context: string, page: number): unknown[] {

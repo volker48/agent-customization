@@ -289,6 +289,7 @@ describe("GitLab parsers", () => {
     const parsed = parseGitLabMr(JSON.parse(fixture("gitlab-mr-open.json")));
     expect(parsed.projectId).toBe("1234");
     expect(parsed.pipelineId).toBe("9876");
+    expect(parsed.host).toBe("gitlab.example.com");
     expect(parsed.snapshot).toMatchObject({
       number: 42,
       state: "OPEN",
@@ -338,6 +339,14 @@ describe("GitLab parsers", () => {
     const discussions = collectJsonPages((page) => pages[page - 1] ?? [], "gitlab discussions", 2);
     const findings = parseGitLabFindings(discussions, ["cursor"]);
     expect(findings.map((finding) => finding.path)).toEqual(["src/first.ts", "src/second.ts"]);
+  });
+
+  it("skips GitLab bot discussions without a concrete diff position", () => {
+    const discussion = gitLabDiscussion("src/first.ts", 10, "First paged bug") as {
+      notes: Array<{ position?: unknown }>;
+    };
+    delete discussion.notes[0].position;
+    expect(parseGitLabFindings([discussion], ["cursor"])).toEqual([]);
   });
 
   it("synthesizes GitLab bot reviews from top-level summary notes", () => {
