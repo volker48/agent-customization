@@ -1,108 +1,69 @@
-# Architecture Overview
+# Architecture overview
 
-## Repository Layout
+## Runtime shape
 
-```
-agent-customization/
-├── pi-extensions/           # Pi agent extensions (TypeScript)
-│   ├── fusion/              # Multi-model panel-judge-synthesis workflow
-│   ├── remote/              # Remote control daemon + extension
-│   ├── claude-review/       # Delegates review to Claude Code CLI
-│   ├── lib/                 # Shared deep implementations (cores)
-│   │   ├── webfetch-core.ts #   Web fetch logic (standalone + fusion)
-│   │   ├── exa-search-core.ts #  Exa search logic (standalone + fusion)
-│   │   └── bundle-core.ts   #   File bundling for panel prompts
-│   ├── sound-notifications.ts
-│   ├── exa-search.ts        # Standalone Exa search tool
-│   ├── webfetch.ts          # Standalone web fetch tool
-│   ├── rtk.ts               # RTK bash command rewrite interceptor
-│   └── autoname.ts          # Auto-titles sessions via small LLM
-├── claude-hooks/            # Claude Code hooks (Python)
-│   ├── hooks.json           # Event → command mappings
-│   └── play-sound.py        # Sound player script
-├── opencode-plugins/        # OpenCode plugins (TypeScript)
-│   └── sound-notifications.ts
-├── skills/                  # Agent Skills (shared, harness-agnostic)
-│   ├── fusion/              # Bundle curated files for the Fusion panel
-│   └── claude-review/       # Run Claude Code /code-review
-├── pi-themes/               # Pi TUI color themes
-├── ios-remote-client/       # iOS Swift app for remote control
-├── prompts/                 # Reusable prompt templates
-├── tests/                   # Vitest test suite
-├── docs/                    # ADRs, agent workflow docs, plans
-├── scripts/                 # Utility scripts
-├── CONTEXT.md               # Domain glossary (canonical vocabulary)
-├── AGENTS.md                # Agent skill pointers
-└── MY_AGENTS.md             # Coding standards
-```
+This repository is a customization bundle for multiple AI coding-agent harnesses:
 
-## Harness Model
+- **Pi** (`@earendil-works/pi-coding-agent`) is the primary target. Pi customizations are **extensions**: TypeScript modules that receive an `ExtensionAPI` and register tools, commands, renderers, flags, or event handlers.
+- **Claude Code** customizations are **hooks** and slash-command plugin files.
+- **OpenCode** customizations are **plugins** that return hook handlers.
 
-The repo customizes three harnesses, each with its own customization unit:
+`CONTEXT.md` is the vocabulary authority. It explicitly distinguishes harness, Pi extension, OpenCode plugin, and Claude Code hook. Follow that terminology in code and docs.
 
-| Harness | Customization unit | Mechanism | Location |
-|---|---|---|---|
-| **Pi** | Extension | TypeScript default-export function receiving `ExtensionAPI` | `pi-extensions/` |
-| **OpenCode** | Plugin | Function receiving OpenCode client, returns hooks object | `opencode-plugins/` |
-| **Claude Code** | Hook | Event→shell-command mapping in `settings.json` | `claude-hooks/` |
+## Top-level layout
 
-Pi is the primary target — most extensions and all of the complex workflows (Fusion, Remote Control) target it. The `package.json` `pi` key declares extension, skill, and prompt directories:
+| Path | Purpose |
+| --- | --- |
+| `pi-extensions/` | Pi extensions and shared TypeScript cores. Main domains: Fusion, remote control, web tools, Claude review, RTK, autoname, learn, sound notifications. |
+| `pi-extensions/lib/` | Shared deep modules such as Exa search and webfetch cores. Extension files own registration and schemas; cores own reusable behavior. |
+| `opencode-plugins/` | OpenCode plugin implementations, currently including sound notifications. |
+| `claude-hooks/` | Claude Code hook config and scripts, especially sound playback. |
+| `plugins/pi/` | Claude Code plugin commands and Node companion scripts that delegate implementation/review workflows to Pi. |
+| `skills/` | Agent skills shipped with the Pi package, including `fusion` and `claude-review`. |
+| `prompts/` | Reusable prompt files included in the Pi package. |
+| `docs/adr/` | Accepted architecture decisions. These are primary source material for future changes. |
+| `tests/` | Vitest tests for extensions, cores, remote control, Fusion, Claude/Pi companion, and fixtures. |
 
-```json
-{
-  "pi": {
-    "extensions": ["./pi-extensions"],
-    "skills": ["./skills"],
-    "prompts": ["./prompts"]
-  }
-}
-```
+## Package and module conventions
 
-## Shared Libraries (`pi-extensions/lib/`)
+`package.json` marks the workspace as ESM (`"type": "module"`) and private. TypeScript source imports local modules using `.js` specifiers, matching the existing style in `pi-extensions/fusion/*.ts` and `pi-extensions/remote/*.ts`.
 
-The `lib/` directory contains deep implementations shared between standalone tools and Fusion's inner tools:
+The Pi package block points Pi at:
 
-- **`webfetch-core.ts`** (~60 KB) — The full HTTP fetch implementation: probing, smart fallback, GitHub blob/repo handling, HTML-to-markdown conversion (via `@mozilla/readability`, `linkedom`, `turndown`). Used by both the standalone `webfetch` extension and Fusion's inner `webfetch` tool.
-- **`exa-search-core.ts`** — Exa API search implementation with result/text limits and search types. Used by both the standalone `exa_search` extension and Fusion's inner `web_search` tool.
-- **`bundle-core.ts`** — File collection and markdown bundling for panel prompts. Collects files by glob/literal patterns, prunes ignored directories, respects `.gitignore`, enforces per-file size caps.
+- `./pi-extensions`
+- `./skills`
+- `./prompts`
 
-Per [ADR-0001](../../docs/adr/0001-fusion-inner-tools-are-a-restricted-projection.md), the **implementation** is shared but the **interface** is deliberately split: standalone tools expose a rich model-controlled parameter surface, while Fusion's inner tools expose a narrowed surface with operator-injected policy. This divergence is a security control, not drift.
+The remote CLI is exposed as `pi-remote` via `pi-extensions/remote/cli.ts`.
 
-## Pi Extension Pattern
+## Shared-core pattern
 
-Every Pi extension is a TypeScript file with a default-export function:
+Several tools split registration from behavior:
 
-```typescript
-export default function myExtension(pi: ExtensionAPI) {
-  pi.registerTool({ name, description, parameters, execute });
-  pi.registerCommand("my-command", { description, handler });
-  pi.registerMessageRenderer<MyDetails>(messageType, renderer);
-  pi.on("event_name", async (event, ctx) => { /* ... */ });
-}
-```
+- `pi-extensions/exa-search.ts` registers standalone `exa_search`; `pi-extensions/lib/exa-search-core.ts` performs the API request, formatting, limits, and truncation.
+- `pi-extensions/webfetch.ts` registers standalone `webfetch`; `pi-extensions/lib/webfetch-core.ts` owns URL normalization, private-host protections, redirects, HTML-to-markdown conversion, GitHub handling, truncation, and temp-file spill behavior.
+- `pi-extensions/fusion/tools.ts` reuses those cores while presenting a narrower inner-model schema.
 
-Key `ExtensionAPI` surfaces used across extensions:
-- `registerTool` — Add a tool the agent can call
-- `registerCommand` — Add a `/command` the user can invoke
-- `registerMessageRenderer` — Custom TUI rendering for a message type
-- `registerFlag` — Declare a CLI flag
-- `on(event, handler)` — Subscribe to harness events
-- `sendMessage(msg, { triggerTurn })` — Inject a message into the session
-- `sendUserMessage(text, { deliverAs })` — Inject a user-role message
-- `exec(bin, args, opts)` — Spawn a subprocess
-- `ctx.modelRegistry` — Resolve model refs to runnable models + credentials
+This split is intentional: public/standalone tool schemas can differ from restricted inner schemas while sharing audited low-level behavior.
 
-## Configuration
+## Extension idioms
 
-- **Fusion config**: `~/.pi/agent/fusion.json` (or `PI_FUSION_CONFIG` env var) — defines panel models, judge, tool budgets, web policies
-- **Remote control**: `~/.pi/agent/remote/` — iroh secret key, allowed node IDs, daemon socket
-- **Sound notifications**: `~/Documents/sounds/<event>/` — audio files per event, shared across harnesses via symlinks
-- **Autoname**: `PI_AUTONAME_MODEL`, `PI_AUTONAME_FALLBACK_MODEL` env vars
+Representative Pi extension patterns:
 
-## Source Map
+- Register slash commands with `pi.registerCommand`, validate args, and report invalid usage through `ctx.ui.notify` (`pi-extensions/fusion/index.ts`, `pi-extensions/remote/index.ts`, `pi-extensions/claude-review/index.ts`).
+- Use `AbortController` and cancellable `BorderedLoader` widgets for long-running commands (`fusion`, `claude-review`).
+- Use `pi.sendMessage` for structured extension messages that should be rendered specially and may optionally trigger a turn.
+- Use `pi.sendUserMessage` when a command should enqueue normal Pi work (`learn`, Claude review auto-fix, remote prompt injection through `deliverAs: "steer"`).
+- Register renderers for custom message types when a transcript card should be compact but expandable (`fusion-panel`, `claude-review`).
 
-- [`README.md`](../../README.md) — Repository structure, setup, extension descriptions
-- [`CONTEXT.md`](../../CONTEXT.md) — Domain glossary defining harness, extension, plugin, hook
-- [`package.json`](../../package.json) — Pi extension/skill/prompt config, scripts, dependencies
-- [`pi-extensions/lib/`](../../pi-extensions/lib/) — Shared core implementations
-- [`docs/adr/0001-fusion-inner-tools-are-a-restricted-projection.md`](../../docs/adr/0001-fusion-inner-tools-are-a-restricted-projection.md) — Inner tools design decision
+## Tests and evidence paths
+
+Most behavior is covered by targeted Vitest files:
+
+- Fusion: `tests/fusion*.test.ts`, `tests/fusion.e2e.test.ts`.
+- Webfetch: `tests/webfetch.test.ts`, `tests/webfetch.baseline.test.ts`.
+- Remote control: `tests/remote-*.test.ts`, `tests/remote.e2e.test.ts`, `tests/ios-remote-fixtures.test.ts`.
+- Claude review and companion workflows: `tests/claude-review.test.ts`, `tests/claude-pi-*.test.ts`.
+- RTK: `tests/rtk.test.ts`, `tests/rtk.e2e.test.ts`.
+
+When changing a domain, start with the page for that domain, then inspect the source and matching tests before editing.
