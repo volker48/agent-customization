@@ -192,6 +192,20 @@ binary question decomposition inspired by the BinEval framework: see
 
 [bineval]: https://arxiv.org/abs/2606.27226
 
+### CLI: pr-watch (`pi-extensions/pr-watch/`)
+
+Watches a GitHub pull request through `gh`, waits for terminal checks and bot
+reviews, and distills bot review threads into compact findings. It provides
+`pr-watch status`, `pr-watch findings`, and `pr-watch wait`.
+
+Exit codes are: `0` settled clean, `1` settled with unresolved findings, `2`
+checks failed, `3` pending or timed out, and `4` usage or `gh` error.
+
+```bash
+# Run from a background shell/tool (for example, Claude Code run_in_background).
+pr-watch wait 63 --repo volker48/agent-customization --timeout 1800 --interval 30
+```
+
 ### Skill: Claude Review (`skills/claude-review/`)
 
 Adds a shared Agent Skill for running Claude Code's `/code-review` from the target
