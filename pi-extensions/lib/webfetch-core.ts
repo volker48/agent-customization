@@ -102,9 +102,9 @@ export interface WebFetchInput {
 export const WebFetchParams = Type.Object({
   url: Type.String({
     description:
-      "Website URL to access (http:// or https://). GitHub repo, blob, issue, and PR " +
-      "links can be passed directly; #fragments extract converted page sections. If scheme " +
-      "is omitted, https:// is assumed.",
+      "Website URL to access (http:// or https://). GitHub repo/blob/issue/PR and " +
+      "GitLab repo/blob/tree links can be passed directly; #fragments extract sections. " +
+      "If scheme is omitted, https:// is assumed.",
     minLength: 1,
   }),
   maxChars: Type.Optional(
@@ -289,6 +289,27 @@ interface GitHubRepositoryTreeEntry {
   type: string;
 }
 
+interface GitLabProjectUrl {
+  origin: string;
+  projectPath: string;
+  kind: "root" | "blob" | "tree";
+  ref?: string;
+  path?: string;
+}
+
+interface GitLabProjectPayload {
+  pathWithNamespace: string;
+  description: string;
+  defaultBranch: string;
+  topics: string[];
+  webUrl: string;
+}
+
+interface GitLabRepositoryTreeEntry {
+  name: string;
+  type: "file" | "dir";
+}
+
 interface FetchAttemptSuccess {
   status: number;
   statusText: string;
@@ -316,7 +337,12 @@ type FetchAttemptResult =
 
 interface SmartCandidate {
   url: string;
-  source: "http-link-header" | "html-link-alternate" | "github-raw" | "wordpress-api";
+  source:
+    | "http-link-header"
+    | "html-link-alternate"
+    | "github-raw"
+    | "gitlab-raw"
+    | "wordpress-api";
 }
 
 interface ToolResultContent {
@@ -848,7 +874,7 @@ async function fetchGithubJson(url: string, signal?: AbortSignal): Promise<unkno
 }
 
 async function throwGithubApiResponseError(response: Response): Promise<never> {
-  const message = await readGithubApiErrorMessage(response);
+  const message = await readJsonApiErrorMessage(response);
   if (isGithubRateLimitResponse(response, message)) {
     throw new Error("GitHub API rate limit hit; set GITHUB_TOKEN");
   }
@@ -857,7 +883,7 @@ async function throwGithubApiResponseError(response: Response): Promise<never> {
   throw new Error(status.trim());
 }
 
-async function readGithubApiErrorMessage(response: Response): Promise<string> {
+async function readJsonApiErrorMessage(response: Response): Promise<string> {
   try {
     const text = await response.text();
     if (!text) return "";
@@ -1062,6 +1088,198 @@ async function fetchGithubRepositoryOrientation(
   const tree = parseGithubRepositoryTree(await fetchGithubJson(treeUrl, signal));
   const readme = await fetchGithubReadme(repo, signal);
   return renderGithubRepositoryOrientation({ repo, metadata, tree, readme });
+}
+
+function decodeUrlPathSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
+function parseGitLabProjectUrl(parsed: URL): GitLabProjectUrl | undefined {
+  if (parsed.hostname.toLowerCase() !== "gitlab.com") return undefined;
+
+  const segments = parsed.pathname.split("/").filter(Boolean).map(decodeUrlPathSegment);
+  const markerIndex = segments.indexOf("-");
+  if (markerIndex === -1) return parseGitLabRootUrl(parsed.origin, segments);
+
+  const projectSegments = segments.slice(0, markerIndex);
+  const action = segments[markerIndex + 1];
+  const ref = segments[markerIndex + 2];
+  if (projectSegments.length < 2 || !action || !ref) return undefined;
+  if (action !== "blob" && action !== "raw" && action !== "tree") return undefined;
+
+  const path = segments.slice(markerIndex + 3).join("/");
+  if (action !== "tree" && !path) return undefined;
+  return {
+    origin: parsed.origin,
+    projectPath: projectSegments.join("/"),
+    kind: action === "tree" ? "tree" : "blob",
+    ref,
+    path: path || undefined,
+  };
+}
+
+function parseGitLabRootUrl(origin: string, segments: string[]): GitLabProjectUrl | undefined {
+  if (segments.length < 2) return undefined;
+  return { origin, projectPath: segments.join("/"), kind: "root" };
+}
+
+function buildGitLabApiUrl(
+  repo: GitLabProjectUrl,
+  path: string,
+  params: Record<string, string> = {},
+): string {
+  const encodedProject = encodeURIComponent(repo.projectPath);
+  const url = new URL(`${repo.origin}/api/v4/projects/${encodedProject}${path}`);
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, value);
+  }
+  return url.toString();
+}
+
+function gitLabApiHeaders(accept = "application/json"): Record<string, string> {
+  return { Accept: accept, "User-Agent": "pi-webfetch" };
+}
+
+async function throwGitLabApiResponseError(response: Response): Promise<never> {
+  const message = await readJsonApiErrorMessage(response);
+  const suffix = message ? `: ${message}` : "";
+  const status = `GitLab API returned ${response.status} ${response.statusText}${suffix}`;
+  throw new Error(status.trim());
+}
+
+async function fetchGitLabJson(url: string, signal?: AbortSignal): Promise<unknown> {
+  const response = await fetch(url, { headers: gitLabApiHeaders(), signal });
+  if (!response.ok) await throwGitLabApiResponseError(response);
+  try {
+    return await response.json();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`GitLab API returned invalid JSON from ${url}: ${message}`);
+  }
+}
+
+function parseGitLabProjectPayload(value: unknown): GitLabProjectPayload {
+  const object = readRecord(value, "GitLab project payload");
+  return {
+    pathWithNamespace: readString(object.path_with_namespace),
+    description: readString(object.description),
+    defaultBranch: readString(object.default_branch),
+    topics: parseGithubStringArray(object.topics),
+    webUrl: readString(object.web_url),
+  };
+}
+
+function parseGitLabRepositoryTree(value: unknown): GitLabRepositoryTreeEntry[] {
+  if (!Array.isArray(value)) throw new Error("GitLab repository tree payload was not an array");
+  return value
+    .map((entry) => {
+      const object = readRecord(entry, "GitLab repository tree entry");
+      const type: GitLabRepositoryTreeEntry["type"] =
+        readString(object.type) === "tree" ? "dir" : "file";
+      return { name: readString(object.name), type };
+    })
+    .filter((entry) => entry.name);
+}
+
+function findGitLabReadmePath(
+  tree: GitLabRepositoryTreeEntry[],
+  directoryPath?: string,
+): string | undefined {
+  const readme = tree.find(
+    (entry) => entry.type === "file" && /^readme(?:\..+)?$/i.test(entry.name),
+  );
+  if (!readme) return undefined;
+  return directoryPath ? `${directoryPath}/${readme.name}` : readme.name;
+}
+
+function gitLabReadmeCandidates(
+  tree: GitLabRepositoryTreeEntry[],
+  directoryPath?: string,
+): string[] {
+  const fromTree = findGitLabReadmePath(tree, directoryPath);
+  const conventional = directoryPath ? `${directoryPath}/README.md` : "README.md";
+  return [...new Set([fromTree, conventional].filter((path): path is string => Boolean(path)))];
+}
+
+async function fetchGitLabRawFile(
+  repo: GitLabProjectUrl,
+  filePath: string,
+  ref: string,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  const fileUrl = buildGitLabRawFileUrl(repo, filePath, ref);
+  const response = await fetch(fileUrl, {
+    headers: gitLabApiHeaders("text/markdown;q=1.0, text/plain;q=0.9, */*;q=0.1"),
+    signal,
+  });
+  if (response.status === 404) return undefined;
+  if (!response.ok) await throwGitLabApiResponseError(response);
+  return response.text();
+}
+
+function buildGitLabRawFileUrl(repo: GitLabProjectUrl, filePath: string, ref: string): string {
+  return buildGitLabApiUrl(repo, `/repository/files/${encodeURIComponent(filePath)}/raw`, { ref });
+}
+
+async function fetchGitLabReadme(args: {
+  repo: GitLabProjectUrl;
+  ref: string;
+  tree: GitLabRepositoryTreeEntry[];
+  signal?: AbortSignal;
+}): Promise<string | undefined> {
+  for (const filePath of gitLabReadmeCandidates(args.tree, args.repo.path)) {
+    const readme = await fetchGitLabRawFile(args.repo, filePath, args.ref, args.signal);
+    if (readme !== undefined) return readme;
+  }
+  return undefined;
+}
+
+function renderGitLabRepositoryOrientation(args: {
+  repo: GitLabProjectUrl;
+  metadata: GitLabProjectPayload;
+  tree: GitLabRepositoryTreeEntry[];
+  readme?: string;
+}): string {
+  const projectLabel = args.metadata.pathWithNamespace || args.repo.projectPath;
+  const lines = [args.repo.path ? `${projectLabel}/${args.repo.path}` : projectLabel];
+  if (args.metadata.description) lines.push(args.metadata.description);
+  lines.push(`default_branch: ${args.metadata.defaultBranch}`);
+  if (args.metadata.topics.length > 0) lines.push(`topics: ${args.metadata.topics.join(", ")}`);
+  if (args.metadata.webUrl) lines.push(`web_url: ${args.metadata.webUrl}`);
+  lines.push("", "tree:", ...args.tree.map(renderGithubRepositoryTreeEntry));
+  if (args.readme?.trim()) lines.push("", "README:", "", args.readme.trimEnd());
+  return lines.join("\n");
+}
+
+async function fetchGitLabRepositoryOrientation(
+  repo: GitLabProjectUrl,
+  signal: AbortSignal | undefined,
+): Promise<string> {
+  const apiUrl = buildGitLabApiUrl(repo, "");
+  const metadata = parseGitLabProjectPayload(await fetchGitLabJson(apiUrl, signal));
+  const ref = repo.ref || metadata.defaultBranch;
+  const tree = await fetchGitLabRepositoryTree(repo, ref, signal);
+  const readme = await fetchGitLabReadme({ repo, ref, tree, signal });
+  return renderGitLabRepositoryOrientation({ repo, metadata, tree, readme });
+}
+
+async function fetchGitLabRepositoryTree(
+  repo: GitLabProjectUrl,
+  ref: string,
+  signal: AbortSignal | undefined,
+): Promise<GitLabRepositoryTreeEntry[]> {
+  const params = repo.path ? { ref, per_page: "100", path: repo.path } : { ref, per_page: "100" };
+  const treeUrl = buildGitLabApiUrl(repo, "/repository/tree", params);
+  return parseGitLabRepositoryTree(await fetchGitLabJson(treeUrl, signal));
+}
+
+function buildGitLabRawCandidate(repo: GitLabProjectUrl | undefined): SmartCandidate | undefined {
+  if (!repo || repo.kind !== "blob" || !repo.ref || !repo.path) return undefined;
+  return { url: buildGitLabRawFileUrl(repo, repo.path, repo.ref), source: "gitlab-raw" };
 }
 
 function buildWordPressApiCandidate(url: string): SmartCandidate | undefined {
@@ -1718,8 +1936,6 @@ async function readFullResponseText(args: {
 }): Promise<StreamedResponseText> {
   const canConvert =
     !args.raw &&
-    args.response.status >= 200 &&
-    args.response.status < 300 &&
     normalizeContentType(args.contentType) === "text/html" &&
     (args.contentLength === undefined || args.contentLength <= MAX_HTML_CONVERT_BYTES);
 
@@ -2009,12 +2225,17 @@ async function buildSyntheticTextAttempt(args: {
   text: string;
   maxChars: number;
   finalUrl: string;
+  fragment?: string;
 }): Promise<FetchAttemptSuccess> {
+  const fragmentText = args.fragment ? buildSyntheticFragmentText(args.text, args.fragment) : {};
   const streamed = await buildFullTextResult({
-    text: args.text,
+    text: fragmentText.text ?? args.text,
     maxChars: args.maxChars,
     converted: false,
     conversionMethod: "none",
+    savedText: fragmentText.savedText,
+    keepFullOutput: fragmentText.keepFullOutput,
+    pathPlaceholder: fragmentText.pathPlaceholder,
   });
   return {
     status: 200,
@@ -2025,6 +2246,32 @@ async function buildSyntheticTextAttempt(args: {
     redirectChain: [args.finalUrl],
     streamed,
     jsShellDetection: { detected: false, signals: [] },
+  };
+}
+
+function buildSyntheticFragmentText(
+  markdown: string,
+  fragment: string,
+): {
+  text?: string;
+  savedText?: string;
+  keepFullOutput?: boolean;
+  pathPlaceholder?: string;
+} {
+  const section = extractMarkdownSection(markdown, fragment);
+  if (!section) {
+    const note = `[URL fragment "#${decodeUrlFragment(fragment)}" did not match any heading.]`;
+    return { text: `${markdown}\n\n${note}` };
+  }
+
+  const note =
+    `[Extracted section "#${decodeUrlFragment(fragment)}" ` +
+    `(lines ${section.startLine}-${section.endLine} of full markdown saved to {path})]`;
+  return {
+    text: `${note}\n\n${section.text}`,
+    savedText: markdown,
+    keepFullOutput: true,
+    pathPlaceholder: "{path}",
   };
 }
 
@@ -2319,7 +2566,7 @@ export async function executeWebfetch(
 
   try {
     const targetUrlString = targetUrl.toString();
-    const githubApiNotes: string[] = [];
+    const siteNotes: string[] = [];
     const githubIssueApiUrl = buildGithubIssueApiUrl(targetUrl);
     if (githubIssueApiUrl) {
       try {
@@ -2328,6 +2575,7 @@ export async function executeWebfetch(
           text: markdown,
           maxChars,
           finalUrl: githubIssueApiUrl,
+          fragment: requestedFragment,
         });
         return buildResultFromAttempt({
           attempt,
@@ -2338,7 +2586,7 @@ export async function executeWebfetch(
       } catch (error) {
         if (isAbortError(error, signal)) throw error;
         const message = error instanceof Error ? error.message : String(error);
-        githubApiNotes.push(`GitHub API fetch failed; fell back to HTML: ${message}`);
+        siteNotes.push(`GitHub API fetch failed; fell back to HTML: ${message}`);
       }
     }
 
@@ -2351,6 +2599,7 @@ export async function executeWebfetch(
           text: markdown,
           maxChars,
           finalUrl: targetUrlString,
+          fragment: requestedFragment,
         });
         return buildResultFromAttempt({
           attempt,
@@ -2361,16 +2610,43 @@ export async function executeWebfetch(
       } catch (error) {
         if (isAbortError(error, signal)) throw error;
         const message = error instanceof Error ? error.message : String(error);
-        githubApiNotes.push(`GitHub orientation failed; fell back to README/HTML: ${message}`);
+        siteNotes.push(`GitHub orientation failed; fell back to README/HTML: ${message}`);
       }
     }
 
-    const githubCandidate = buildGithubDirectCandidate(targetUrl);
-
-    if (githubCandidate) {
+    const gitLabProject = parseGitLabProjectUrl(targetUrl);
+    if (gitLabProject?.kind === "root" || gitLabProject?.kind === "tree") {
+      const apiUrl = buildGitLabApiUrl(gitLabProject, "");
       try {
-        const githubAttemptResult = await fetchAttempt({
-          url: githubCandidate.url,
+        const markdown = await fetchGitLabRepositoryOrientation(gitLabProject, signal);
+        const attempt = await buildSyntheticTextAttempt({
+          text: markdown,
+          maxChars,
+          finalUrl: targetUrlString,
+          fragment: requestedFragment,
+        });
+        return buildResultFromAttempt({
+          attempt,
+          isError: false,
+          alternateUrlUsed: apiUrl,
+          smartNotes: [`Fetched GitLab repository orientation via REST API: ${apiUrl}`],
+        });
+      } catch (error) {
+        if (isAbortError(error, signal)) throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        siteNotes.push(`GitLab orientation failed; fell back to HTML: ${message}`);
+      }
+    }
+
+    const directCandidates = [
+      buildGithubDirectCandidate(targetUrl),
+      buildGitLabRawCandidate(gitLabProject),
+    ].filter((candidate): candidate is SmartCandidate => Boolean(candidate));
+
+    for (const candidate of directCandidates) {
+      try {
+        const candidateAttemptResult = await fetchAttempt({
+          url: candidate.url,
           mode,
           maxChars,
           requestHeaders: preparedHeaders.requestHeaders,
@@ -2379,21 +2655,19 @@ export async function executeWebfetch(
         });
 
         if (
-          githubAttemptResult.kind === "success" &&
-          isUsefulSmartAlternate(githubAttemptResult.value)
+          candidateAttemptResult.kind === "success" &&
+          isUsefulSmartAlternate(candidateAttemptResult.value)
         ) {
           return buildResultFromAttempt({
-            attempt: githubAttemptResult.value,
+            attempt: candidateAttemptResult.value,
             isError: false,
-            alternateCandidates: [githubCandidate],
-            alternateUrlUsed: githubCandidate.url,
-            smartNotes: githubApiNotes,
+            alternateCandidates: [candidate],
+            alternateUrlUsed: candidate.url,
+            smartNotes: siteNotes,
           });
         }
       } catch (error) {
-        if (isAbortError(error, signal)) {
-          throw error;
-        }
+        if (isAbortError(error, signal)) throw error;
       }
     }
 
@@ -2411,19 +2685,19 @@ export async function executeWebfetch(
       if (directAttempt.kind === "unsupported-content") {
         return buildUnsupportedContentResult({
           attempt: directAttempt.value,
-          smartNotes: githubApiNotes,
+          smartNotes: siteNotes,
         });
       }
 
       return buildResultFromAttempt({
         attempt: directAttempt.value,
         isError: directAttempt.value.status < 200 || directAttempt.value.status >= 300,
-        smartNotes: githubApiNotes,
+        smartNotes: siteNotes,
       });
     }
 
     const smartNotes: string[] = [
-      ...githubApiNotes,
+      ...siteNotes,
       "Smart strategy: performed initial probe fetch before full retrieval.",
     ];
 

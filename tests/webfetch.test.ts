@@ -332,6 +332,42 @@ describe("webfetch extension", () => {
     expect((result.details as WebFetchTestDetails).conversionMethod).toBe("none");
   });
 
+  it("converts HTML error responses to markdown instead of raw HTML", async () => {
+    const html = [
+      "<html><head><script>window.challenge = true;</script></head><body>",
+      "<main><h1>Access denied</h1><p>The site blocked this fetch.</p>",
+      '<img alt="challenge" src="data:image/png;base64,AAAAAA"></main>',
+      "</body></html>",
+    ].join("");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(html, {
+        status: 403,
+        statusText: "Forbidden",
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_html_error",
+      { url: "https://example.com/blocked" },
+      new AbortController().signal,
+    );
+
+    const output = result.content[0]?.text ?? "";
+    const details = result.details as WebFetchTestDetails;
+    expect(result.isError).toBe(true);
+    expect(output).toContain("# Access denied");
+    expect(output).toContain("The site blocked this fetch.");
+    expect(output).not.toContain("<html");
+    expect(output).not.toContain("<script");
+    expect(output).not.toContain("data:image/png");
+    expect(details.status).toBe(403);
+    expect(details.converted).toBe(true);
+  });
+
   it("bypasses HTML conversion when raw is true", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response("<html><body><h1>Raw</h1></body></html>", {
@@ -1101,6 +1137,175 @@ describe("webfetch extension", () => {
     expect(output).toContain("# Add feature (#7)");
     expect(output).toContain("State: merged");
     expect(output).toContain("Author: @contributor");
+  });
+
+  it("returns orientation for GitLab repository root URLs", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        Response.json({
+          path_with_namespace: "acme/widgets",
+          description: "Widget toolkit.",
+          default_branch: "main",
+          topics: ["cli", "agent"],
+          web_url: "https://gitlab.com/acme/widgets",
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json([
+          { name: "docs", type: "tree" },
+          { name: "README.md", type: "blob" },
+        ]),
+      )
+      .mockResolvedValueOnce(
+        new Response("# GitLab README\n\nLoaded from README source.", {
+          status: 200,
+          headers: { "Content-Type": "text/plain; charset=utf-8" },
+        }),
+      );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_gitlab_repo",
+      { url: "https://gitlab.com/acme/widgets" },
+      new AbortController().signal,
+    );
+
+    const details = result.details as WebFetchTestDetails;
+    const output = result.content[0]?.text ?? "";
+    expect(result.isError).toBeUndefined();
+    expect(output).toContain("acme/widgets");
+    expect(output).toContain("Widget toolkit.");
+    expect(output).toContain("default_branch: main");
+    expect(output).toContain("topics: cli, agent");
+    expect(output).toContain("  docs/");
+    expect(output).toContain("# GitLab README");
+    expect(details.finalUrl).toBe("https://gitlab.com/acme/widgets");
+    expect(details.alternateUrlUsed).toBe("https://gitlab.com/api/v4/projects/acme%2Fwidgets");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://gitlab.com/api/v4/projects/acme%2Fwidgets");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      "https://gitlab.com/api/v4/projects/acme%2Fwidgets/repository/tree?ref=main&per_page=100",
+    );
+    expect(fetchMock.mock.calls[2]?.[0]).toBe(
+      "https://gitlab.com/api/v4/projects/acme%2Fwidgets/repository/files/README.md/raw?ref=main",
+    );
+  });
+
+  it("fetches conventional GitLab README when the first tree page omits it", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        Response.json({
+          path_with_namespace: "acme/widgets",
+          description: "Widget toolkit.",
+          default_branch: "main",
+          topics: [],
+          web_url: "https://gitlab.com/acme/widgets",
+        }),
+      )
+      .mockResolvedValueOnce(Response.json([{ name: "src", type: "tree" }]))
+      .mockResolvedValueOnce(
+        new Response("# Conventional README\n\nLoaded despite pagination.", {
+          status: 200,
+          headers: { "Content-Type": "text/plain; charset=utf-8" },
+        }),
+      );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_gitlab_repo_readme_fallback",
+      { url: "https://gitlab.com/acme/widgets" },
+      new AbortController().signal,
+    );
+
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0]?.text).toContain("# Conventional README");
+    expect(fetchMock.mock.calls[2]?.[0]).toBe(
+      "https://gitlab.com/api/v4/projects/acme%2Fwidgets/repository/files/README.md/raw?ref=main",
+    );
+  });
+
+  it("fetches raw content for GitLab blob URLs", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("# Raw GitLab file\n\nLoaded from GitLab raw API.", {
+        status: 200,
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
+      }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_gitlab_blob",
+      { url: "https://gitlab.com/acme/widgets/-/blob/main/docs/README.md" },
+      new AbortController().signal,
+    );
+
+    const details = result.details as WebFetchTestDetails;
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0]?.text).toContain("# Raw GitLab file");
+    expect(details.finalUrl).toBe(
+      "https://gitlab.com/api/v4/projects/acme%2Fwidgets/repository/files/" +
+        "docs%2FREADME.md/raw?ref=main",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("extracts README fragments from GitLab tree URLs", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        Response.json({
+          path_with_namespace: "acme/widgets",
+          description: "Widget toolkit.",
+          default_branch: "main",
+          topics: [],
+          web_url: "https://gitlab.com/acme/widgets",
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json([
+          { name: "api", type: "tree" },
+          { name: "README.md", type: "blob" },
+        ]),
+      )
+      .mockResolvedValueOnce(
+        new Response("# Docs\n\n## Quick Start\n\nInstall from source.\n\n## Later\n\nSkip.", {
+          status: 200,
+          headers: { "Content-Type": "text/plain; charset=utf-8" },
+        }),
+      );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_gitlab_tree_fragment",
+      { url: "https://gitlab.com/acme/widgets/-/tree/main/docs#quick-start" },
+      new AbortController().signal,
+    );
+
+    const details = result.details as WebFetchTestDetails;
+    const output = result.content[0]?.text ?? "";
+    expect(result.isError).toBeUndefined();
+    expect(output).toContain('[Extracted section "#quick-start"');
+    expect(output).toContain("## Quick Start");
+    expect(output).toContain("Install from source.");
+    expect(output).not.toContain("## Later");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      "https://gitlab.com/api/v4/projects/acme%2Fwidgets/repository/tree" +
+        "?ref=main&per_page=100&path=docs",
+    );
+
+    if (details.fullOutputPath) {
+      await rm(dirname(details.fullOutputPath), { recursive: true, force: true });
+    }
   });
 
   it("smart strategy auto-follows markdown alternates from Link headers", async () => {

@@ -170,9 +170,9 @@ Registers an `exa_search` tool that queries the [Exa](https://exa.ai) search API
 ### Pi: Web Fetch (`pi-extensions/webfetch.ts`)
 
 Registers a `webfetch` tool for fetching web pages directly. Supports markdown conversion,
-probing, smart fallback strategies, and direct GitHub repository/blob links. Agents can pass
-GitHub repo roots (for README source markdown) or GitHub `blob` file URLs without converting
-them to raw URLs first.
+probing, smart fallback strategies, and direct GitHub/GitLab repository/blob links. Agents can
+pass GitHub or GitLab repo roots (for README source markdown) or blob file URLs without
+converting them to raw URLs first.
 
 HTML-to-markdown conversion depends on runtime packages in this repository. Use the
 extension from this checkout (or distribute it as a pi package); copying only
