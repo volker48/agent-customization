@@ -53,6 +53,9 @@ through the `gh` CLI — auth, base URLs, and pagination are its problem.
    drops condition 2 (CI-only wait). Bots that stay silent when satisfied (Codex posts nothing on
    a clean re-review) are why condition 2 is satisfied by *any* configured bot rather than all.
 
+A merged or closed PR is settled unconditionally — nothing new can land on it, so `wait` returns
+immediately instead of hanging until timeout.
+
 **Distillation contract.** Findings come from unresolved, non-outdated review threads authored by
 configured bots (resolution state via GraphQL `reviewThreads`; there is no REST equivalent). Each
 finding renders as `path:line [bot severity]`, a title line, and a detail block:

@@ -412,7 +412,9 @@ export function evaluateSettled(snapshot: PrSnapshot, opts: SettleOptions = {}):
       r.commitOid === snapshot.headOid ||
       (snapshot.headCommittedAt != null && r.submittedAt >= snapshot.headCommittedAt),
   );
-  const settled = checksPending === 0 && (reviewLanded || opts.noReviews === true);
+  // A merged/closed PR will never receive new checks or reviews; waiting on it must not hang.
+  const terminal = snapshot.state !== "OPEN";
+  const settled = terminal || (checksPending === 0 && (reviewLanded || opts.noReviews === true));
   return { settled, checksPending, reviewLanded };
 }
 

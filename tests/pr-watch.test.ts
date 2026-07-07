@@ -92,7 +92,8 @@ describe("distillComment for CodeRabbit", () => {
   });
 
   it("falls back to stripped prose when no prompt block exists", () => {
-    const body = "_⚠️ Potential issue_ | _🔴 Critical_\n\n**Bad bug.**\n\nProse here.\n\n" +
+    const body =
+      "_⚠️ Potential issue_ | _🔴 Critical_\n\n**Bad bug.**\n\nProse here.\n\n" +
       "<details><summary>x</summary>noise</details>\n<!-- meta -->";
     const distilled = distillComment("coderabbitai", body);
     expect(distilled.severity).toBe("critical");
@@ -160,7 +161,9 @@ describe("parseReviewData", () => {
                 path: "plugins/pi/scripts/lib/jobs.mjs",
                 line: 23,
                 startLine: 16,
-                comments: { nodes: [{ author: { login: "coderabbitai" }, body: coderabbitInline }] },
+                comments: {
+                  nodes: [{ author: { login: "coderabbitai" }, body: coderabbitInline }],
+                },
               },
               {
                 isResolved: true,
@@ -190,7 +193,11 @@ describe("parseReviewData", () => {
   it("keeps bot reviews with actionable counts and drops human reviews", () => {
     const data = parseReviewData(graphql, ["coderabbitai", "chatgpt-codex-connector"]);
     expect(data.botReviews).toHaveLength(1);
-    expect(data.botReviews[0]).toMatchObject({ bot: "coderabbit", actionable: 1, commitOid: "abc123" });
+    expect(data.botReviews[0]).toMatchObject({
+      bot: "coderabbit",
+      actionable: 1,
+      commitOid: "abc123",
+    });
     expect(data.nitpicks).toHaveLength(2);
   });
 
@@ -232,6 +239,7 @@ describe("hoistSharedPreamble", () => {
 
 describe("evaluateSettled", () => {
   const base = snapshotWith({
+    state: "OPEN",
     headOid: "feedface".padEnd(40, "0"),
     headCommittedAt: "2026-07-06T12:00:00Z",
   });
@@ -267,7 +275,12 @@ describe("evaluateSettled", () => {
     const byOid = {
       ...base,
       botReviews: [
-        { bot: "codex", submittedAt: "2026-07-06T09:00:00Z", commitOid: base.headOid, actionable: null },
+        {
+          bot: "codex",
+          submittedAt: "2026-07-06T09:00:00Z",
+          commitOid: base.headOid,
+          actionable: null,
+        },
       ],
     };
     expect(evaluateSettled(byOid).settled).toBe(true);
@@ -276,6 +289,17 @@ describe("evaluateSettled", () => {
   it("settles on checks alone with noReviews", () => {
     expect(evaluateSettled({ ...base, botReviews: [] }).settled).toBe(false);
     expect(evaluateSettled({ ...base, botReviews: [] }, { noReviews: true }).settled).toBe(true);
+  });
+
+  it("treats merged and closed PRs as settled so wait cannot hang", () => {
+    const merged = {
+      ...base,
+      state: "MERGED",
+      checks: [{ name: "ci", state: "pending" as const }],
+      botReviews: [],
+    };
+    expect(evaluateSettled(merged).settled).toBe(true);
+    expect(evaluateSettled({ ...merged, state: "CLOSED" }).settled).toBe(true);
   });
 });
 
@@ -314,7 +338,12 @@ describe("rendering", () => {
     const snapshot = snapshotWith({
       findings: [findingWith({})],
       botReviews: [
-        { bot: "coderabbit", submittedAt: "2026-07-06T12:30:00Z", commitOid: "abc123", actionable: 1 },
+        {
+          bot: "coderabbit",
+          submittedAt: "2026-07-06T12:30:00Z",
+          commitOid: "abc123",
+          actionable: 1,
+        },
       ],
     });
     const text = renderStatus(snapshot, { settled: true, checksPending: 0, reviewLanded: true });
