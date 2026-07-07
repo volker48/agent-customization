@@ -9,8 +9,7 @@ export const SKILL_AUTHORING_STANDARDS = [
     "existing repository skill layout.",
   "- Use lowercase-hyphenated skill names. Keep the skill focused on one " +
     "repeatable capability.",
-  "- Start SKILL.md with YAML frontmatter containing at least name and " +
-    "description.",
+  "- Start SKILL.md with YAML frontmatter containing at least name and " + "description.",
   "- Make the description action-oriented and specific so the agent can decide " +
     "when to use the skill.",
   "- If the skill needs scripts, templates, or reference material, place them " +
