@@ -2,27 +2,33 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
+import { adapterForLogin, distillComment, parseNitpicks } from "../pi-extensions/pr-watch/bots.js";
 import {
-  distillComment,
   evaluateSettled,
   exitCodeFor,
   hoistSharedPreamble,
-  REVIEW_QUERY,
-  parseNitpicks,
-  parsePrView,
-  parseReviewData,
   renderFindings,
   renderStatus,
   unresolvedFindings,
   type Finding,
   type PrSnapshot,
 } from "../pi-extensions/pr-watch/core.js";
+import { collectJsonPages } from "../pi-extensions/pr-watch/forge.js";
+import { REVIEW_QUERY, parsePrView, parseReviewData } from "../pi-extensions/pr-watch/github.js";
+import {
+  parseGitLabBotReviews,
+  parseGitLabFindings,
+  parseGitLabJobs,
+  parseGitLabMr,
+} from "../pi-extensions/pr-watch/gitlab.js";
 
 const fixture = (name: string) => readFileSync(`tests/fixtures/pr-watch/${name}`, "utf8");
 
 const coderabbitInline = fixture("coderabbit-inline-comment.md");
 const codexInline = fixture("codex-inline-comment.md");
+const bugbotInline = fixture("bugbot-inline-comment.md");
 const coderabbitReviewBody = fixture("coderabbit-review-body.md");
+const bugbotReviewBody = fixture("bugbot-review-body.md");
 
 function snapshotWith(overrides: Partial<PrSnapshot>): PrSnapshot {
   return {
@@ -42,6 +48,38 @@ function findingWith(overrides: Partial<Finding>): Finding {
     resolved: false,
     outdated: false,
     ...overrides,
+  };
+}
+
+function gitLabDiscussion(path: string, line: number, title: string): unknown {
+  return {
+    notes: [
+      {
+        body:
+          `### ${title}\n\n**Low Severity**\n\n` +
+          "<!-- DESCRIPTION START -->\nPaged discussion detail.\n<!-- DESCRIPTION END -->",
+        resolvable: true,
+        resolved: false,
+        created_at: "2026-07-06T13:00:00Z",
+        author: { username: "cursor" },
+        position: { new_path: path, new_line: line },
+      },
+    ],
+  };
+}
+
+function gitLabHumanDiscussion(path: string, line: number): unknown {
+  return {
+    notes: [
+      {
+        body: "human",
+        resolvable: true,
+        resolved: false,
+        created_at: "2026-07-06T13:00:00Z",
+        author: { username: "human" },
+        position: { new_path: path, new_line: line },
+      },
+    ],
   };
 }
 
@@ -121,6 +159,21 @@ describe("distillComment for Codex", () => {
     expect(distilled.detail).toContain("executeReview");
     expect(distilled.detail).not.toContain("Badge");
     expect(distilled.detail).not.toContain("Useful? React");
+  });
+});
+
+describe("distillComment for Bugbot", () => {
+  it("extracts title, severity, marker-bounded detail, and actionable count", () => {
+    const distilled = distillComment("cursor[bot]", bugbotInline);
+    expect(distilled.severity).toBe("high");
+    expect(distilled.title).toBe("gh no-PR errors misclassified");
+    expect(distilled.detail).toContain("no open pull requests found for branch");
+    expect(distilled.detail).not.toContain("cursor.com/open");
+    expect(distilled.detail).not.toContain("Reviewed by [Cursor Bugbot]");
+    expect(distilled.detail).not.toContain("LOCATIONS START");
+
+    const adapter = adapterForLogin("cursor[bot]");
+    expect(adapter?.actionableCount?.(bugbotReviewBody)).toBe(3);
   });
 });
 
@@ -228,6 +281,82 @@ describe("parseReviewData", () => {
     expect(data.botReviews).toHaveLength(0);
     expect(data.findings).toHaveLength(1);
     expect(data.findings[0].bot).toBe("codex");
+  });
+});
+
+describe("GitLab parsers", () => {
+  it("parses MR shape, state mapping, project metadata, and pipeline id", () => {
+    const parsed = parseGitLabMr(JSON.parse(fixture("gitlab-mr-open.json")));
+    expect(parsed.projectId).toBe("1234");
+    expect(parsed.pipelineId).toBe("9876");
+    expect(parsed.snapshot).toMatchObject({
+      number: 42,
+      state: "OPEN",
+      owner: "group/subgroup",
+      repo: "project",
+      headRefName: "feature/gitlab",
+      baseRefName: "main",
+    });
+  });
+
+  it("maps GitLab job statuses including manual to skipped", () => {
+    const checks = parseGitLabJobs(JSON.parse(fixture("gitlab-jobs.json")));
+    expect(checks.map((check) => check.state)).toEqual([
+      "passed",
+      "failed",
+      "skipped",
+      "pending",
+      "skipped",
+      "failed",
+    ]);
+  });
+
+  it("turns bot discussions into findings and ignores humans", () => {
+    const findings = parseGitLabFindings(JSON.parse(fixture("gitlab-discussions.json")), [
+      "cursor",
+    ]);
+    expect(findings).toHaveLength(2);
+    expect(findings[0]).toMatchObject({
+      path: "src/gitlab.ts",
+      line: "27",
+      bot: "bugbot",
+      severity: "medium",
+      resolved: false,
+      outdated: false,
+    });
+    expect(findings[1]).toMatchObject({ path: "src/old.ts", line: "9", resolved: true });
+  });
+
+  it("combines multi-page GitLab discussions before parsing findings", () => {
+    const pages = [
+      [
+        gitLabDiscussion("src/first.ts", 10, "First paged bug"),
+        gitLabHumanDiscussion("src/human.ts", 1),
+      ],
+      [gitLabDiscussion("src/second.ts", 20, "Second paged bug")],
+    ];
+    const discussions = collectJsonPages((page) => pages[page - 1] ?? [], "gitlab discussions", 2);
+    const findings = parseGitLabFindings(discussions, ["cursor"]);
+    expect(findings.map((finding) => finding.path)).toEqual(["src/first.ts", "src/second.ts"]);
+  });
+
+  it("synthesizes GitLab bot reviews from top-level summary notes", () => {
+    const reviews = parseGitLabBotReviews(JSON.parse(fixture("gitlab-discussions.json")), [
+      "cursor",
+    ]);
+    expect(reviews).toEqual([
+      {
+        bot: "bugbot",
+        submittedAt: "2026-07-06T14:00:00Z",
+        commitOid: null,
+        actionable: 2,
+      },
+    ]);
+  });
+
+  it("lets merged GitLab MRs settle unconditionally", () => {
+    const { snapshot } = parseGitLabMr(JSON.parse(fixture("gitlab-mr-merged.json")));
+    expect(evaluateSettled(snapshot).settled).toBe(true);
   });
 });
 

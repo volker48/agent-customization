@@ -1,15 +1,10 @@
 #!/usr/bin/env -S tsx
 
-import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 import {
-  DEFAULT_BOTS,
-  REVIEW_QUERY,
   evaluateSettled,
   exitCodeFor,
-  parsePrView,
-  parseReviewData,
   renderFindings,
   renderStatus,
   unresolvedFindings,
@@ -17,32 +12,27 @@ import {
   type PrSnapshot,
   type SettleOptions,
 } from "./core.js";
+import { DEFAULT_BOTS } from "./bots.js";
+import { createGitHubProvider } from "./github.js";
+import { createGitLabProvider } from "./gitlab.js";
+import {
+  autoDetectForge,
+  CliError,
+  UsageError,
+  type ForgeName,
+  type ForgeProvider,
+} from "./forge.js";
 
 type Command = "status" | "findings" | "wait";
 
-type ValueFlag = "repo" | "bots" | "timeoutSecs" | "intervalSecs";
-
-type ReviewQueryResponse = {
-  data: {
-    repository: {
-      pullRequest: {
-        reviewThreads: {
-          pageInfo: {
-            hasNextPage: boolean;
-            endCursor: string | null;
-          };
-          nodes: unknown[];
-        };
-      };
-    };
-  };
-};
+type ValueFlag = "repo" | "bots" | "timeoutSecs" | "intervalSecs" | "forge";
 
 export type CliOptions = {
   command: Command;
   pr?: string;
   repo?: string;
   bots: string[];
+  forge?: ForgeName;
   all: boolean;
   nitpicks: boolean;
   noReviews: boolean;
@@ -55,20 +45,6 @@ type ParseState = {
   waitFlagUsed: boolean;
 };
 
-const PR_VIEW_FIELDS = [
-  "number",
-  "title",
-  "state",
-  "isDraft",
-  "headRefName",
-  "baseRefName",
-  "headRefOid",
-  "statusCheckRollup",
-  "commits",
-  "url",
-];
-const GH_MAX_BUFFER = 16 * 1024 * 1024;
-
 const BOOL_FLAGS: Record<string, "all" | "nitpicks" | "noReviews"> = {
   "--all": "all",
   "--nitpicks": "nitpicks",
@@ -79,25 +55,10 @@ const VALUE_FLAGS: Record<string, ValueFlag> = {
   "--repo": "repo",
   "-R": "repo",
   "--bots": "bots",
+  "--forge": "forge",
   "--timeout": "timeoutSecs",
   "--interval": "intervalSecs",
 };
-
-class CliError extends Error {
-  constructor(
-    message: string,
-    readonly exitCode: number,
-    readonly retryable = false,
-  ) {
-    super(message);
-  }
-}
-
-class UsageError extends CliError {
-  constructor(message: string) {
-    super(message, 4);
-  }
-}
 
 /** Parse pr-watch CLI arguments without performing any I/O. */
 export function parseArgs(argv: string[]): CliOptions {
@@ -172,6 +133,7 @@ function assignPr(opts: CliOptions, value: string): void {
 function assignValue(state: ParseState, flag: ValueFlag, value: string): void {
   if (flag === "repo") state.opts.repo = nonEmpty(value, "--repo");
   if (flag === "bots") state.opts.bots = parseBots(value);
+  if (flag === "forge") state.opts.forge = parseForge(value);
   if (flag === "timeoutSecs") state.opts.timeoutSecs = parseSeconds(state, value, "--timeout");
   if (flag === "intervalSecs") state.opts.intervalSecs = parseSeconds(state, value, "--interval");
 }
@@ -189,6 +151,11 @@ function parseBots(value: string): string[] {
     .filter(Boolean);
   if (bots.length === 0) throw new UsageError("--bots requires at least one bot");
   return bots;
+}
+
+function parseForge(value: string): ForgeName {
+  if (value === "github" || value === "gitlab") return value;
+  throw new UsageError("--forge must be github or gitlab");
 }
 
 function parseSeconds(state: ParseState, value: string, flag: string): number {
@@ -281,97 +248,17 @@ function settleOptions(opts: CliOptions): SettleOptions {
 }
 
 function fetchSnapshot(opts: CliOptions): PrSnapshot {
-  const snapshot = parsePrViewJson(runGhJson(prViewArgs(opts), "gh pr view"));
-  const reviews = fetchReviewData(snapshot, opts.bots);
-  return {
-    ...snapshot,
-    botReviews: reviews.botReviews,
-    findings: opts.nitpicks ? [...reviews.findings, ...reviews.nitpicks] : reviews.findings,
-  };
+  return forgeProvider(opts).fetchSnapshot({
+    pr: opts.pr,
+    repo: opts.repo,
+    bots: opts.bots,
+    nitpicks: opts.nitpicks,
+  });
 }
 
-function prViewArgs(opts: CliOptions): string[] {
-  const args = ["pr", "view"];
-  if (opts.pr) args.push(opts.pr);
-  if (opts.repo) args.push("-R", opts.repo);
-  args.push("--json", PR_VIEW_FIELDS.join(","));
-  return args;
-}
-
-function reviewArgs(snapshot: PrSnapshot, reviewThreadsCursor: string | null): string[] {
-  const args = [
-    "api",
-    "graphql",
-    "-f",
-    `query=${REVIEW_QUERY}`,
-    "-F",
-    `owner=${snapshot.owner}`,
-    "-F",
-    `name=${snapshot.repo}`,
-    "-F",
-    `number=${snapshot.number}`,
-  ];
-  if (reviewThreadsCursor) args.push("-F", `reviewThreadsCursor=${reviewThreadsCursor}`);
-  return args;
-}
-
-function fetchReviewData(snapshot: PrSnapshot, bots: string[]): ReturnType<typeof parseReviewData> {
-  const first = reviewQueryResponse(runGhJson(reviewArgs(snapshot, null), "gh api graphql"));
-  let pageInfo = first.data.repository.pullRequest.reviewThreads.pageInfo;
-  while (pageInfo.hasNextPage) {
-    if (!pageInfo.endCursor) throw ghError("gh api graphql pagination", "", null, false);
-    const next = reviewQueryResponse(
-      runGhJson(reviewArgs(snapshot, pageInfo.endCursor), "gh api graphql"),
-    );
-    first.data.repository.pullRequest.reviewThreads.nodes.push(
-      ...next.data.repository.pullRequest.reviewThreads.nodes,
-    );
-    pageInfo = next.data.repository.pullRequest.reviewThreads.pageInfo;
-  }
-  return parseReviewJson(first, bots);
-}
-
-function reviewQueryResponse(raw: unknown): ReviewQueryResponse {
-  return raw as ReviewQueryResponse;
-}
-
-function runGhJson(args: string[], context: string): unknown {
-  const result = spawnSync("gh", args, { encoding: "utf8", maxBuffer: GH_MAX_BUFFER });
-  if (result.error) throw ghError(context, "", result.error, false);
-  if (result.status !== 0) throw ghError(context, result.stderr, null, true);
-  try {
-    return JSON.parse(result.stdout);
-  } catch (error) {
-    throw ghError(`${context} returned invalid JSON`, result.stderr, error, false);
-  }
-}
-
-function parsePrViewJson(raw: unknown): PrSnapshot {
-  try {
-    return parsePrView(raw);
-  } catch (error) {
-    throw ghError("could not parse gh pr view output", "", error, false);
-  }
-}
-
-function parseReviewJson(raw: unknown, bots: string[]): ReturnType<typeof parseReviewData> {
-  try {
-    return parseReviewData(raw, bots);
-  } catch (error) {
-    throw ghError("could not parse gh api graphql output", "", error, false);
-  }
-}
-
-function ghError(
-  context: string,
-  stderr: string | null | undefined,
-  cause: unknown,
-  retryable: boolean,
-): CliError {
-  const lines = [`${context} failed`];
-  if (stderr?.trim()) lines.push(stderr.trimEnd());
-  if (cause instanceof Error) lines.push(cause.message);
-  return new CliError(lines.join("\n"), 4, retryable);
+function forgeProvider(opts: CliOptions): ForgeProvider {
+  const forge = opts.forge ?? autoDetectForge();
+  return forge === "gitlab" ? createGitLabProvider() : createGitHubProvider();
 }
 
 function writeUsage(message: string): void {
@@ -383,12 +270,13 @@ function usage(): string {
     "Usage: pr-watch status|findings|wait [<pr>] [options]",
     "Options:",
     "  -R, --repo <owner/repo>",
+    "  --forge <github|gitlab>  default: auto (origin host containing gitlab => gitlab)",
     "  --bots <csv>",
     "  --all",
     "  --nitpicks",
     "  --no-reviews",
-    "  --timeout <secs>    wait only (default 1800)",
-    "  --interval <secs>   wait only (default 30)",
+    "  --timeout <secs>        wait only (default 1800)",
+    "  --interval <secs>       wait only (default 30)",
   ].join("\n");
 }
 

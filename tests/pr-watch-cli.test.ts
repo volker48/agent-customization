@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_BOTS } from "../pi-extensions/pr-watch/core.js";
+import { DEFAULT_BOTS } from "../pi-extensions/pr-watch/bots.js";
+import { detectForgeFromRemoteUrl } from "../pi-extensions/pr-watch/forge.js";
 import { parseArgs } from "../pi-extensions/pr-watch/cli.js";
 
 describe("parseArgs", () => {
@@ -48,6 +49,7 @@ describe("parseArgs", () => {
         "wait",
         "--repo=volker48/agent-customization",
         "--bots=coderabbitai",
+        "--forge=gitlab",
         "--timeout=60",
         "--interval=5",
         "63",
@@ -57,6 +59,7 @@ describe("parseArgs", () => {
       pr: "63",
       repo: "volker48/agent-customization",
       bots: ["coderabbitai"],
+      forge: "gitlab",
       timeoutSecs: 60,
       intervalSecs: 5,
     });
@@ -65,6 +68,12 @@ describe("parseArgs", () => {
   it("rejects unknown or missing subcommands", () => {
     expect(() => parseArgs([])).toThrow(/missing subcommand/);
     expect(() => parseArgs(["checks"])).toThrow(/unknown subcommand/);
+  });
+
+  it("parses and rejects forge flags", () => {
+    expect(parseArgs(["status", "--forge", "github"])).toMatchObject({ forge: "github" });
+    expect(parseArgs(["status", "--forge=gitlab"])).toMatchObject({ forge: "gitlab" });
+    expect(() => parseArgs(["status", "--forge", "bitbucket"])).toThrow(/github or gitlab/);
   });
 
   it("rejects unknown flags and missing flag values", () => {
@@ -85,5 +94,17 @@ describe("parseArgs", () => {
   it("rejects empty bot lists and non-positive intervals", () => {
     expect(() => parseArgs(["status", "--bots="])).toThrow(/at least one bot/);
     expect(() => parseArgs(["wait", "--interval", "0"])).toThrow(/positive integer/);
+  });
+});
+
+describe("detectForgeFromRemoteUrl", () => {
+  it("selects gitlab when the origin host contains gitlab", () => {
+    expect(detectForgeFromRemoteUrl("https://gitlab.com/group/project.git")).toBe("gitlab");
+    expect(detectForgeFromRemoteUrl("git@gitlab.example.com:group/project.git")).toBe("gitlab");
+  });
+
+  it("defaults to github for non-gitlab or missing origins", () => {
+    expect(detectForgeFromRemoteUrl("https://github.com/org/repo.git")).toBe("github");
+    expect(detectForgeFromRemoteUrl(null)).toBe("github");
   });
 });
