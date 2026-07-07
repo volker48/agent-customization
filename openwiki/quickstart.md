@@ -1,94 +1,90 @@
-# Agent Customization — Quick Start
+# OpenWiki quickstart
 
-Extensions, hooks, plugins, skills, and themes for AI coding agents — currently supporting [Claude Code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview), [OpenCode](https://opencode.ai), and the [Pi agent](https://github.com/badlogic/pi-mono). The bulk of the domain weight lives in **Fusion**, a Pi extension that runs a multi-model panel-and-judge workflow, and **Remote Control**, a Pi extension that lets a phone view and steer a running session.
+## What this repository is
 
-## What This Repo Contains
+`agent-customization` is a private TypeScript/Node workspace for customizing AI coding-agent harnesses, primarily the Pi coding agent, with smaller Claude Code and OpenCode customizations. The root README describes the supported harnesses and shared sound-notification convention; `CONTEXT.md` defines the project vocabulary and is the canonical domain glossary.
 
-| Directory | What it is | Harness |
-|---|---|---|
-| `pi-extensions/` | Pi agent extensions (TypeScript) — Fusion, Remote, Exa Search, WebFetch, RTK, Autoname, Claude Review, Sound | Pi |
-| `claude-hooks/` | Claude Code hooks (Python) — sound notifications | Claude Code |
-| `opencode-plugins/` | OpenCode plugins (TypeScript) — sound notifications | OpenCode |
-| `skills/` | Agent Skills shared across harnesses — Fusion bundle, Claude Review | Pi + compatible |
-| `pi-themes/` | Pi TUI color themes (obsec-dark, obsec-light) | Pi |
-| `ios-remote-client/` | iOS Swift app for remote session control | Remote Control |
-| `prompts/` | Reusable prompt templates | Pi |
-| `tests/` | Vitest test suite | All |
-| `docs/` | ADRs, agent workflow docs, plans | All |
+The repository is not a product server. It is a collection of installable/customizable artifacts:
 
-## Key Concepts
+- **Pi extensions** in `pi-extensions/` that register tools, slash commands, renderers, and event handlers through Pi's `ExtensionAPI`.
+- **Claude Code hooks and plugin commands** in `claude-hooks/` and `plugins/pi/`.
+- **OpenCode plugins** in `opencode-plugins/`.
+- **Shared skills and prompts** in `skills/` and `prompts/`.
+- **Tests** in `tests/`, using Vitest.
 
-- **Harness**: An AI coding-agent runtime this repo customizes (Claude Code, OpenCode, or Pi).
-- **Extension** (Pi): Registers tools, commands, and message renderers through Pi's `ExtensionAPI`.
-- **Plugin** (OpenCode): A function receiving the OpenCode client, returning event→handler mappings.
-- **Hook** (Claude Code): An event→shell-command mapping in `settings.json`.
-- **Fusion**: Panel→judge→synthesis workflow — send one prompt to several models in parallel, have a judge analyze responses, then the calling model writes the final answer.
-- **Remote Control**: View and steer a running Pi session from a phone via P2P (iroh) — the phone never executes tools.
+Recent git history is concentrated on two high-signal areas: webfetch token efficiency/GitHub repository orientation (`pi-extensions/lib/webfetch-core.ts`, `tests/webfetch.test.ts`, ADR-0004) and hardening of the Claude/Pi companion background job lifecycle (`plugins/pi/scripts/lib/*`, `tests/claude-pi-*.test.ts`).
 
-The full glossary lives in [`CONTEXT.md`](../CONTEXT.md).
+## Where to go next
 
-## Getting Started
+- [Architecture overview](architecture/overview.md) — repository layout, harness terminology, shared-core patterns, and source map.
+- [Fusion workflow](fusion/workflow.md) — `/fusion` panel/judge/calling-model execution.
+- [Fusion inner tools](fusion/inner-tools.md) — why Fusion exposes only restricted `web_search` and `webfetch` to inner models.
+- [Remote control architecture](remote-control/architecture.md) — `/remote`, daemon, iroh transport, pairing, IPC, and transcript projection.
+- [Extensions overview](extensions/overview.md) — non-Fusion Pi extensions, Claude review, RTK, autoname, learn, sound hooks/plugins, skills, and prompts.
+- [Development operations](operations/development.md) — setup, scripts, tests, and change guidance.
+- [Architecture decisions](operations/decisions.md) — ADR map and decisions future agents should preserve.
 
-### Prerequisites
+## First commands
 
-- **Node.js ≥ 22**
-- **pnpm 11.9.0** (declared in `package.json` via `packageManager`)
-- For Pi extensions: `@earendil-works/pi-coding-agent`, `pi-ai`, and `pi-tui` (dev dependencies)
-- For Exa search: `EXA_API_KEY` environment variable
-- For RTK: the `rtk` binary on `PATH` (or `PI_RTK_BIN`)
-- For Claude Review: the `claude` CLI on `PATH` (or `PI_CLAUDE_REVIEW_BIN`)
-
-### Install & Develop
+This workspace expects Node 22+ and pnpm 11.9.0 (`package.json`).
 
 ```bash
 pnpm install
-pnpm typecheck     # TypeScript type checking (tsc --noEmit)
-pnpm lint          # Linting with oxlint
-pnpm format        # Format with oxfmt
-pnpm test          # Run tests with vitest
+pnpm test
+pnpm typecheck
+pnpm lint
 ```
 
-### Run Specific Test Suites
+Useful targeted scripts from `package.json`:
 
 ```bash
-pnpm test:fusion          # Fusion unit tests
-FUSION_E2E=1 pnpm test:fusion:e2e   # Fusion end-to-end (real model calls)
-pnpm test:rtk             # RTK extension tests
-RTK_E2E=1 pnpm test:rtk:e2e         # RTK integration tests
-REMOTE_E2E=1 pnpm test:remote:e2e   # Remote control integration tests
-pnpm baseline:webfetch    # WebFetch baseline tests (WEBFETCH_BASELINE=1)
+pnpm test:unit
+pnpm test:fusion
+pnpm test:fusion:e2e      # requires FUSION_E2E=1 via script
+pnpm test:remote:e2e      # requires REMOTE_E2E=1 via script
+pnpm test:rtk
+pnpm verify:rtk
+pnpm baseline:webfetch
 ```
 
-### Install Extensions for Pi
+## Main domains at a glance
 
-Pi reads extensions from the `pi.extensions` array in `package.json`:
+### Pi extension package
+
+`package.json` declares the Pi package metadata:
 
 ```json
-{
-  "pi": {
-    "extensions": ["./pi-extensions"],
-    "skills": ["./skills"],
-    "prompts": ["./prompts"]
-  }
+"pi": {
+  "extensions": ["./pi-extensions"],
+  "skills": ["./skills"],
+  "prompts": ["./prompts"]
 }
 ```
 
-Copy or symlink individual extension files into `~/.pi/agent/extensions/` for standalone use.
+The `bin` entry exposes `pi-remote` at `pi-extensions/remote/cli.ts`.
 
-## Section Guide
+### Fusion
 
-- [Architecture Overview](architecture/overview.md) — Repository structure, harness model, shared libraries
-- [Fusion Workflow](fusion/workflow.md) — Panel→judge→synthesis pipeline, config, orchestrator, prompts
-- [Fusion Inner Tools & Bundling](fusion/inner-tools.md) — Restricted tool projection, bundle CLI, fusion skill
-- [Remote Control Architecture](remote-control/architecture.md) — Daemon, iroh P2P transport, pairing, protocol, iOS client
-- [Extensions Overview](extensions/overview.md) — Sound notifications, Exa search, WebFetch, RTK, Autoname, Claude Review, themes
-- [Development & Operations](operations/development.md) — Dev setup, testing, CI pipeline, coding standards
-- [Architecture Decisions](operations/decisions.md) — ADRs and agent workflow documentation
+Fusion is the heaviest domain. `/fusion` reads `~/.pi/agent/fusion.json` by default (or `PI_FUSION_CONFIG`), runs a panel of configured models, has a judge analyze the panel, then injects a compact `fusion-panel` message that triggers the current Pi model to write the final answer. See [Fusion workflow](fusion/workflow.md).
 
-## Source Map
+### Web access tools
 
-- [`README.md`](../README.md) — Primary project documentation, setup instructions, extension descriptions
-- [`CONTEXT.md`](../CONTEXT.md) — Domain glossary with canonical vocabulary for all major concepts
-- [`package.json`](../package.json) — Scripts, dependencies, Pi configuration
-- [`AGENTS.md`](../AGENTS.md) — Agent skill pointers (issue tracker, triage, domain docs, fusion bundle)
-- [`MY_AGENTS.md`](../MY_AGENTS.md) — Coding standards and engineering behavior rules
+Standalone Pi tools `exa_search` and `webfetch` are registered in `pi-extensions/exa-search.ts` and `pi-extensions/webfetch.ts`. Their deep implementations live in `pi-extensions/lib/exa-search-core.ts` and `pi-extensions/lib/webfetch-core.ts`. Fusion reuses those cores but intentionally exposes a narrower inner-model interface; see [Fusion inner tools](fusion/inner-tools.md).
+
+### Remote control
+
+`/remote` registers a running Pi session with a local daemon. The daemon owns a stable iroh endpoint, authorizes remote clients through coded pairing plus node-id allowlisting, and relays transcript events/prompts between remote clients and Pi sessions. See [Remote control architecture](remote-control/architecture.md).
+
+### Claude/Pi companion workflows
+
+`plugins/pi/scripts/pi-companion.mjs` implements a Claude Code plugin bridge for delegating implementation/review/continuation/status/cancel/result workflows to Pi over RPC. Job records and logs are stored per workspace under `~/.local/state/claude-pi-companion` by default. See [Extensions overview](extensions/overview.md) and [Development operations](operations/development.md).
+
+## Agent change guidance
+
+Before changing code, read `CONTEXT.md` for vocabulary and the relevant page above. Preserve these repository-specific boundaries:
+
+- Do not call a Pi **extension** a plugin or hook; `CONTEXT.md` reserves those words for OpenCode and Claude Code.
+- Keep Fusion inner tools restricted. The standalone web tools may expose richer parameters, but inner panel/judge models should keep the deliberately narrow two-tool allowlist.
+- In remote control, remember the laptop remains the execution host. Remote clients view and steer; they do not run tools.
+- Prefer adding tests under `tests/` for any new parser, prompt builder, command behavior, transport rule, or extension helper.
+- For webfetch changes, inspect ADR-0004 and the webfetch tests. Recent history shows token-efficiency behavior is deliberate, not incidental.

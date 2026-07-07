@@ -1,130 +1,111 @@
-# Development & Operations
+# Development operations
 
-## Prerequisites
+## Environment
 
-- **Node.js ≥ 22** (enforced in `package.json` `engines`)
-- **pnpm 11.9.0** (declared via `packageManager`)
-- **TypeScript 5.9.3** (dev dependency)
-- **oxlint 1.47.0** and **oxfmt 0.32.0** for linting/formatting
-- **vitest 4.0.18** for testing
+`package.json` requires:
 
-## Setup
+- Node `>=22`
+- pnpm `11.9.0`
+
+Install dependencies from the repository root:
 
 ```bash
 pnpm install
 ```
 
-The repo uses a pnpm workspace (`pnpm-workspace.yaml` includes `.`). The `.opencode/` directory has its own mini-workspace for OpenCode plugin development.
+The project is ESM (`"type": "module"`) and TypeScript. Local TypeScript imports use `.js` specifiers.
 
-## Common Commands
+## Common scripts
+
+From `package.json`:
 
 ```bash
-pnpm typecheck     # tsc --noEmit
-pnpm lint          # oxlint pi-extensions opencode-plugins
-pnpm format        # oxfmt --write (format files in place)
-pnpm format:check  # oxfmt --check (verify formatting without writing)
-pnpm test          # vitest run (all unit tests)
+pnpm lint              # oxlint pi-extensions opencode-plugins
+pnpm format            # oxfmt write
+pnpm format:check      # oxfmt check
+pnpm typecheck         # tsc --noEmit
+pnpm test              # all Vitest tests
+pnpm test:unit         # vitest.unit.config.mjs
 ```
 
-### Targeted Test Suites
+Targeted scripts:
 
-| Command | Tests | Notes |
-|---|---|---|
-| `pnpm test:fusion` | `tests/fusion.test.ts` | Fusion unit tests |
-| `FUSION_E2E=1 pnpm test:fusion:e2e` | `tests/fusion.e2e.test.ts` | Real model calls (costs money) |
-| `pnpm test:rtk` | `tests/rtk.test.ts` | RTK extension regression |
-| `RTK_E2E=1 pnpm test:rtk:e2e` | `tests/rtk.e2e.test.ts` | Real RTK binary integration |
-| `REMOTE_E2E=1 pnpm test:remote:e2e` | `tests/remote.e2e.test.ts` | Real daemon + iroh |
-| `pnpm baseline:webfetch` | `tests/webfetch.baseline.test.ts` | `WEBFETCH_BASELINE=1` — records baseline snapshots |
-| `pnpm verify:rtk` | `scripts/verify-rtk-extension.mjs` | Standalone Pi CLI verification |
+```bash
+pnpm baseline:webfetch # WEBFETCH_BASELINE=1 vitest run tests/webfetch.baseline.test.ts
+pnpm test:rtk
+pnpm test:rtk:e2e     # RTK_E2E=1
+pnpm test:remote:e2e  # REMOTE_E2E=1
+pnpm test:fusion
+pnpm test:fusion:e2e  # FUSION_E2E=1
+pnpm verify:rtk
+pnpm validate:rtk
+```
 
-E2E tests are opt-in via environment variables to avoid unexpected API costs or binary dependencies during normal CI.
+Run the narrowest relevant tests while iterating, then broaden to `pnpm typecheck` and `pnpm test` for cross-domain changes.
 
-## Test Coverage by Domain
+## Test map by domain
 
-| Test file | Domain | What it covers |
-|---|---|---|
-| `tests/fusion.test.ts` | Fusion | Orchestrator, config validation, prompts, tools, render, progress, args |
-| `tests/fusion-index.test.ts` | Fusion | Command index/registration |
-| `tests/fusion-args.test.ts` | Fusion | `/fusion` argument parsing |
-| `tests/fusion-bundle-cli.test.ts` | Fusion | Bundle CLI argument parsing and output |
-| `tests/fusion.e2e.test.ts` | Fusion | End-to-end with real models |
-| `tests/bundle-core.test.ts` | Fusion | `lib/bundle-core.ts` file collection and formatting |
-| `tests/rtk.test.ts` | RTK | Command rewriting, flag parsing, debug logging |
-| `tests/rtk.e2e.test.ts` | RTK | Real `rtk` binary integration |
-| `tests/remote-daemon.test.ts` | Remote | Daemon startup, connections, session registry |
-| `tests/remote-extension.test.ts` | Remote | `/remote` extension, event forwarding, backfill |
-| `tests/remote-protocol.test.ts` | Remote | Envelope encoding/decoding, routing |
-| `tests/remote-ipc.test.ts` | Remote | IPC between extension and daemon |
-| `tests/remote-iroh-transport.test.ts` | Remote | iroh endpoint binding and envelope I/O |
-| `tests/remote-authorization.test.ts` | Remote | Pairing codes, allowlist, authorization logic |
-| `tests/remote-transcript-projection.test.ts` | Remote | Transcript event projection |
-| `tests/remote-cli.test.ts` | Remote | `pi-remote` CLI |
-| `tests/remote-spawn.test.ts` | Remote | Daemon auto-spawn |
-| `tests/remote-daemon-readiness.test.ts` | Remote | Daemon startup readiness |
-| `tests/remote-daemon-entry.test.ts` | Remote | Daemon entry point |
-| `tests/remote.e2e.test.ts` | Remote | End-to-end with real daemon |
-| `tests/ios-remote-fixtures.test.ts` | Remote | iOS fixture generation |
-| `tests/webfetch.test.ts` | WebFetch | URL handling, markdown conversion, GitHub links |
-| `tests/webfetch.baseline.test.ts` | WebFetch | Baseline snapshots |
-| `tests/exa-search.test.ts` | Exa | Search parameter handling |
-| `tests/autoname.test.ts` | Autoname | Session naming, model fallback, transcript truncation |
-| `tests/claude-review.test.ts` | Claude Review | Argument parsing, prompt building, result handling |
+| Domain | Tests |
+| --- | --- |
+| Fusion | `tests/fusion.test.ts`, `tests/fusion-args.test.ts`, `tests/fusion-bundle-cli.test.ts`, `tests/fusion-index.test.ts`, `tests/fusion-tools.test.ts`, `tests/fusion.e2e.test.ts` |
+| Webfetch | `tests/webfetch.test.ts`, `tests/webfetch.baseline.test.ts` |
+| Exa search | `tests/exa-search.test.ts` |
+| Remote control | `tests/remote-authorization.test.ts`, `tests/remote-cli.test.ts`, `tests/remote-daemon*.test.ts`, `tests/remote-extension.test.ts`, `tests/remote-ipc.test.ts`, `tests/remote-iroh-transport.test.ts`, `tests/remote-protocol.test.ts`, `tests/remote-transcript-projection.test.ts`, `tests/remote.e2e.test.ts`, `tests/ios-remote-fixtures.test.ts` |
+| Claude review | `tests/claude-review.test.ts`, `tests/claude-pi-review.test.ts` |
+| Claude/Pi companion | `tests/claude-pi-background-cancel.test.ts`, `tests/claude-pi-continue.test.ts`, `tests/claude-pi-implement.test.ts`, `tests/claude-pi-jobs.test.ts`, `tests/claude-pi-setup.test.ts` |
+| RTK | `tests/rtk.test.ts`, `tests/rtk.e2e.test.ts` |
+| Misc Pi extensions | `tests/autoname.test.ts`, `tests/learn.test.ts`, `tests/bundle-core.test.ts` |
 
-## CI Pipeline (`.gitlab-ci.yml`)
+## Configuration and local state
 
-GitLab CI runs on `node:22-bookworm-slim` with four parallel jobs in the `verify` stage:
+Do not read or document live secrets. Source-level config names are safe to mention:
 
-| Job | Command | Purpose |
-|---|---|---|
-| `lint` | `pnpm run lint` | oxlint on `pi-extensions` and `opencode-plugins` |
-| `format` | `pnpm run format:check` | Verify formatting without writing |
-| `typecheck` | `pnpm run typecheck` | `tsc --noEmit` |
-| `test` | `pnpm run test` | vitest unit tests |
+- `EXA_API_KEY` for Exa search.
+- `GITHUB_TOKEN` or `GH_TOKEN` for authenticated GitHub API calls inside webfetch GitHub orientation.
+- `WEBFETCH_ALLOW_PRIVATE_HOSTS` to override private-host protection.
+- `PI_FUSION_CONFIG` for Fusion config path.
+- `PI_RTK_BIN`, `PI_RTK_DEBUG` for RTK.
+- `PI_AUTONAME_MODEL`, `PI_AUTONAME_FALLBACK_MODEL`, `PI_AUTONAME_PROMPT_FILE` for autoname.
+- `PI_CLAUDE_REVIEW_BIN` for Claude review.
+- `PI_COMPANION_DATA_DIR` for Claude/Pi companion state.
 
-All jobs use `pnpm install --frozen-lockfile --ignore-scripts`, cache the pnpm store by `pnpm-lock.yaml`, and are interruptible. Runs on both merge request events and branch pushes.
+Important local state paths from source:
 
-## TypeScript Configuration (`tsconfig.json`)
+- Fusion config default: `~/.pi/agent/fusion.json`.
+- Remote root: `~/.pi/agent/remote`.
+- Claude/Pi companion default state: `~/.local/state/claude-pi-companion`.
+- Shared sounds: `~/Documents/sounds/<event>/`.
 
-- ESM modules (`"type": "module"` in `package.json`)
-- `tsc --noEmit` for type checking only (no build output)
-- Path alias: `*.js` imports resolve to `*.ts` source (standard ESM TypeScript pattern)
+## Change playbooks
 
-## Coding Standards (`MY_AGENTS.md`)
+### Changing Fusion
 
-Key rules for agents and humans working in this repo:
+1. Read [Fusion workflow](../fusion/workflow.md) and ADR-0002.
+2. Inspect `pi-extensions/fusion/orchestrator.ts`, `index.ts`, `prompts.ts`, and the relevant tests.
+3. Preserve the judge-analysis/calling-model-synthesis boundary.
+4. Run `pnpm test:fusion`; add `pnpm test:fusion:e2e` only when e2e credentials/runtime are available and relevant.
 
-- **≤ 50 lines per function**, cyclomatic complexity ≤ 8
-- **≤ 5 positional params**, ≤ 12 branches, ≤ 6 returns
-- **100-character line length**
-- No `..` relative imports
-- Build only what was requested — no speculative features, one-off abstractions, or unnecessary configurability
-- Touch only what is needed — match existing style, don't refactor unrelated code
-- Parse, don't validate — convert untrusted input to precise types once at the boundary
-- Make bad states unrepresentable via types and schemas, not scattered runtime checks
-- Before committing: run formatter, type checker, focused tests, inspect the diff
-- For bug fixes: add a test that fails before the fix and passes after
+### Changing webfetch/search
 
-## Utility Scripts
+1. Read [Fusion inner tools](../fusion/inner-tools.md), ADR-0001, and ADR-0004.
+2. For standalone schemas inspect `pi-extensions/webfetch.ts` or `exa-search.ts`; for behavior inspect `pi-extensions/lib/*-core.ts`.
+3. Keep site-specific webfetch optimizations internal unless a new decision says otherwise.
+4. Run `pnpm test -- tests/webfetch.test.ts` or the relevant Exa/Fusion tests, then broader checks.
 
-| Script | Purpose |
-|---|---|
-| `scripts/verify-rtk-extension.mjs` | Standalone Pi CLI verification using `--session` and `--extension` flags |
-| `scripts/generate-ios-remote-fixtures.ts` | Generates protocol fixtures for iOS client tests |
+### Changing remote control
 
-## Agent Workflow Documentation (`docs/agents/`)
+1. Read [Remote control architecture](../remote-control/architecture.md), `REMOTE_CONTROL_PRD.md`, and ADR-0003.
+2. Decide whether the change touches extension, daemon, IPC, iroh transport, protocol, authorization, or transcript projection.
+3. Preserve JSONL frame compatibility and node-id allowlist authorization unless intentionally versioning/replacing the protocol.
+4. Run the relevant `tests/remote-*.test.ts`; e2e requires `REMOTE_E2E=1` through the package script.
 
-- [`docs/agents/domain.md`](../../docs/agents/domain.md) — How to consume `CONTEXT.md` and `docs/adr/` when exploring the codebase
-- [`docs/agents/issue-tracker.md`](../../docs/agents/issue-tracker.md) — Issues tracked as GitHub issues via `gh` CLI
-- [`docs/agents/triage-labels.md`](../../docs/agents/triage-labels.md) — Default label vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`
+### Changing Claude/Pi companion
 
-## Source Map
+1. Inspect `plugins/pi/scripts/pi-companion.mjs` and the specific library module under `plugins/pi/scripts/lib/`.
+2. Job state changes usually require tests for status/result/cancel/background behavior.
+3. Recent commits focused on stale/dead worker handling and locked job updates; avoid reintroducing unlocked status races.
+4. Run `tests/claude-pi-*.test.ts` relevant to the workflow.
 
-- [`package.json`](../../package.json) — Scripts, dependencies, Pi config
-- [`.gitlab-ci.yml`](../../.gitlab-ci.yml) — CI pipeline
-- [`tsconfig.json`](../../tsconfig.json) — TypeScript configuration
-- [`pnpm-workspace.yaml`](../../pnpm-workspace.yaml) — Workspace config
-- [`MY_AGENTS.md`](../../MY_AGENTS.md) — Coding standards
-- [`tests/`](../../tests/) — Test suite
-- [`scripts/`](../../scripts/) — Utility scripts
-- [`docs/agents/`](../../docs/agents/) — Agent workflow docs
+## Git hygiene notes
+
+The current initialization was done while old `openwiki/` files were deleted in the working tree. Treat the recreated wiki as generated documentation. Source code outside `openwiki/` should not be modified during OpenWiki runs except for top-level `AGENTS.md`/`CLAUDE.md` OpenWiki reference sections.

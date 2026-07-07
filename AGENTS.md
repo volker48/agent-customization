@@ -12,6 +12,13 @@ Default canonical label vocabulary (`needs-triage`, `needs-info`, `ready-for-age
 
 Single-context layout — one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
-### Fusion bundle
+## OpenWiki
 
-To ask the Fusion panel about real code, curate files and bundle them for the panel. Shipped as the `fusion` skill (`skills/fusion/SKILL.md`), so the workflow travels with the extension install.
+This repository has documentation located in the /openwiki directory.
+
+Start here:
+- [OpenWiki quickstart](openwiki/quickstart.md)
+
+OpenWiki includes repository overview, architecture notes, workflows, domain concepts, operations, integrations, testing guidance, and source maps.
+
+When working in this repository, read the OpenWiki quickstart first, then follow its links to the relevant architecture, workflow, domain, operation, and testing notes.

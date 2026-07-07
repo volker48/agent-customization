@@ -1,70 +1,75 @@
-# Architecture Decision Records
+# Architecture decisions
 
-Three accepted ADRs govern the major design decisions in this repository. Each is in [`docs/adr/`](../../docs/adr/).
+This repository keeps accepted decisions in `docs/adr/`. Treat them as primary source material when making design changes.
 
-## ADR-0001: Fusion Inner Tools Are a Restricted Projection
+## ADR-0001: Fusion inner tools are a restricted projection
 
-**File:** [`docs/adr/0001-fusion-inner-tools-are-a-restricted-projection.md`](../../docs/adr/0001-fusion-inner-tools-are-a-restricted-projection.md)
+Source: `docs/adr/0001-fusion-inner-tools-are-a-restricted-projection.md`
 
-**Decision:** Fusion's inner `web_search` and `webfetch` tools share their *implementation* with the standalone extensions (both call the deep cores in `lib/*-core.ts`) but deliberately do **not** share their *interface*. The standalone tools expose a rich, model-controlled parameter surface; the Fusion tools expose a narrowed surface, rename `exa_search` → `web_search`, and inject operator policy from `fusion.json`.
+Decision:
 
-**Why:** Fusion runs untrusted inner models (panel + judge) directly via the AI completion API. The narrow schema, rename, and hand-written two-tool allowlist are security controls — the operator decides search type, fetch strategy, domain policy, and result caps, not the inner model.
+- Fusion panel and judge calls get exactly two inner tools, `web_search` and `webfetch`, defined in `pi-extensions/fusion/tools.ts`.
+- These tools share implementation cores with standalone `exa_search` and `webfetch`, but they intentionally do not share the standalone interface.
+- The hand-written two-tool list is a security control and should not be replaced by a broad shared registry.
 
-**Rejected alternative:** Collapse into one shared "web-tool definition" mounted by both hosts. Rejected because the duplication is the point — a derived/shared tool registry would erode the explicit two-tool allowlist that Fusion's safety posture depends on.
+Why it matters:
 
-**Consequence:** Do not re-suggest unifying these tool interfaces. The implementation seam (`lib/*-core.ts`) is already the correct shared module.
+- Inner models run outside Pi's normal agent loop and should not receive general coding tools.
+- Operator policy from `fusion.json` controls limits and domain restrictions.
 
----
+## ADR-0002: The calling model synthesizes Fusion final answers
 
-## ADR-0002: The Calling Model Synthesizes the Final Answer
+Source: `docs/adr/0002-the-calling-model-synthesizes-the-final-answer.md`
 
-**File:** [`docs/adr/0002-the-calling-model-synthesizes-the-final-answer.md`](../../docs/adr/0002-the-calling-model-synthesizes-the-final-answer.md)
+Decision:
 
-**Decision:** The judge produces only a structured analysis (consensus, contradictions, partial coverage, unique insights, blind spots, source quality, risks) plus confidence. The **calling model** — whatever model `/model` has active — writes the final answer, grounded in the judge's analysis and panel responses.
+- The judge analyzes panel responses and emits structured analysis/confidence.
+- The active Pi model writes the final answer after `fusion-panel` is injected with `triggerTurn: true`.
+- The final answer is a normal assistant message, not a judge-authored custom result.
 
-**Why:**
-- **Fidelity to OpenRouter Fusion** — the reference design has the calling model write the final answer, not the judge
-- **`/copy` works** — the synthesized answer is a normal assistant message, not a custom rendered message
-- **Session context** — the calling model runs inside Pi's agent loop with full session, repo, and tool context that inner models lack
+Why it matters:
 
-**Rejected alternatives:**
-- Keep the judge authoring the final answer and re-emit as assistant message (fixes `/copy` but not the architecture)
-- Inject synthesis prompt as `sendUserMessage` (renders as a large user bubble duplicating the `/fusion` invocation)
+- `/copy` works on the final answer.
+- The final synthesis has full Pi session/repository/tool context.
+- Tests should assert on panel/judge analysis and triggered synthesis rather than expecting a judge-authored answer.
 
-**Consequence:** `FusionJudgeOutput` no longer carries `finalAnswer`. The judge system prompt is analysis-only. ADR-0001's "outside Pi's agent loop" framing applies only to inner models (panel + judge); the synthesis step is deliberately inside the loop.
+## ADR-0003: Remote control authorization is node-id allowlist after coded pairing
 
----
+Source: `docs/adr/0003-remote-control-authorization-is-nodeid-allowlist-after-coded-pairing.md`
 
-## ADR-0003: Remote Control Authorization Is Node-ID Allowlist After Coded Pairing
+Decision:
 
-**File:** [`docs/adr/0003-remote-control-authorization-is-nodeid-allowlist-after-coded-pairing.md`](../../docs/adr/0003-remote-control-authorization-is-nodeid-allowlist-after-coded-pairing.md)
+- iroh secures transport identity but does not authorize remote control.
+- A first-time client must present a short pairing code during a fresh pairing window.
+- On success, the daemon persists the client's iroh node id under `~/.pi/agent/remote/`.
+- Later connections authorize by node id.
 
-**Decision:** Remote control authorizes devices by iroh node ID, established through one-time coded pairing. On first contact, the daemon shows a ticket (QR) plus a short pairing code; the client presents the code; on success the daemon persists the client's node ID to an allowlist. Every later connection is authorized by node ID alone.
+Why it matters:
 
-**Why:** iroh secures the transport (QUIC+TLS, verified node IDs) but provides no authorization — any node that learns the ticket can dial. A node-ID allowlist gives unforgeable per-device auth with "pair once" UX.
+- Remote clients can steer an agent that runs tools unattended on the laptop.
+- Bearer-token-only or trust-on-first-connect approaches were rejected.
+- Revocation is currently manual by editing/removing allowlist entries.
 
-**Rejected alternatives:**
-- Bearer token only (leakable, long-lived, no per-device identity or revocation)
-- Trust-on-first-connect without code (race condition — first dialer is trusted)
+## ADR-0004: webfetch returns site-optimized representations
 
-**Consequence:** The daemon persists a stable iroh secret key and allowlist file under `~/.pi/agent/remote/`. Revocation is manual (delete the entry). Two connection paths exist: paired (node ID checked) and pairing (code checked, then node ID recorded).
+Source: `docs/adr/0004-webfetch-returns-site-optimized-representations.md`
 
----
+Decision:
 
-## Agent Workflow Docs (`docs/agents/`)
+- `webfetch` should return the most token-efficient useful representation of a URL, not raw bytes by default.
+- Site-specific smarts are internal and deterministic; callers should not need a new mode flag or separate tool.
+- Bare GitHub repository roots return an orientation view with owner/name, description, default branch, language/topics, optional homepage, depth-1 tree, and README.
+- Auth for GitHub API calls is opportunistic via `GITHUB_TOKEN`/`GH_TOKEN`; anonymous remains supported until rate-limited.
 
-- [`docs/agents/domain.md`](../../docs/agents/domain.md) — Instructs agents to read `CONTEXT.md` and `docs/adr/` before exploring, use the glossary's vocabulary, and flag ADR conflicts explicitly
-- [`docs/agents/issue-tracker.md`](../../docs/agents/issue-tracker.md) — GitHub issues via `gh` CLI
-- [`docs/agents/triage-labels.md`](../../docs/agents/triage-labels.md) — Canonical labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`
+Why it matters:
 
-## Plans
+- Recent commits implemented GitHub repository orientation and authenticated README fetching through REST endpoints.
+- Future site optimizations should follow this pattern instead of adding one-off tools or exposing implementation modes to agents.
 
-- [`docs/plans/webfetch-html-to-markdown.md`](../../docs/plans/webfetch-html-to-markdown.md) — Design plan for the webfetch HTML-to-markdown conversion pipeline
+## Decision-aware change guidance
 
-## Source Map
-
-- [`docs/adr/`](../../docs/adr/) — All architecture decision records
-- [`docs/agents/`](../../docs/agents/) — Agent workflow documentation
-- [`docs/plans/`](../../docs/plans/) — Design plans
-- [`CONTEXT.md`](../../CONTEXT.md) — Domain glossary (canonical vocabulary)
-- [`AGENTS.md`](../../AGENTS.md) — Agent skill pointers
+- If a proposed refactor conflicts with an ADR, either do not make it or add a new explicit decision that supersedes the old one.
+- Do not collapse Fusion inner and standalone web tool schemas merely to reduce duplication; ADR-0001 says the duplication is load-bearing.
+- Do not move Fusion final answer authoring back into the judge; ADR-0002 says the active Pi model synthesizes.
+- Do not weaken remote pairing/allowlisting for convenience; ADR-0003 treats remote control as a high-power surface.
+- Do not add a `github_project` tool or `webfetch` orientation mode without revisiting ADR-0004.
