@@ -192,20 +192,23 @@ binary question decomposition inspired by the BinEval framework: see
 
 [bineval]: https://arxiv.org/abs/2606.27226
 
-### CLI: pr-watch (`pi-extensions/pr-watch/`)
+### CLI: pr-watch (`crates/pr-watch/`)
 
-Watches a GitHub pull request through `gh`, waits for terminal checks and bot
-reviews, and distills bot review threads into compact findings. It provides
-`pr-watch status`, `pr-watch findings`, and `pr-watch wait`.
+Rust CLI that watches GitHub pull requests through `gh` or GitLab merge requests
+through `glab`, waits for terminal checks and bot reviews, and distills bot review
+threads into compact findings. It provides `pr-watch status`, `pr-watch findings`,
+and `pr-watch wait`.
+
+Build it with Cargo, then invoke the binary directly or put it on your `PATH`:
+
+```bash
+cargo build --release
+./target/release/pr-watch wait 63 --repo volker48/agent-customization --timeout 1800 --interval 30
+```
 
 For `status` and `wait`, exit codes are: `0` settled clean, `1` settled with
 unresolved findings, `2` checks failed, `3` pending or timed out, and `4` usage
-or `gh` error. `findings` exits `0` on a successful listing.
-
-```bash
-# Run from a background shell/tool (for example, Claude Code run_in_background).
-pr-watch wait 63 --repo volker48/agent-customization --timeout 1800 --interval 30
-```
+or forge CLI error. `findings` exits `0` on a successful listing.
 
 ### Skill: Claude Review (`skills/claude-review/`)
 
