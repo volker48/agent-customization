@@ -47,24 +47,3 @@ test:
   extends: .default_node_job
   script:
     - pnpm run test
-
-rust:
-  image: rust:1.85.1-bookworm@sha256:bf7d87666c4da6eace19e06d21bc4859c6e2a5c97a21ac273b0e082112753cf0
-  stage: verify
-  interruptible: true
-  cache:
-    key:
-      files:
-        - Cargo.lock
-    paths:
-      - .cargo/registry/
-      - .cargo/git/
-      - target/
-  variables:
-    CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
-  script:
-    - rustup component add rustfmt clippy
-    - cargo fmt --all --check
-    - cargo clippy --locked --all-targets --all-features -- -D warnings
-    - cargo test --locked --all
-    - cargo build --locked --release

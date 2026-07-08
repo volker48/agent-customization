@@ -1,6 +1,6 @@
 # pr-watch is a Rust CLI under crates/pr-watch
 
-**Status:** accepted
+**Status:** superseded by ADR-0008
 
 ## Decision
 
@@ -17,6 +17,7 @@ and invoked as `target/release/pr-watch` or through any copied/symlinked binary 
 
 ## Consequences
 
-ADR-0005 and ADR-0006 remain authoritative for behavior: subcommands, flags, output shape,
-settledness semantics, bot adapters, forge providers, and exit codes are unchanged. This ADR only
-supersedes their TypeScript implementation path and tsx execution details.
+ADR-0005 and ADR-0006 remain authoritative for historical behavior: subcommands, flags,
+output shape, settledness semantics, bot adapters, forge providers, and exit codes are unchanged.
+ADR-0008 supersedes this repository location by moving the renamed `babysit` CLI to its own
+repository.

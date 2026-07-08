@@ -192,23 +192,11 @@ binary question decomposition inspired by the BinEval framework: see
 
 [bineval]: https://arxiv.org/abs/2606.27226
 
-### CLI: pr-watch (`crates/pr-watch/`)
+### CLI: babysit
 
-Rust CLI that watches GitHub pull requests through `gh` or GitLab merge requests
-through `glab`, waits for terminal checks and bot reviews, and distills bot review
-threads into compact findings. It provides `pr-watch status`, `pr-watch findings`,
-and `pr-watch wait`.
-
-Build it with Cargo, then invoke the binary directly or put it on your `PATH`:
-
-```bash
-cargo build --release
-./target/release/pr-watch wait 63 --repo volker48/agent-customization --timeout 1800 --interval 30
-```
-
-For `status` and `wait`, exit codes are: `0` settled clean, `1` settled with
-unresolved findings, `2` checks failed, `3` pending or timed out, and `4` usage
-or forge CLI error. `findings` exits `0` on a successful listing.
+The former `crates/pr-watch/` CLI now lives in the standalone
+[`babysit`](https://github.com/volker48/babysit) project. Use that repository for
+PR/MR watcher development, GitLab CI, releases, and installation docs.
 
 ### Skill: Claude Review (`skills/claude-review/`)
 
