@@ -1,6 +1,8 @@
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+const MAX_WAIT_SECONDS: u64 = 30 * 24 * 60 * 60;
+
 use crate::bots::DEFAULT_BOTS;
 use crate::core::{
     Finding, PrSnapshot, SettleOptions, SettleResult, evaluate_settled, exit_code_for,
@@ -211,11 +213,12 @@ fn parse_forge(value: &str) -> Result<ForgeName, UsageError> {
 
 fn parse_seconds(state: &mut ParseState, value: &str, flag: &str) -> Result<u64, UsageError> {
     state.wait_flag_used = true;
-    match value.parse::<f64>() {
-        Ok(seconds) if seconds.is_finite() && seconds > 0.0 && seconds.fract() == 0.0 => {
-            Ok(seconds as u64)
-        }
-        _ => Err(UsageError::new(format!(
+    match value.parse::<u64>() {
+        Ok(seconds) if seconds > 0 && seconds <= MAX_WAIT_SECONDS => Ok(seconds),
+        Ok(_) => Err(UsageError::new(format!(
+            "{flag} must be between 1 and {MAX_WAIT_SECONDS} seconds"
+        ))),
+        Err(_) => Err(UsageError::new(format!(
             "{flag} must be a positive integer number of seconds"
         ))),
     }
@@ -266,7 +269,9 @@ fn run_findings(opts: &CliOptions) -> Result<i32, CliError> {
 }
 
 fn run_wait(opts: &CliOptions) -> Result<i32, CliError> {
-    let deadline = Instant::now() + Duration::from_secs(opts.timeout_secs);
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(opts.timeout_secs))
+        .ok_or_else(|| CliError::new("--timeout is too large", false))?;
     loop {
         match fetch_snapshot(opts) {
             Ok(snapshot) => {

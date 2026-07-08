@@ -159,7 +159,17 @@ fn rejects_empty_bot_lists_and_non_positive_intervals() {
         parse_args(&args(&["wait", "--interval", "0"]))
             .unwrap_err()
             .to_string()
-            .contains("positive integer")
+            .contains("between 1")
+    );
+}
+
+#[test]
+fn rejects_oversized_wait_durations() {
+    assert!(
+        parse_args(&args(&["wait", "--timeout", "18446744073709551615"]))
+            .unwrap_err()
+            .to_string()
+            .contains("between 1")
     );
 }
 

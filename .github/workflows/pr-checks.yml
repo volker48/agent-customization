@@ -75,13 +75,13 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Run Rust tests
-        run: cargo test --all
+        run: cargo test --locked --all
 
       - name: Build release binary
-        run: cargo build --release
+        run: cargo build --locked --release
 
   swift-remote-control:
     name: Swift format and remote control unit tests

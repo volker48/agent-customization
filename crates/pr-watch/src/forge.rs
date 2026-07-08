@@ -1,6 +1,7 @@
 use std::fmt;
+use std::io::{self, Read};
 use std::process::{Command, Output, Stdio};
-use std::thread::sleep;
+use std::thread::{self, JoinHandle, sleep};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -131,32 +132,72 @@ fn command_output(command: &str, args: &[String], context: &str) -> Result<Outpu
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| cli_error(context, "", Some(error.to_string()), false))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| cli_error(context, "", Some("missing stdout pipe".to_string()), false))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| cli_error(context, "", Some("missing stderr pipe".to_string()), false))?;
+    let stdout_reader = read_stream(stdout);
+    let stderr_reader = read_stream(stderr);
     let deadline = Instant::now() + CLI_TIMEOUT;
     loop {
         let status = child
             .try_wait()
             .map_err(|error| cli_error(context, "", Some(error.to_string()), false))?;
-        if status.is_some() {
-            return child
-                .wait_with_output()
-                .map_err(|error| cli_error(context, "", Some(error.to_string()), false));
+        if let Some(status) = status {
+            let stdout = join_stream(stdout_reader, context)?;
+            let stderr = join_stream(stderr_reader, context)?;
+            return Ok(Output {
+                status,
+                stdout,
+                stderr,
+            });
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
-            let output = child.wait_with_output().ok();
-            let stderr = output
-                .as_ref()
-                .map(|out| String::from_utf8_lossy(&out.stderr).to_string())
-                .unwrap_or_default();
+            let _ = child.wait();
+            let _ = join_stream(stdout_reader, context);
+            let stderr = join_stream(stderr_reader, context).unwrap_or_default();
             return Err(cli_error(
                 context,
-                &stderr,
+                &String::from_utf8_lossy(&stderr),
                 Some("operation timed out".to_string()),
                 true,
             ));
         }
         sleep(Duration::from_millis(50));
     }
+}
+
+fn read_stream<R>(mut stream: R) -> JoinHandle<io::Result<Vec<u8>>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut output = Vec::new();
+        stream.read_to_end(&mut output)?;
+        Ok(output)
+    })
+}
+
+fn join_stream(
+    handle: JoinHandle<io::Result<Vec<u8>>>,
+    context: &str,
+) -> Result<Vec<u8>, CliError> {
+    handle
+        .join()
+        .map_err(|_| {
+            cli_error(
+                context,
+                "",
+                Some("output reader panicked".to_string()),
+                false,
+            )
+        })?
+        .map_err(|error| cli_error(context, "", Some(error.to_string()), false))
 }
 
 #[cfg(unix)]
@@ -178,6 +219,12 @@ pub fn run_json_pages<F>(
 where
     F: FnMut(usize, usize) -> Result<Value, CliError>,
 {
+    if per_page == 0 {
+        return Err(parse_json_failure(
+            context,
+            "per_page must be greater than zero",
+        ));
+    }
     let mut results = Vec::new();
     for page in 1.. {
         let value = fetch_page(page, per_page)?;

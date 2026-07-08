@@ -1,12 +1,12 @@
 use serde_json::{Value, json};
 
-use pr_watch::bots::{adapter_for_login, distill_comment, parse_nitpicks};
+use pr_watch::bots::{adapter_for_login, distill_comment, normalize_bot_login, parse_nitpicks};
 use pr_watch::core::{
     BotReview, CheckState, Finding, PrCheck, PrSnapshot, SettleOptions, SettleResult,
     evaluate_settled, exit_code_for, hoist_shared_preamble, render_findings, render_status,
     unresolved_findings,
 };
-use pr_watch::forge::collect_json_pages;
+use pr_watch::forge::{collect_json_pages, run_json_pages};
 use pr_watch::github::{REVIEW_QUERY, parse_pr_view, parse_review_data};
 use pr_watch::gitlab::{
     parse_gitlab_bot_reviews, parse_gitlab_findings, parse_gitlab_jobs, parse_gitlab_mr,
@@ -269,6 +269,19 @@ fn parse_nitpicks_returns_empty_without_section() {
     assert!(parse_nitpicks("**Actionable comments posted: 0**", "coderabbit").is_empty());
 }
 
+#[test]
+fn bot_login_normalization_is_case_insensitive() {
+    assert_eq!(normalize_bot_login("CodeRabbitAI[bot]"), "coderabbitai");
+    assert!(adapter_for_login("CodeRabbitAI[bot]", &[]).is_some());
+}
+
+#[test]
+fn strip_noise_removes_nested_details_blocks() {
+    let body = "Keep.\n<details><summary>outer</summary>hidden<details>inner</details>tail</details>\nEnd.";
+    let distilled = distill_comment("human", body);
+    assert_eq!(distilled.detail, "Keep.\n\nEnd.");
+}
+
 fn review_graphql() -> Value {
     json!({"data":{"repository":{"pullRequest":{"reviews":{"nodes":[
         {"author":{"login":"coderabbitai"},"state":"COMMENTED","submittedAt":"2026-07-05T10:00:00Z","body":fixture("coderabbit-review-body.md"),"commit":{"oid":"abc123"}},
@@ -319,7 +332,7 @@ fn parse_review_data_respects_configured_bot_list() {
 
 #[test]
 fn gitlab_parses_mr_shape_state_project_and_pipeline() {
-    let parsed = parse_gitlab_mr(&fixture_json("gitlab-mr-open.json"));
+    let parsed = parse_gitlab_mr(&fixture_json("gitlab-mr-open.json")).unwrap();
     assert_eq!(parsed.project_id, "1234");
     assert_eq!(parsed.pipeline_id.as_deref(), Some("9876"));
     assert_eq!(parsed.host, "gitlab.example.com");
@@ -327,6 +340,14 @@ fn gitlab_parses_mr_shape_state_project_and_pipeline() {
     assert_eq!(parsed.snapshot.state, "OPEN");
     assert_eq!(parsed.snapshot.owner, "group/subgroup");
     assert_eq!(parsed.snapshot.repo, "project");
+}
+
+#[test]
+fn gitlab_rejects_malformed_mr_web_url() {
+    let mut raw = fixture_json("gitlab-mr-open.json");
+    raw["web_url"] = json!("https://gitlab.example.com/bad");
+    let error = parse_gitlab_mr(&raw).unwrap_err();
+    assert!(error.to_string().contains("invalid web_url"));
 }
 
 #[test]
@@ -363,6 +384,16 @@ fn gitlab_turns_bot_discussions_into_findings() {
     assert!(!findings[0].resolved && !findings[0].outdated);
     assert_eq!(findings[1].path, "src/old.ts");
     assert!(findings[1].resolved);
+}
+
+#[test]
+fn pagination_rejects_zero_page_size() {
+    let error = run_json_pages(|_, _| Ok(Value::Array(vec![])), "pages", 0).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("per_page must be greater than zero")
+    );
 }
 
 #[test]
@@ -417,7 +448,7 @@ fn gitlab_synthesizes_bot_reviews_from_top_level_notes() {
 
 #[test]
 fn merged_gitlab_mrs_settle_unconditionally() {
-    let parsed = parse_gitlab_mr(&fixture_json("gitlab-mr-merged.json"));
+    let parsed = parse_gitlab_mr(&fixture_json("gitlab-mr-merged.json")).unwrap();
     assert!(evaluate_settled(&parsed.snapshot, &SettleOptions::default()).settled);
 }
 

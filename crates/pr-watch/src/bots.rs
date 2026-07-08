@@ -49,9 +49,9 @@ impl BotAdapter {
 pub fn normalize_bot_login(login: &str) -> String {
     let lower = login.to_lowercase();
     if lower.ends_with("[bot]") {
-        login[..login.len() - 5].to_string()
+        lower[..lower.len() - 5].to_string()
     } else {
-        login.to_string()
+        lower
     }
 }
 
@@ -265,10 +265,9 @@ fn strip_bugbot_fallback(body: &str) -> String {
 pub fn strip_noise(body: &str) -> String {
     let mut text = body.to_string();
     while let Some(start) = text.find("<details") {
-        let Some(relative_end) = text[start..].find("</details>") else {
+        let Some(end) = details_block_end(&text, start) else {
             break;
         };
-        let end = start + relative_end + "</details>".len();
         text.replace_range(start..end, "");
     }
     let text = Regex::new(r"(?s)<!--.*?-->")
@@ -284,6 +283,36 @@ pub fn strip_noise(body: &str) -> String {
         .replace_all(&text, "\n\n")
         .trim()
         .to_string()
+}
+
+fn details_block_end(text: &str, start: usize) -> Option<usize> {
+    let mut position = start;
+    let mut depth = 0usize;
+    loop {
+        let next_open = text[position..]
+            .find("<details")
+            .map(|index| position + index);
+        let next_close = text[position..]
+            .find("</details>")
+            .map(|index| position + index);
+        match (next_open, next_close) {
+            (Some(open), Some(close)) if open < close => {
+                depth += 1;
+                position = open + "<details".len();
+            }
+            (_, Some(close)) => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+                position = close + "</details>".len();
+                if depth == 0 {
+                    return Some(position);
+                }
+            }
+            _ => return None,
+        }
+    }
 }
 
 fn first_prose_line(body: &str) -> String {

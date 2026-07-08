@@ -3,7 +3,9 @@ use serde_json::Value;
 
 use crate::bots::adapter_for_login;
 use crate::core::{BotReview, CheckState, PrCheck, PrSnapshot, ReviewThread, finding_from_thread};
-use crate::forge::{CliError, ForgeProvider, SnapshotFetchOptions, run_json, run_json_pages};
+use crate::forge::{
+    CliError, ForgeProvider, SnapshotFetchOptions, parse_json_failure, run_json, run_json_pages,
+};
 
 #[derive(Debug, Clone)]
 pub struct GitLabMrParseResult {
@@ -55,9 +57,9 @@ pub fn create_gitlab_provider() -> GitLabProvider {
     GitLabProvider
 }
 
-pub fn parse_gitlab_mr(raw: &Value) -> GitLabMrParseResult {
-    let project = parse_gitlab_project(raw.get("web_url").and_then(Value::as_str).unwrap_or(""));
-    GitLabMrParseResult {
+pub fn parse_gitlab_mr(raw: &Value) -> Result<GitLabMrParseResult, CliError> {
+    let project = parse_gitlab_project(raw.get("web_url").and_then(Value::as_str).unwrap_or(""))?;
+    Ok(GitLabMrParseResult {
         project_id: raw
             .get("project_id")
             .map(value_to_string)
@@ -95,7 +97,7 @@ pub fn parse_gitlab_mr(raw: &Value) -> GitLabMrParseResult {
             bot_reviews: Vec::new(),
             findings: Vec::new(),
         },
-    }
+    })
 }
 
 pub fn parse_gitlab_jobs(raw: &Value) -> Vec<PrCheck> {
@@ -234,18 +236,21 @@ fn gitlab_job_state(status: &str) -> CheckState {
     }
 }
 
-fn parse_gitlab_project(web_url: &str) -> (String, String, String) {
+fn parse_gitlab_project(web_url: &str) -> Result<(String, String, String), CliError> {
     let re = Regex::new(r"^https?://([^/]+)/(.+?)/-/merge_requests/").unwrap();
     let Some(caps) = re.captures(web_url) else {
-        return (String::new(), String::new(), String::new());
+        return Err(parse_json_failure("glab mr view", "invalid web_url"));
     };
     let parts: Vec<&str> = caps.get(2).unwrap().as_str().split('/').collect();
     let repo = parts.last().unwrap_or(&"").to_string();
-    (
+    if repo.is_empty() || parts.len() < 2 {
+        return Err(parse_json_failure("glab mr view", "invalid web_url"));
+    }
+    Ok((
         caps.get(1).unwrap().as_str().to_string(),
         parts[..parts.len() - 1].join("/"),
         repo,
-    )
+    ))
 }
 
 fn mr_view_args(opts: &SnapshotFetchOptions) -> Vec<String> {
@@ -326,7 +331,7 @@ fn glab_api_args(path: &str, host: &str) -> Vec<String> {
 }
 
 fn parse_gitlab_mr_json(raw: Value) -> Result<GitLabMrParseResult, CliError> {
-    Ok(parse_gitlab_mr(&raw))
+    parse_gitlab_mr(&raw)
 }
 
 fn value_to_string(value: &Value) -> String {
