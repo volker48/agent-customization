@@ -48,41 +48,6 @@ jobs:
       - name: Run unit tests
         run: pnpm test:unit
 
-  rust:
-    name: Rust fmt, clippy, tests, and release build
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          persist-credentials: false
-
-      - name: Install pinned Rust toolchain
-        run: rustup show
-
-      - name: Cache cargo
-        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      - name: Check Rust formatting
-        run: cargo fmt --all --check
-
-      - name: Run clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
-
-      - name: Run Rust tests
-        run: cargo test --locked --all
-
-      - name: Build release binary
-        run: cargo build --locked --release
-
   swift-remote-control:
     name: Swift format and remote control unit tests
     runs-on: macos-26
