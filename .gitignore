@@ -3,3 +3,5 @@ node_modules/
 .iroh-connector-spike-key
 .DS_Store
 .pi-subagents/
+
+target/

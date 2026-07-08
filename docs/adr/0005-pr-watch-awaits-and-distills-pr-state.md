@@ -1,6 +1,6 @@
 # pr-watch awaits and distills PR state deterministically
 
-**Status:** accepted
+**Status:** accepted; superseded in part by ADR-0007 for implementation location.
 
 `pr-watch` is a CLI that answers two questions an orchestrating agent asks about a pull request,
 without spending model tokens to answer them: **"is this PR settled?"** (CI terminal, review bots
@@ -24,11 +24,11 @@ polling loop is a chance to get settledness subtly wrong.
 
 ## Decisions
 
-**Form.** A standalone CLI (`pr-watch`, bin → `pi-extensions/pr-watch/cli.ts`, run via tsx like
-`pi-remote`), callable from any harness through the shell. Not a Pi extension tool and not a
-Claude plugin command: both agents already have bash, and a schema-bearing tool would tax every
-turn of every session for a per-PR activity (same reasoning as ADR-0004). All GitHub access goes
-through the `gh` CLI — auth, base URLs, and pagination are its problem.
+**Form.** A standalone CLI (`pr-watch`), callable from any harness through the shell. Not a Pi
+extension tool and not a Claude plugin command: both agents already have bash, and a
+schema-bearing tool would tax every turn of every session for a per-PR activity (same reasoning as
+ADR-0004). All GitHub access goes through the `gh` CLI — auth, base URLs, and pagination are its
+problem. ADR-0007 supersedes the original TypeScript path and tsx execution details.
 
 **Subcommands.**
 
