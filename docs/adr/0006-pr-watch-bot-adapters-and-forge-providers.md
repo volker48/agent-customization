@@ -1,6 +1,7 @@
 # pr-watch uses bot adapters and forge providers
 
-**Status:** accepted; superseded in part by ADR-0007 for implementation location.
+**Status:** accepted; superseded in part by ADR-0007 and ADR-0008 for implementation
+location and CLI name.
 
 Supersedes no behavior from ADR-0005; it preserves the GitHub + CodeRabbit/Codex settledness,
 exit-code, output, and distillation contract while making two extension axes explicit.
@@ -16,8 +17,9 @@ exit-code, output, and distillation contract while making two extension axes exp
   normalizes raw forge data into the shared `PrSnapshot` core type.
 
 The CLI remains the orchestration layer: argument parsing, forge selection, wait retries, exit
-codes, and rendering. Core settledness and rendering stay forge-neutral. ADR-0007 supersedes the
-original TypeScript module location while preserving these seams.
+codes, and rendering. Core settledness and rendering stay forge-neutral. ADR-0007 superseded the
+original TypeScript module location while preserving these seams; ADR-0008 moves the renamed
+`babysit` CLI out to a standalone repository.
 
 ## GitLab mapping
 
