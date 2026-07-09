@@ -187,6 +187,87 @@ function finalTextFallbackFakePi(logPath: string): string {
   );
 }
 
+function contextOverflowFakePi(logPath: string): string {
+  return fakePiScript(
+    logPath,
+    `    if (command.type === "prompt") {
+      emit({ id: command.id, type: "response", command: "prompt", success: true });
+      emit({ type: "agent_end", messages: [
+        { role: "assistant", content: [{ type: "text", text: "Running the quality gates now." }] },
+        { role: "assistant", content: [], stopReason: "error",
+          errorMessage: "Codex error: Your input exceeds the context window of this model." }
+      ] });
+    }
+    if (command.type === "get_last_assistant_text") {
+      emit({ id: command.id, type: "response", command: "get_last_assistant_text",
+        success: true, data: { text: null } });
+    }`,
+  );
+}
+
+function compactionRecoveryFakePi(logPath: string): string {
+  return fakePiScript(
+    logPath,
+    `    globalThis.recovered ??= false;
+    if (command.type === "prompt") {
+      emit({ id: command.id, type: "response", command: "prompt", success: true });
+      emit({ type: "agent_end", messages: [
+        { role: "assistant", content: [], stopReason: "error",
+          errorMessage: "Codex error: Your input exceeds the context window of this model." }
+      ] });
+      emit({ type: "compaction_start", reason: "overflow" });
+      emit({ type: "compaction_end", reason: "overflow", aborted: false, willRetry: true });
+      setTimeout(() => {
+        globalThis.recovered = true;
+        emit({ type: "agent_end", messages: [] });
+      }, 30);
+    }
+    if (command.type === "get_last_assistant_text") {
+      const text = globalThis.recovered ? "Recovered after compaction." : null;
+      emit({ id: command.id, type: "response", command: "get_last_assistant_text",
+        success: true, data: { text } });
+    }`,
+  );
+}
+
+function compactionGiveUpFakePi(logPath: string): string {
+  return fakePiScript(
+    logPath,
+    `    if (command.type === "prompt") {
+      emit({ id: command.id, type: "response", command: "prompt", success: true });
+      emit({ type: "agent_end", messages: [
+        { role: "assistant", content: [], stopReason: "error",
+          errorMessage: "Codex error: Your input exceeds the context window of this model." }
+      ] });
+      emit({ type: "compaction_end", reason: "overflow", aborted: false, willRetry: false,
+        errorMessage: "Context overflow recovery failed after one compact-and-retry attempt." });
+    }`,
+  );
+}
+
+function unacknowledgedPromptFakePi(logPath: string): string {
+  return fakePiScript(
+    logPath,
+    `    const text = "Implemented despite the missing prompt acknowledgement.";
+    if (command.type === "prompt") {
+      setTimeout(() => emit({ type: "agent_end", messages: [] }), 50);
+    }
+    if (command.type === "get_last_assistant_text") {
+      emit({ id: command.id, type: "response", command: "get_last_assistant_text",
+        success: true, data: { text } });
+    }`,
+  );
+}
+
+function silentPromptFakePi(logPath: string): string {
+  return fakePiScript(
+    logPath,
+    `    if (command.type === "prompt") {
+      process.stderr.write("codex stream disconnected before acknowledgement");
+    }`,
+  );
+}
+
 function successfulFakePi(logPath: string): string {
   return fakePiScript(
     logPath,
@@ -451,6 +532,114 @@ describe("Claude Code Pi implementation delegation", () => {
       status: "failed",
       errorMessage: "Pi completed without a final assistant response",
     });
+  });
+
+  it("surfaces the assistant error when the final turn ends with a provider error", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-impl-data-"));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(contextOverflowFakePi(logPath));
+
+    const result = await runImplement({
+      brief: "Implement past the context window.",
+      compactionGraceMs: 200,
+      dataDir,
+      piCommand: process.execPath,
+      piPrefixArgs: [fakePi],
+      timeoutMs: 1_000,
+      workspaceRoot: "/repo-under-test",
+    });
+
+    const job = JSON.parse(await readFile(result.jobFile, "utf8"));
+
+    expect(result.ok).toBe(false);
+    expect(result.errorMessage).toBe(
+      "Pi agent error: Codex error: Your input exceeds the context window of this model.",
+    );
+    expect(job).toMatchObject({
+      status: "failed",
+      errorMessage:
+        "Pi agent error: Codex error: Your input exceeds the context window of this model.",
+    });
+  });
+
+  it("waits through Pi's compact-and-retry after a context overflow", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-impl-data-"));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(compactionRecoveryFakePi(logPath));
+
+    const result = await runImplement({
+      brief: "Implement across a compaction retry.",
+      dataDir,
+      piCommand: process.execPath,
+      piPrefixArgs: [fakePi],
+      timeoutMs: 1_000,
+      workspaceRoot: "/repo-under-test",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.finalText).toBe("Recovered after compaction.");
+  });
+
+  it("fails with the compaction error when overflow recovery gives up", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-impl-data-"));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(compactionGiveUpFakePi(logPath));
+
+    const result = await runImplement({
+      brief: "Implement into a failed recovery.",
+      compactionGraceMs: 500,
+      dataDir,
+      piCommand: process.execPath,
+      piPrefixArgs: [fakePi],
+      timeoutMs: 1_000,
+      workspaceRoot: "/repo-under-test",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.errorMessage).toBe(
+      "Pi compaction failed: Context overflow recovery failed after one compact-and-retry attempt.",
+    );
+  });
+
+  it("completes when agent_end arrives without a prompt acknowledgement", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-impl-data-"));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(unacknowledgedPromptFakePi(logPath));
+
+    const result = await runImplement({
+      brief: "Implement without a prompt ack.",
+      dataDir,
+      piCommand: process.execPath,
+      piPrefixArgs: [fakePi],
+      promptTimeoutMs: 5_000,
+      timeoutMs: 1_000,
+      workspaceRoot: "/repo-under-test",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.finalText).toBe("Implemented despite the missing prompt acknowledgement.");
+  });
+
+  it("includes Pi stderr when the prompt acknowledgement times out", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-impl-data-"));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(silentPromptFakePi(logPath));
+
+    const result = await runImplement({
+      agentEndTimeoutMs: 5_000,
+      brief: "Implement into a silent prompt.",
+      dataDir,
+      piCommand: process.execPath,
+      piPrefixArgs: [fakePi],
+      promptTimeoutMs: 200,
+      timeoutMs: 1_000,
+      workspaceRoot: "/repo-under-test",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.errorMessage).toContain("Timed out waiting for Pi RPC prompt response");
+    expect(result.errorMessage).toContain("codex stream disconnected before acknowledgement");
+    expect(result.piTerminated).toBe(true);
   });
 
   it("reports Pi RPC prompt failures and still terminates the process", async () => {

@@ -10,6 +10,7 @@ export class PiRpcClient {
     this.nextId = 1;
     this.pending = new Map();
     this.eventWaiters = [];
+    this.eventListeners = [];
     this.stderr = "";
     this.closed = false;
     this.terminated = false;
@@ -33,12 +34,16 @@ export class PiRpcClient {
     });
   }
 
-  async request(command) {
+  async request(command, options = {}) {
     if (!this.process) this.start();
     if (this.protocolError) throw this.protocolError;
     const id = `req-${this.nextId++}`;
     const payload = JSON.stringify({ id, ...command }) + "\n";
-    const responsePromise = this.waitForResponse(id, command.type);
+    const responsePromise = this.waitForResponse(
+      id,
+      command.type,
+      options.timeoutMs ?? this.timeoutMs,
+    );
     this.process.stdin.write(payload);
     return responsePromise;
   }
@@ -54,7 +59,7 @@ export class PiRpcClient {
     const promise = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.removeEventWaiter(waiter);
-        reject(new Error(`Timed out waiting for Pi RPC ${type} event`));
+        reject(new Error(this.timeoutMessage(`Timed out waiting for Pi RPC ${type} event`)));
       }, timeoutMs);
       waiter = { predicate, reject, resolve, timer, type };
       this.eventWaiters.push(waiter);
@@ -71,6 +76,43 @@ export class PiRpcClient {
 
   async abort() {
     return this.request({ type: "abort" });
+  }
+
+  // Persistent subscription: buffers matching events so none are dropped between
+  // awaits (one-shot waiters miss events that arrive before they are armed).
+  // next() resolves the oldest buffered event, or null on timeout.
+  eventQueue(types) {
+    const listener = { error: null, notify: null, queue: [], types: new Set(types) };
+    this.eventListeners.push(listener);
+    const take = (resolve, reject) => {
+      if (listener.error) {
+        reject(listener.error);
+        return true;
+      }
+      if (listener.queue.length > 0) {
+        resolve(listener.queue.shift());
+        return true;
+      }
+      return false;
+    };
+    return {
+      close: () => {
+        this.eventListeners = this.eventListeners.filter((candidate) => candidate !== listener);
+      },
+      next: (timeoutMs) =>
+        new Promise((resolve, reject) => {
+          if (take(resolve, reject)) return;
+          const timer = setTimeout(() => {
+            listener.notify = null;
+            resolve(null);
+          }, timeoutMs);
+          listener.notify = () => {
+            if (!take(resolve, reject)) return;
+            clearTimeout(timer);
+            listener.notify = null;
+          };
+        }),
+    };
   }
 
   async terminate(timeoutMs = 10_000) {
@@ -102,6 +144,7 @@ export class PiRpcClient {
       return;
     }
     if (message.type !== "response" || typeof message.id !== "string") {
+      this.dispatchToListeners(message);
       this.resolveEvent(message);
       return;
     }
@@ -121,6 +164,18 @@ export class PiRpcClient {
       clearTimeout(waiter.timer);
       waiter.reject(error);
     }
+    for (const listener of this.eventListeners) {
+      listener.error = error;
+      listener.notify?.();
+    }
+  }
+
+  dispatchToListeners(message) {
+    for (const listener of this.eventListeners) {
+      if (!listener.types.has(message.type)) continue;
+      listener.queue.push(message);
+      listener.notify?.();
+    }
   }
 
   resolveEvent(message) {
@@ -137,18 +192,25 @@ export class PiRpcClient {
     this.eventWaiters = this.eventWaiters.filter((candidate) => candidate !== waiter);
   }
 
+  timeoutMessage(message) {
+    const stderr = this.stderr.trim();
+    return stderr ? `${message}. Pi stderr: ${stderr.slice(-400)}` : message;
+  }
+
   sendExtensionUICancellation(id) {
     if (!this.process?.stdin?.writable) return;
     const payload = JSON.stringify({ type: "extension_ui_response", id, cancelled: true }) + "\n";
     this.process.stdin.write(payload);
   }
 
-  waitForResponse(id, commandType) {
+  waitForResponse(id, commandType, timeoutMs) {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`Timed out waiting for Pi RPC ${commandType} response`));
-      }, this.timeoutMs);
+        reject(
+          new Error(this.timeoutMessage(`Timed out waiting for Pi RPC ${commandType} response`)),
+        );
+      }, timeoutMs);
       this.pending.set(id, {
         reject: (error) => {
           clearTimeout(timer);

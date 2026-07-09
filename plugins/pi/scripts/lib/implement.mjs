@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -17,7 +18,15 @@ import { DEFAULT_INTENDED_MODEL, modelRef } from "./setup.mjs";
 
 const WRITE_CAPABLE_TOOLS = "read,grep,find,ls,bash,edit,write";
 const DEFAULT_AGENT_END_TIMEOUT_MS = 30 * 60 * 1000;
+// Pi acks a prompt only after preflight, which can include a full pre-prompt
+// compaction pass (an LLM summarization call) on a large resumed session.
+const DEFAULT_PROMPT_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_TERMINATE_TIMEOUT_MS = 10_000;
+const DEFAULT_MAX_SESSION_BYTES = 1_000_000;
+// After an overflow-errored agent_end, Pi starts compact-and-retry; give its
+// compaction_start this long to show up before treating the error as final.
+const DEFAULT_COMPACTION_GRACE_MS = 15_000;
+const DEFAULT_COMPACT_USAGE_PERCENT = 80;
 const DEFAULT_CANCEL_POLL_MS = 100;
 const TERMINAL_STATUSES = new Set(["cancelled", "completed", "failed"]);
 const execFileAsync = promisify(execFile);
@@ -81,6 +90,7 @@ export async function runContinue(selector = "latest", options = {}) {
   const instruction = normalizeInstruction(options.instruction);
   const parent = await resolveContinuationParent(selector, options);
   validateContinuationParent(parent.job, selector);
+  await assertContinuableSessionSize(parent.job, options);
   const model = selectedModel({ ...options, parentJob: parent.job });
   const job = createContinuationJob(parent.job, {
     ...options,
@@ -128,27 +138,77 @@ async function startJob(job, brief, options) {
 }
 
 async function executeImplementation(client, job, brief, options) {
-  let agentEndWaiter = null;
+  let events = null;
   let finalText = null;
   let errorMessage = null;
   const cancellation = watchCancellation(client, job, options);
   try {
-    agentEndWaiter = await promptPi(client, job, brief, options);
-    const agentEndEvent = await agentEndWaiter.promise;
+    events = await promptPi(client, job, brief, options);
+    const agentEndEvent = await awaitFinalAgentEnd(client, events, job, options);
     if (await jobIsCancelling(job)) await cancelJob(job, "Pi RPC abort completed");
     else {
       finalText = await getFinalText(client, agentEndEvent);
       await completeJob(job, finalText);
     }
   } catch (error) {
-    agentEndWaiter?.cancel();
     errorMessage = error instanceof Error ? error.message : String(error);
     if (await jobIsCancelling(job)) await cancelJob(job, errorMessage);
     else await failJob(job, errorMessage);
   } finally {
+    events?.close();
     cancellation.cancel();
   }
   return { errorMessage, finalText };
+}
+
+async function awaitFinalAgentEnd(client, events, job, options) {
+  const state = { candidate: null, compacting: false };
+  while (true) {
+    const event = await events.next(nextEventTimeoutMs(state, options));
+    if (event === null) {
+      if (state.candidate && !state.compacting) return state.candidate;
+      throw new Error(client.timeoutMessage("Timed out waiting for Pi RPC agent_end event"));
+    }
+    const final = await handleAgentEvent(event, state, job);
+    if (final) return final;
+  }
+}
+
+function nextEventTimeoutMs(state, options) {
+  if (state.candidate && !state.compacting) {
+    return options.compactionGraceMs ?? DEFAULT_COMPACTION_GRACE_MS;
+  }
+  return options.agentEndTimeoutMs ?? DEFAULT_AGENT_END_TIMEOUT_MS;
+}
+
+async function handleAgentEvent(event, state, job) {
+  if (event.type === "compaction_start") {
+    state.compacting = true;
+    await appendJobLog(job, "compaction-start", { reason: event.reason });
+    return null;
+  }
+  if (event.type === "compaction_end") return handleCompactionEnd(event, state, job);
+  if (event.willRetry === true) return null;
+  if (finalAssistantOutcome(event?.messages ?? []).error) {
+    state.candidate = event;
+    return null;
+  }
+  return event;
+}
+
+async function handleCompactionEnd(event, state, job) {
+  state.compacting = false;
+  await appendJobLog(job, "compaction-end", {
+    errorMessage: event.errorMessage,
+    reason: event.reason,
+    willRetry: event.willRetry,
+  });
+  if (event.willRetry) {
+    state.candidate = null;
+    return null;
+  }
+  if (event.errorMessage) throw new Error(`Pi compaction failed: ${event.errorMessage}`);
+  return state.candidate;
 }
 
 async function promptPi(client, job, brief, options) {
@@ -160,19 +220,61 @@ async function promptPi(client, job, brief, options) {
     sessionId: job.sessionId,
     piSessionFile: job.piSessionFile,
   });
+  if (options.parentJob) await compactResumedSessionIfCrowded(client, job, options);
+  const events = client.eventQueue(["agent_end", "compaction_start", "compaction_end"]);
   const agentEndWaiter = client.waitForEventHandle("agent_end", {
     predicate: isFinalAgentEndEvent,
     timeoutMs: options.agentEndTimeoutMs ?? DEFAULT_AGENT_END_TIMEOUT_MS,
   });
   try {
     await updateJob(job, { phase: "prompting" });
-    await requestOk(client, { type: "prompt", message: buildImplementationPrompt(brief) });
+    await promptAcknowledged(client, brief, agentEndWaiter, options);
     await updateJob(job, { phase: "running" });
-    return agentEndWaiter;
+    return events;
   } catch (error) {
-    agentEndWaiter.cancel();
+    events.close();
     throw error;
+  } finally {
+    agentEndWaiter.cancel();
   }
+}
+
+async function compactResumedSessionIfCrowded(client, job, options) {
+  const stats = await requestData(client, { type: "get_session_stats" }).catch(async (error) => {
+    await appendJobLog(job, "session-stats-failed", { errorMessage: errorMessage(error) });
+    return null;
+  });
+  const percent = stats?.contextUsage?.percent;
+  const threshold = options.compactUsagePercent ?? DEFAULT_COMPACT_USAGE_PERCENT;
+  if (typeof percent !== "number" || percent < threshold) return;
+  await appendJobLog(job, "proactive-compaction", { contextUsage: stats.contextUsage });
+  try {
+    const result = await requestData(
+      client,
+      { type: "compact" },
+      { timeoutMs: options.promptTimeoutMs ?? DEFAULT_PROMPT_TIMEOUT_MS },
+    );
+    await appendJobLog(job, "proactive-compaction-done", {
+      estimatedTokensAfter: result?.estimatedTokensAfter,
+      tokensBefore: result?.tokensBefore,
+    });
+  } catch (error) {
+    // Benign failures ("Already compacted", "Nothing to compact") should not
+    // block the prompt; real overflows still fail loudly on the prompt path.
+    await appendJobLog(job, "proactive-compaction-failed", { errorMessage: errorMessage(error) });
+  }
+}
+
+async function promptAcknowledged(client, brief, agentEndWaiter, options) {
+  const ack = requestOk(
+    client,
+    { type: "prompt", message: buildImplementationPrompt(brief) },
+    { timeoutMs: options.promptTimeoutMs ?? DEFAULT_PROMPT_TIMEOUT_MS },
+  );
+  // An agent_end without a prompt acknowledgement still means Pi ran; let the
+  // final-text path report the real outcome instead of failing on the ack.
+  ack.catch(() => {});
+  await Promise.race([ack, agentEndWaiter.promise]);
 }
 
 async function completeJob(job, finalText) {
@@ -346,13 +448,13 @@ function modelArgs(model) {
   return model ? ["--model", model] : [];
 }
 
-async function requestData(client, command) {
-  const response = await requestOk(client, command);
+async function requestData(client, command, requestOptions) {
+  const response = await requestOk(client, command, requestOptions);
   return response.data;
 }
 
-async function requestOk(client, command) {
-  const response = await client.request(command);
+async function requestOk(client, command, requestOptions) {
+  const response = await client.request(command, requestOptions);
   if (response.success) return response;
   throw new Error(`Pi RPC ${command.type} failed: ${response.error ?? "unknown error"}`);
 }
@@ -395,6 +497,17 @@ function validateContinuationParent(job, selector) {
   }
 }
 
+async function assertContinuableSessionSize(job, options) {
+  const limit = options.maxSessionBytes ?? DEFAULT_MAX_SESSION_BYTES;
+  const size = (await stat(job.piSessionFile).catch(() => null))?.size ?? 0;
+  if (size <= limit) return;
+  throw new Error(
+    `Pi session file for ${job.id} is ${size} bytes, over the ${limit}-byte continuation ` +
+      "limit; the session likely no longer fits the model context window. Start a fresh " +
+      "/pi:implement job with a summarized brief instead of continuing.",
+  );
+}
+
 function normalizeInstruction(instruction) {
   const normalized = typeof instruction === "string" ? instruction.trim() : "";
   if (!normalized) throw new Error("Continuation instruction is required");
@@ -404,18 +517,27 @@ function normalizeInstruction(instruction) {
 async function getFinalText(client, agentEndEvent) {
   const response = await requestData(client, { type: "get_last_assistant_text" });
   if (typeof response?.text === "string" && response.text.trim()) return response.text;
-  const fallback = extractLastAssistantText(agentEndEvent?.messages ?? []);
-  if (fallback) return fallback;
+  const outcome = finalAssistantOutcome(agentEndEvent?.messages ?? []);
+  if (outcome.text) return outcome.text;
+  if (outcome.error) throw new Error(`Pi agent error: ${outcome.error}`);
   throw new Error("Pi completed without a final assistant response");
 }
 
-function extractLastAssistantText(messages) {
+function finalAssistantOutcome(messages) {
   for (const message of [...messages].reverse()) {
     if (message?.role !== "assistant") continue;
+    const error = assistantErrorMessage(message);
+    if (error) return { error };
     const text = extractMessageContentText(message.content);
-    if (text) return text;
+    if (text) return { text };
   }
-  return null;
+  return {};
+}
+
+function assistantErrorMessage(message) {
+  if (message.stopReason !== "error") return null;
+  const error = typeof message.errorMessage === "string" ? message.errorMessage.trim() : "";
+  return error || null;
 }
 
 function extractMessageContentText(content) {

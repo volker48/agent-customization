@@ -67,6 +67,12 @@ process.stdin.on("data", (chunk) => {
         sessionFile: "/tmp/continued-session.jsonl"
       }
     });
+    if (command.type === "get_session_stats") emit({
+      id: command.id,
+      type: "response",
+      success: true,
+      data: { contextUsage: { tokens: 100, contextWindow: 1000, percent: 10 } }
+    });
     if (command.type === "prompt") {
       emit({ id: command.id, type: "response", success: true });
       emit({ type: "agent_end", messages: [] });
@@ -81,6 +87,59 @@ process.stdin.on("data", (chunk) => {
 });
 process.on("SIGTERM", () => process.exit(0));
 `;
+}
+
+async function writeStatsFakePi(logPath: string, percent: number): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), "fake-pi-stats-"));
+  const path = join(dir, "fake-pi.mjs");
+  await writeFile(
+    path,
+    `#!/usr/bin/env node
+import { appendFileSync, writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(logPath)}, JSON.stringify({ type: "argv", argv: process.argv.slice(1) }) + "\\n");
+process.stdin.setEncoding("utf8");
+let buffer = "";
+function emit(message) { process.stdout.write(JSON.stringify(message) + "\\n"); }
+function record(command) {
+  appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ type: "command", command }) + "\\n");
+}
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  while (buffer.includes("\\n")) {
+    const index = buffer.indexOf("\\n");
+    const line = buffer.slice(0, index);
+    buffer = buffer.slice(index + 1);
+    if (!line) continue;
+    const command = JSON.parse(line);
+    record(command);
+    if (command.type === "get_state") emit({
+      id: command.id, type: "response", success: true,
+      data: { model: { provider: "openai-codex", id: "gpt-5.5", name: "GPT 5.5" },
+        sessionId: "stats-session", sessionFile: "/tmp/stats-session.jsonl" }
+    });
+    if (command.type === "get_session_stats") emit({
+      id: command.id, type: "response", success: true,
+      data: { contextUsage: { tokens: 100, contextWindow: 1000, percent: ${percent} } }
+    });
+    if (command.type === "compact") emit({
+      id: command.id, type: "response", success: true,
+      data: { summary: "compacted", tokensBefore: 250000, estimatedTokensAfter: 30000 }
+    });
+    if (command.type === "prompt") {
+      emit({ id: command.id, type: "response", success: true });
+      emit({ type: "agent_end", messages: [] });
+    }
+    if (command.type === "get_last_assistant_text") emit({
+      id: command.id, type: "response", success: true,
+      data: { text: "Compacted continuation done." }
+    });
+  }
+});
+process.on("SIGTERM", () => process.exit(0));
+`,
+  );
+  await chmod(path, 0o755);
+  return path;
 }
 
 async function storedJob(options: {
@@ -290,6 +349,100 @@ describe("Pi implementation continuation", () => {
       .find((record) => record.type === "argv").argv;
 
     expect(argv).toContain(explicit.piSessionFile);
+  });
+
+  it("proactively compacts a resumed session with high context usage", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-continue-data-"));
+    const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-continue-workspace-")));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeStatsFakePi(logPath, 92);
+    await storedJob({
+      dataDir,
+      id: "impl-crowded",
+      sessionFile: "/tmp/crowded-session.jsonl",
+      sessionId: "crowded-session",
+      updatedAt: "2026-07-04T00:00:00.000Z",
+      workspaceRoot,
+    });
+
+    const result = await runContinue("impl-crowded", {
+      dataDir,
+      instruction: "continue near the context limit",
+      piCommand: process.execPath,
+      piPrefixArgs: [fakePi],
+      timeoutMs: 1_000,
+      workspaceRoot,
+    });
+    const commands = (await readFile(logPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .filter((record) => record.type === "command")
+      .map((record) => record.command.type);
+
+    expect(result.ok).toBe(true);
+    expect(commands.indexOf("compact")).toBeGreaterThan(-1);
+    expect(commands.indexOf("compact")).toBeLessThan(commands.indexOf("prompt"));
+  });
+
+  it("skips proactive compaction when context usage is low", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-continue-data-"));
+    const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-continue-workspace-")));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeStatsFakePi(logPath, 12);
+    await storedJob({
+      dataDir,
+      id: "impl-roomy",
+      sessionFile: "/tmp/roomy-session.jsonl",
+      sessionId: "roomy-session",
+      updatedAt: "2026-07-04T00:00:00.000Z",
+      workspaceRoot,
+    });
+
+    const result = await runContinue("impl-roomy", {
+      dataDir,
+      instruction: "continue with plenty of room",
+      piCommand: process.execPath,
+      piPrefixArgs: [fakePi],
+      timeoutMs: 1_000,
+      workspaceRoot,
+    });
+    const commands = (await readFile(logPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .filter((record) => record.type === "command")
+      .map((record) => record.command.type);
+
+    expect(result.ok).toBe(true);
+    expect(commands).toContain("get_session_stats");
+    expect(commands).not.toContain("compact");
+  });
+
+  it("refuses to continue a session file larger than the continuation limit", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-continue-data-"));
+    const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-continue-workspace-")));
+    const sessionFile = join(dataDir, "oversized-session.jsonl");
+    await writeFile(sessionFile, "x".repeat(64));
+    await storedJob({
+      dataDir,
+      id: "impl-oversized",
+      sessionFile,
+      sessionId: "oversized-session",
+      updatedAt: "2026-07-04T00:00:00.000Z",
+      workspaceRoot,
+    });
+
+    await expect(
+      runContinue("impl-oversized", {
+        dataDir,
+        instruction: "continue the oversized session",
+        maxSessionBytes: 16,
+        workspaceRoot,
+      }),
+    ).rejects.toThrow(
+      "Pi session file for impl-oversized is 64 bytes, over the 16-byte continuation limit",
+    );
   });
 
   it("shows clear errors when no resumable job or no usable session metadata exists", async () => {
