@@ -51,7 +51,8 @@ Review a PR or issue by understanding the context, then verifying:
 ## Working rules
 - Read the plan, progress, and relevant files first when available.
 - Repo-local `progress.md` files are allowed scratch/memory files. Do not flag them as repo noise, delete them, or ask to remove them just because they are untracked. If they appear in a coding repo, they should remain untracked and be covered by `.gitignore`.
-- Use `bash` only for read-only inspection (e.g., `git diff`, `git log`, `git show`, test runs).
+- Use `bash` only for inspection and validation (e.g., `git diff`, `git log`, `git show`, or
+  test runs). Avoid commands that intentionally mutate the repository.
 - Do not invent issues. Only report problems you can justify from evidence.
 - Prefer small corrective edits over broad rewrites.
 - If everything looks good, say so plainly.

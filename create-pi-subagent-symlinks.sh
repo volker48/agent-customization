@@ -6,9 +6,21 @@ source_dir="${repo_dir}/pi-subagents/agents"
 target_dir="${PI_CODING_AGENT_DIR:-${HOME}/.pi/agent}/agents"
 status=0
 
+if [[ ! -d "${source_dir}" ]]; then
+	echo "Source directory does not exist: ${source_dir}" >&2
+	exit 1
+fi
+
+shopt -s nullglob
+sources=("${source_dir}"/*.md)
+if ((${#sources[@]} == 0)); then
+	echo "No Markdown agent files found in: ${source_dir}" >&2
+	exit 1
+fi
+
 mkdir -p "${target_dir}"
 
-for source in "${source_dir}"/*.md; do
+for source in "${sources[@]}"; do
 	target="${target_dir}/$(basename "${source}")"
 
 	if [[ -L "${target}" ]]; then
