@@ -19,6 +19,9 @@ pi-extensions/         # Pi agent extensions (TypeScript)
   rtk.ts               # RTK bash rewrite hook
   fusion/              # Multi-model Fusion panel and judge command
 
+pi-subagents/          # Repo-owned overrides for pi-subagents builtin roles
+  agents/              # User-scope agent definitions symlinked into Pi
+
 skills/                # Agent Skills shared by Pi and compatible agents
   claude-review/       # Claude Code /code-review workflow
 
@@ -26,7 +29,8 @@ pi-themes/             # Pi agent color themes
   obsec-dark.json
   obsec-light.json
 
-create-sound-symlinks.sh  # Creates symlinks so all agents share one set of sound files
+create-sound-symlinks.sh       # Shares sound files across harness event names
+create-pi-subagent-symlinks.sh # Installs repo-owned Pi subagent definitions
 ```
 
 ## Sound Notifications
@@ -177,6 +181,16 @@ converting them to raw URLs first.
 HTML-to-markdown conversion depends on runtime packages in this repository. Use the
 extension from this checkout (or distribute it as a pi package); copying only
 `pi-extensions/webfetch.ts` elsewhere will not copy those dependencies.
+
+### Pi: Subagent definitions (`pi-subagents/`)
+
+Overrides all builtin `pi-subagents` role prompts at user scope while keeping local model,
+thinking, and tool selection in `~/.pi/agent/settings.json`. The local tool mapping replaces
+`web_search` with `exa_search` and collapses `fetch_content`/`get_search_content` into
+`webfetch`; other upstream allowlists are preserved. Run `./create-pi-subagent-symlinks.sh`
+to link the definitions into `~/.pi/agent/agents/`.
+
+See [`pi-subagents/README.md`](pi-subagents/README.md) for provenance and update guidance.
 
 ### Pi: RTK (`pi-extensions/rtk.ts`)
 
