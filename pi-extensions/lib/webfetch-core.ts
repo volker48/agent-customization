@@ -1680,7 +1680,8 @@ function htmlWithBaseUrl(html: string, baseUrl: string): string {
     return html.replace(/<html\b([^>]*)>/i, `<html$1><head>${baseTag}</head>`);
   }
 
-  return `${baseTag}${html}`;
+  const fragment = html.replace(/^\s*<!doctype[^>]*>/i, "");
+  return `<html><head>${baseTag}</head><body>${fragment}</body></html>`;
 }
 
 function extractArticle(html: string, baseUrl: string): HtmlMarkdownConversion | undefined {

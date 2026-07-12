@@ -307,6 +307,36 @@ describe("webfetch extension", () => {
     expect((result.details as WebFetchTestDetails).conversionMethod).toBe("full-page");
   });
 
+  it("converts RustSec advisory HTML to markdown", async () => {
+    const fixtureUrl = new URL("./fixtures/rustsec-advisory.html", import.meta.url);
+    const html = await readFile(fixtureUrl, "utf8");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(html, {
+        status: 200,
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      }),
+    );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_rustsec_advisory",
+      { url: "https://rustsec.org/advisories/RUSTSEC-2026-0097" },
+      new AbortController().signal,
+    );
+
+    const output = result.content[0]?.text ?? "";
+    const details = result.details as WebFetchTestDetails;
+    expect(output).toContain("## RUSTSEC-2026-0097");
+    expect(output).toContain("Rand is unsound with a custom logger using");
+    expect(output).not.toContain("<!DOCTYPE html>");
+    expect(output).not.toContain("<meta");
+    expect(output).not.toContain("<main");
+    expect(details.converted).toBe(true);
+    expect(details.conversionMethod).toBe("readability");
+  });
+
   it("degrades to raw HTML when conversion throws", async () => {
     vi.spyOn(TurndownService.prototype, "turndown").mockImplementation(() => {
       throw new Error("converter failed");
