@@ -28,6 +28,7 @@ type MockCommandContext = {
   waitForIdle: () => Promise<void>;
   sessionManager: {
     getBranch: () => unknown[];
+    getSessionId: () => string;
   };
   modelRegistry: {
     find: (provider: string, modelId: string) => unknown;
@@ -51,6 +52,14 @@ type MockCommandContext = {
 function textResponse(text: string) {
   return {
     content: [{ type: "text", text }],
+  };
+}
+
+function errorResponse(errorMessage: string) {
+  return {
+    content: [],
+    stopReason: "error",
+    errorMessage,
   };
 }
 
@@ -108,6 +117,7 @@ function createContext(overrides: Partial<MockCommandContext> = {}): MockCommand
           },
         },
       ]),
+      getSessionId: vi.fn(() => "019f58bc-96ae-74cd-80c7-c5e9c486a56d"),
     },
     modelRegistry: {
       find: vi.fn((provider: string, modelId: string) => models.get(`${provider}/${modelId}`)),
@@ -475,6 +485,13 @@ describe("autoname extension", () => {
     const serializedRequest = JSON.stringify(request);
 
     expect(request).not.toHaveProperty("systemPrompt");
+    expect(complete).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Object),
+      expect.objectContaining({
+        sessionId: "019f58bc-96ae-74cd-80c7-c5e9c486a560",
+      }),
+    );
     expect(serializedRequest).not.toContain("AGENTS.md");
     expect(serializedRequest).not.toContain("heavy project instructions");
     expect(context.getSystemPrompt).not.toHaveBeenCalled();
@@ -496,6 +513,7 @@ describe("autoname extension", () => {
             },
           },
         ]),
+        getSessionId: vi.fn(() => "019f58bc-96ae-74cd-80c7-c5e9c486a56d"),
       },
     });
 
@@ -563,6 +581,26 @@ describe("autoname extension", () => {
 
     expect(customMock).toHaveBeenCalledOnce();
     expect(getSessionName()).toBe("Loader Visible Autoname");
+  });
+
+  it("reports provider errors instead of treating them as empty names", async () => {
+    vi.mocked(complete).mockResolvedValue(errorResponse("Model not found internal-luna") as never);
+    const { pi, getCommand } = createMockPi({
+      "autoname-model": "openai-codex/gpt-5.5",
+    });
+    const context = createContext();
+
+    autonameExtension(pi as never);
+    await getCommand().handler("", context);
+
+    expect(context.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Model not found internal-luna"),
+      "error",
+    );
+    expect(context.ui.notify).not.toHaveBeenCalledWith(
+      expect.stringContaining("Empty name"),
+      "error",
+    );
   });
 
   it("reports an error when no model can name the session", async () => {
