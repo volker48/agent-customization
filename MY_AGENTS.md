@@ -96,7 +96,7 @@ Before finishing or committing:
 
 For bug fixes, add or identify a test that fails before the fix and passes after.
 
-Do not commit rule-breaking code. Never push unless explicitly asked. PRs and issues should be factual, not hyperbolic.
+Do not commit rule-breaking code. PRs and issues should be factual, not hyperbolic.
 
 ## Testing
 

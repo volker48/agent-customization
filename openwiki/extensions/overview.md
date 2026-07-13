@@ -46,10 +46,10 @@ Relevant tests: `tests/rtk.test.ts`, `tests/rtk.e2e.test.ts`, and `scripts/verif
 
 Defaults from source:
 
-- `PI_AUTONAME_MODEL` or `openai-codex/gpt-5.5`.
+- `PI_AUTONAME_MODEL` or `openai-codex/gpt-5.6-luna`.
 - `PI_AUTONAME_FALLBACK_MODEL` or `anthropic/claude-haiku-4-5`.
 - Optional prompt override from `PI_AUTONAME_PROMPT_FILE`.
-- Max title length 60 characters.
+- Requests up to 512 output tokens with model reasoning disabled; max title length 60 characters.
 
 Relevant tests: `tests/autoname.test.ts`.
 
