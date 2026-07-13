@@ -59,12 +59,20 @@ Decision:
 - `webfetch` should return the most token-efficient useful representation of a URL, not raw bytes by default.
 - Site-specific smarts are internal and deterministic; callers should not need a new mode flag or separate tool.
 - Bare GitHub repository roots return an orientation view with owner/name, description, default branch, language/topics, optional homepage, depth-1 tree, and README.
+- GitLab repository roots and tree URLs receive the analogous REST-backed orientation view; GitLab blob URLs use the raw-file endpoint.
+- HTML conversion and URL-fragment extraction are applied consistently enough to handle useful non-2xx HTML pages as well as successful pages.
 - Auth for GitHub API calls is opportunistic via `GITHUB_TOKEN`/`GH_TOKEN`; anonymous remains supported until rate-limited.
 
 Why it matters:
 
-- Recent commits implemented GitHub repository orientation and authenticated README fetching through REST endpoints.
+- Recent commits implemented GitHub repository orientation, authenticated README fetching through REST endpoints, GitLab repository/blob/tree handling, and HTML error/fragment conversion.
 - Future site optimizations should follow this pattern instead of adding one-off tools or exposing implementation modes to agents.
+
+## ADR-0005–0008: PR/MR watcher ownership and extraction
+
+The former in-repository `crates/pr-watch/` Rust CLI was extracted to the standalone [`babysit`](https://github.com/volker48/babysit) project. ADR-0007's Rust location is superseded by ADR-0008; ADR-0005 and ADR-0006 remain historical rationale for the watcher’s settledness contract, bot adapters, and forge providers. This repository no longer owns the Rust workspace, watcher implementation/tests, Rust CI, releases, or installation docs. Current watcher work belongs in `babysit`.
+
+Sources: `docs/adr/0005-pr-watch-awaits-and-distills-pr-state.md`, `docs/adr/0006-pr-watch-bot-adapters-and-forge-providers.md`, `docs/adr/0007-pr-watch-rust-cli-location.md`, and `docs/adr/0008-pr-watch-moved-to-babysit.md`.
 
 ## Decision-aware change guidance
 

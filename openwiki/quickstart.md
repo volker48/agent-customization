@@ -7,12 +7,13 @@
 The repository is not a product server. It is a collection of installable/customizable artifacts:
 
 - **Pi extensions** in `pi-extensions/` that register tools, slash commands, renderers, and event handlers through Pi's `ExtensionAPI`.
+- **Pi subagent role overrides** in `pi-subagents/`, installed into user scope with `create-pi-subagent-symlinks.sh`.
 - **Claude Code hooks and plugin commands** in `claude-hooks/` and `plugins/pi/`.
 - **OpenCode plugins** in `opencode-plugins/`.
 - **Shared skills and prompts** in `skills/` and `prompts/`.
 - **Tests** in `tests/`, using Vitest.
 
-Recent git history is concentrated on two high-signal areas: webfetch token efficiency/GitHub repository orientation (`pi-extensions/lib/webfetch-core.ts`, `tests/webfetch.test.ts`, ADR-0004) and hardening of the Claude/Pi companion background job lifecycle (`plugins/pi/scripts/lib/*`, `tests/claude-pi-*.test.ts`).
+Recent git history includes webfetch token efficiency and repository orientation for GitHub/GitLab (`pi-extensions/lib/webfetch-core.ts`, `tests/webfetch.test.ts`, ADR-0004), the move of the PR/MR watcher to the standalone `babysit` project (ADR-0008), repo-owned Pi subagent role overrides (`pi-subagents/`), and a more structured, security-conscious autoname brief (`pi-extensions/autoname.ts`, `tests/autoname.test.ts`).
 
 ## Where to go next
 
@@ -22,7 +23,7 @@ Recent git history is concentrated on two high-signal areas: webfetch token effi
 - [Remote control architecture](remote-control/architecture.md) — `/remote`, daemon, iroh transport, pairing, IPC, and transcript projection.
 - [Extensions overview](extensions/overview.md) — non-Fusion Pi extensions, Claude review, RTK, autoname, learn, sound hooks/plugins, skills, and prompts.
 - [Development operations](operations/development.md) — setup, scripts, tests, and change guidance.
-- [Architecture decisions](operations/decisions.md) — ADR map and decisions future agents should preserve.
+- [Architecture decisions](operations/decisions.md) — ADR map, the `pr-watch` → `babysit` ownership boundary, and decisions future agents should preserve.
 
 ## First commands
 
@@ -69,7 +70,7 @@ Fusion is the heaviest domain. `/fusion` reads `~/.pi/agent/fusion.json` by defa
 
 ### Web access tools
 
-Standalone Pi tools `exa_search` and `webfetch` are registered in `pi-extensions/exa-search.ts` and `pi-extensions/webfetch.ts`. Their deep implementations live in `pi-extensions/lib/exa-search-core.ts` and `pi-extensions/lib/webfetch-core.ts`. Fusion reuses those cores but intentionally exposes a narrower inner-model interface; see [Fusion inner tools](fusion/inner-tools.md).
+Standalone Pi tools `exa_search` and `webfetch` are registered in `pi-extensions/exa-search.ts` and `pi-extensions/webfetch.ts`. Their deep implementations live in `pi-extensions/lib/exa-search-core.ts` and `pi-extensions/lib/webfetch-core.ts`. `webfetch` now handles GitHub and GitLab repository/blob/tree links, converts useful HTML error responses, and extracts URL fragments after conversion. Fusion reuses those cores but intentionally exposes a narrower inner-model interface; see [Fusion inner tools](fusion/inner-tools.md).
 
 ### Remote control
 
@@ -78,6 +79,10 @@ Standalone Pi tools `exa_search` and `webfetch` are registered in `pi-extensions
 ### Claude/Pi companion workflows
 
 `plugins/pi/scripts/pi-companion.mjs` implements a Claude Code plugin bridge for delegating implementation/review/continuation/status/cancel/result workflows to Pi over RPC. Job records and logs are stored per workspace under `~/.local/state/claude-pi-companion` by default. See [Extensions overview](extensions/overview.md) and [Development operations](operations/development.md).
+
+### Pi subagents and reusable prompts
+
+The `pi-subagents/` directory overrides builtin role prompts at user scope without taking ownership of local model, thinking, or tool settings. Install its definitions with `./create-pi-subagent-symlinks.sh`; see [Extensions overview](extensions/overview.md) for verification and update guidance. `/learn` creates reusable skills under `skills/<skill-name>/`, while `prompts/fresh-eyes.md` is a shipped review prompt.
 
 ## Agent change guidance
 

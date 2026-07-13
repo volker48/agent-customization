@@ -49,8 +49,10 @@ Policy injected from `fusion.json` belongs to the operator, not the inner model:
 - URL fragment extraction from converted pages.
 - Truncation by Pi defaults and `maxChars`, with full output spilled to a temp file when truncated.
 - GitHub-specific behavior for repository roots, blobs, issues, and pull requests.
+- GitLab-specific behavior for repository roots, tree URLs, and blob URLs through the GitLab REST API, including metadata, a bounded tree, and README/raw-file retrieval.
+- HTML-to-markdown conversion for successful and useful non-2xx HTML responses, with fragment extraction applied after conversion.
 
-ADR-0004 records the current design direction: `webfetch` returns site-optimized, token-efficient representations rather than raw bytes. Bare GitHub repository roots now return an orientation view with default branch, depth-1 tree, metadata, and README, using GitHub auth opportunistically from `GITHUB_TOKEN`/`GH_TOKEN` when available.
+ADR-0004 records the current design direction: `webfetch` returns site-optimized, token-efficient representations rather than raw bytes. Bare GitHub repository roots now return an orientation view with default branch, depth-1 tree, metadata, and README, using GitHub auth opportunistically from `GITHUB_TOKEN`/`GH_TOKEN` when available. GitLab roots and tree URLs receive the analogous REST-backed orientation treatment; blob URLs use the raw-file endpoint.
 
 ## Exa search behavior inherited by Fusion
 
