@@ -117,7 +117,7 @@ function createContext(overrides: Partial<MockCommandContext> = {}): MockCommand
           },
         },
       ]),
-      getSessionId: vi.fn(() => "session-123"),
+      getSessionId: vi.fn(() => "019f58bc-96ae-74cd-80c7-c5e9c486a56d"),
     },
     modelRegistry: {
       find: vi.fn((provider: string, modelId: string) => models.get(`${provider}/${modelId}`)),
@@ -488,7 +488,9 @@ describe("autoname extension", () => {
     expect(complete).toHaveBeenCalledWith(
       expect.any(Object),
       expect.any(Object),
-      expect.objectContaining({ sessionId: "session-123" }),
+      expect.objectContaining({
+        sessionId: "019f58bc-96ae-74cd-80c7-c5e9c486a560",
+      }),
     );
     expect(serializedRequest).not.toContain("AGENTS.md");
     expect(serializedRequest).not.toContain("heavy project instructions");
@@ -511,7 +513,7 @@ describe("autoname extension", () => {
             },
           },
         ]),
-        getSessionId: vi.fn(() => "session-123"),
+        getSessionId: vi.fn(() => "019f58bc-96ae-74cd-80c7-c5e9c486a56d"),
       },
     });
 

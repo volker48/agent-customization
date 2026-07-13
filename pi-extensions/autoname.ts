@@ -113,6 +113,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function autonameRequestId(sessionId: string): string {
+  // Codex needs Pi's UUIDv7 shape but keys its continuation cache by the exact value.
+  const finalDigit = sessionId.endsWith("0") ? "1" : "0";
+  return `${sessionId.slice(0, -1)}${finalDigit}`;
+}
+
 function getOption(pi: ExtensionAPI, flag: string, envName: string, fallback: string): string {
   return normalizeString(pi.getFlag(flag)) ?? normalizeString(process.env[envName]) ?? fallback;
 }
@@ -536,7 +542,7 @@ async function tryNameWithModel(
       headers: auth.headers,
       maxTokens: DEFAULT_MAX_OUTPUT_TOKENS,
       reasoningEffort: "minimal",
-      sessionId: ctx.sessionManager.getSessionId(),
+      sessionId: autonameRequestId(ctx.sessionManager.getSessionId()),
       signal,
     },
   );
