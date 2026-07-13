@@ -536,9 +536,16 @@ async function tryNameWithModel(
       headers: auth.headers,
       maxTokens: DEFAULT_MAX_OUTPUT_TOKENS,
       reasoningEffort: "minimal",
+      sessionId: ctx.sessionManager.getSessionId(),
       signal,
     },
   );
+  if (response.stopReason === "error") {
+    return {
+      error: `${modelRef.value}: ${response.errorMessage ?? "Model request failed"}`,
+    };
+  }
+
   const name = sanitizeSessionName(extractAssistantText(response));
   return name ? { name } : { error: `Empty name from ${modelRef.value}` };
 }
