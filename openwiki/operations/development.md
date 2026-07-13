@@ -43,6 +43,10 @@ pnpm validate:rtk
 
 Run the narrowest relevant tests while iterating, then broaden to `pnpm typecheck` and `pnpm test` for cross-domain changes.
 
+## OpenWiki maintenance
+
+`.github/workflows/openwiki-update.yml` runs `openwiki code --update --print` on demand or on its daily schedule, then opens/updates a pull request containing generated `openwiki/` content and the OpenWiki instruction-reference files. The workflow supplies the model/tracing configuration through repository secrets; do not put credentials in source or generated pages. For repository changes, start with `openwiki/quickstart.md` and let the scheduled workflow refresh generated pages rather than hand-editing them unless a documentation update is explicitly requested.
+
 ## Test map by domain
 
 | Domain | Tests |
@@ -50,11 +54,13 @@ Run the narrowest relevant tests while iterating, then broaden to `pnpm typechec
 | Fusion | `tests/fusion.test.ts`, `tests/fusion-args.test.ts`, `tests/fusion-bundle-cli.test.ts`, `tests/fusion-index.test.ts`, `tests/fusion-tools.test.ts`, `tests/fusion.e2e.test.ts` |
 | Webfetch | `tests/webfetch.test.ts`, `tests/webfetch.baseline.test.ts` |
 | Exa search | `tests/exa-search.test.ts` |
+| Autoname | `tests/autoname.test.ts` |
+| Learn | `tests/learn.test.ts` |
+| Misc Pi extensions | `tests/autoname.test.ts`, `tests/learn.test.ts`, `tests/bundle-core.test.ts` |
 | Remote control | `tests/remote-authorization.test.ts`, `tests/remote-cli.test.ts`, `tests/remote-daemon*.test.ts`, `tests/remote-extension.test.ts`, `tests/remote-ipc.test.ts`, `tests/remote-iroh-transport.test.ts`, `tests/remote-protocol.test.ts`, `tests/remote-transcript-projection.test.ts`, `tests/remote.e2e.test.ts`, `tests/ios-remote-fixtures.test.ts` |
 | Claude review | `tests/claude-review.test.ts`, `tests/claude-pi-review.test.ts` |
 | Claude/Pi companion | `tests/claude-pi-background-cancel.test.ts`, `tests/claude-pi-continue.test.ts`, `tests/claude-pi-implement.test.ts`, `tests/claude-pi-jobs.test.ts`, `tests/claude-pi-setup.test.ts` |
 | RTK | `tests/rtk.test.ts`, `tests/rtk.e2e.test.ts` |
-| Misc Pi extensions | `tests/autoname.test.ts`, `tests/learn.test.ts`, `tests/bundle-core.test.ts` |
 
 ## Configuration and local state
 
@@ -89,8 +95,15 @@ Important local state paths from source:
 
 1. Read [Fusion inner tools](../fusion/inner-tools.md), ADR-0001, and ADR-0004.
 2. For standalone schemas inspect `pi-extensions/webfetch.ts` or `exa-search.ts`; for behavior inspect `pi-extensions/lib/*-core.ts`.
-3. Keep site-specific webfetch optimizations internal unless a new decision says otherwise.
+3. Keep site-specific webfetch optimizations internal unless a new decision says otherwise; preserve GitHub/GitLab orientation and fragment-after-conversion behavior when changing HTML handling.
 4. Run `pnpm test -- tests/webfetch.test.ts` or the relevant Exa/Fusion tests, then broader checks.
+
+### Changing autoname or learn
+
+1. Inspect `pi-extensions/autoname.ts` or `pi-extensions/learn.ts` and the matching Vitest file before changing prompt contracts.
+2. For autoname, preserve bounded transcript construction, narrow resource evidence, secret/credential filtering, compaction selection, and JSON encoding of untrusted session history.
+3. For learn, preserve the skill artifact contract: one focused `SKILL.md` under `skills/<skill-name>/`, with optional supporting directories rather than a new Pi extension.
+4. Run `pnpm test -- tests/autoname.test.ts` or `pnpm test -- tests/learn.test.ts`.
 
 ### Changing remote control
 

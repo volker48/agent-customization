@@ -5,7 +5,7 @@
 ### Web search and fetch
 
 - `pi-extensions/exa-search.ts` registers `exa_search`, backed by `pi-extensions/lib/exa-search-core.ts`. It requires Exa API access through environment configuration (README names `EXA_API_KEY`).
-- `pi-extensions/webfetch.ts` registers `webfetch`, backed by `pi-extensions/lib/webfetch-core.ts`. It fetches HTTP(S) text-like content, handles GitHub links directly, converts HTML to markdown, supports fragments, has probe/smart modes, filters unsafe headers, blocks private hosts unless explicitly overridden, and truncates output.
+- `pi-extensions/webfetch.ts` registers `webfetch`, backed by `pi-extensions/lib/webfetch-core.ts`. It fetches HTTP(S) text-like content, handles GitHub and GitLab repository/blob/tree links directly, converts HTML to markdown—including useful content from HTML error responses—supports fragments after conversion, has probe/smart modes, filters unsafe headers, blocks private hosts unless explicitly overridden, and truncates output.
 
 Fusion reuses these cores through restricted inner tools; see [Fusion inner tools](../fusion/inner-tools.md).
 
@@ -42,20 +42,20 @@ Relevant tests: `tests/rtk.test.ts`, `tests/rtk.e2e.test.ts`, and `scripts/verif
 
 ### Autoname
 
-`pi-extensions/autoname.ts` names Pi sessions for later retrieval. It reads transcript content, calls a configured model, enforces a short title contract, and falls back to another model if needed.
+`pi-extensions/autoname.ts` names Pi sessions for later retrieval. It waits for the session to be idle, builds a bounded structured brief from the task, compaction/branch summaries, selected resource metadata, recent conversation, and the latest assistant outcome, then calls a configured model and falls back to another model if needed. Resource evidence is intentionally narrow: file paths and Markdown headings, sanitized web URLs and headings, and parsed titles from `gh issue/pr view --json`; arbitrary tool output is not copied into the naming brief. Leading expanded skill blocks are removed from user task text, and the brief is sent as JSON data labeled untrusted session history rather than as prompt markup.
 
 Defaults from source:
 
-- `PI_AUTONAME_MODEL` or `openai-codex/gpt-5.5`.
+- `PI_AUTONAME_MODEL` or `openai-codex/gpt-5.6-luna` in the current source.
 - `PI_AUTONAME_FALLBACK_MODEL` or `anthropic/claude-haiku-4-5`.
 - Optional prompt override from `PI_AUTONAME_PROMPT_FILE`.
-- Max title length 60 characters.
+- Requests up to 80 output tokens with minimal model reasoning; max title length 60 characters.
 
-Relevant tests: `tests/autoname.test.ts`.
+Relevant tests: `tests/autoname.test.ts`, especially the resource filtering, compaction selection, size bound, and untrusted-history cases.
 
 ### Learn
 
-`pi-extensions/learn.ts` registers `/learn`, which turns a user request or the current conversation into a prompt asking Pi to create one reusable agent skill. The prompt follows the Hermes-style stable behavior: gather open-ended sources, honor trailing requirements after paths/URLs, and save one `SKILL.md` under `skills/<skill-name>/` with optional `scripts/`, `templates/`, or `references/` support files instead of creating another Pi extension.
+`pi-extensions/learn.ts` registers `/learn`, which turns a user request or the current conversation into a prompt asking Pi to create one reusable agent skill. The prompt follows the Hermes-style stable behavior: gather open-ended sources, honor trailing requirements after paths/URLs, and save one `SKILL.md` under `skills/<skill-name>/` with optional `scripts/`, `templates/`, or `references/` support files instead of creating another Pi extension. `SKILL_AUTHORING_STANDARDS` is the canonical exported prompt contract; the old `PI_EXTENSION_AUTHORING_STANDARDS` name remains only as a compatibility alias.
 
 Relevant tests: `tests/learn.test.ts`.
 
@@ -96,11 +96,17 @@ Recent history hardened this area: job status sets, pid helpers, stale worker ha
 
 Relevant tests: `tests/claude-pi-*.test.ts` and `tests/helpers/process.ts`.
 
+## Pi subagent definitions
+
+`pi-subagents/` contains repo-owned overrides for the builtin `pi-subagents` roles. Each `agents/*.md` file owns the role frontmatter and system prompt; local model, thinking, and tool selection remain in `~/.pi/agent/settings.json`. The local mapping preserves upstream allowlists while translating `web_search` to `exa_search` and combining `fetch_content`/`get_search_content` into `webfetch`.
+
+Run `./create-pi-subagent-symlinks.sh` to create user-scope symlinks under `~/.pi/agent/agents/`. The installer refuses to replace existing files or unrelated symlinks. Restart Pi or use `/reload`, then verify with `/subagents-doctor` and `/subagents-models researcher`. See `pi-subagents/README.md` for upstream provenance and update rules.
+
 ## Skills and prompts
 
 - `skills/fusion/SKILL.md` teaches agents to curate code bundles for `/fusion --file` because Fusion inner models cannot read the filesystem.
 - `skills/claude-review/SKILL.md` supports Claude review workflows.
-- `prompts/large-coding-task.md` and `prompts/reflect.md` are shipped via the Pi package.
+- `prompts/large-coding-task.md`, `prompts/reflect.md`, and `prompts/fresh-eyes.md` are shipped via the Pi package.
 
 ## Change guidance
 

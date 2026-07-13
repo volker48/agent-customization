@@ -16,6 +16,7 @@ This repository is a customization bundle for multiple AI coding-agent harnesses
 | --- | --- |
 | `pi-extensions/` | Pi extensions and shared TypeScript cores. Main domains: Fusion, remote control, web tools, Claude review, RTK, autoname, learn, sound notifications. |
 | `pi-extensions/lib/` | Shared deep modules such as Exa search and webfetch cores. Extension files own registration and schemas; cores own reusable behavior. |
+| `pi-subagents/` | Repo-owned overrides for builtin Pi subagent role prompts, installed as user-scope symlinks. |
 | `opencode-plugins/` | OpenCode plugin implementations, currently including sound notifications. |
 | `claude-hooks/` | Claude Code hook config and scripts, especially sound playback. |
 | `plugins/pi/` | Claude Code plugin commands and Node companion scripts that delegate implementation/review workflows to Pi. |
@@ -41,7 +42,7 @@ The remote CLI is exposed as `pi-remote` via `pi-extensions/remote/cli.ts`.
 Several tools split registration from behavior:
 
 - `pi-extensions/exa-search.ts` registers standalone `exa_search`; `pi-extensions/lib/exa-search-core.ts` performs the API request, formatting, limits, and truncation.
-- `pi-extensions/webfetch.ts` registers standalone `webfetch`; `pi-extensions/lib/webfetch-core.ts` owns URL normalization, private-host protections, redirects, HTML-to-markdown conversion, GitHub handling, truncation, and temp-file spill behavior.
+- `pi-extensions/webfetch.ts` registers standalone `webfetch`; `pi-extensions/lib/webfetch-core.ts` owns URL normalization, private-host protections, redirects, HTML-to-markdown conversion, GitHub and GitLab handling, truncation, and temp-file spill behavior.
 - `pi-extensions/fusion/tools.ts` reuses those cores while presenting a narrower inner-model schema.
 
 This split is intentional: public/standalone tool schemas can differ from restricted inner schemas while sharing audited low-level behavior.
