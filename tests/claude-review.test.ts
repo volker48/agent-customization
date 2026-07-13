@@ -169,6 +169,21 @@ describe("claude review arguments", () => {
     expect(prompt).toContain(CLAUDE_REVIEW_RESULT_START);
   });
 
+  it("pins wait-mode reviews to the current Opus model", () => {
+    expect(claudeArgs("/code-review medium")).toEqual([
+      "--permission-mode",
+      "auto",
+      "--model",
+      "opus",
+      "--tools",
+      "Bash,Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill",
+      "--allowed-tools",
+      "Bash,Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill",
+      "-p",
+      "/code-review medium",
+    ]);
+  });
+
   it("separates the background prompt from variadic Claude tool options", () => {
     expect(claudeBackgroundArgs("/code-review high", "review-session", "Read")).toEqual([
       "--bg",
@@ -176,6 +191,8 @@ describe("claude review arguments", () => {
       "review-session",
       "--permission-mode",
       "auto",
+      "--model",
+      "opus",
       "--tools",
       "Read",
       "--allowed-tools",

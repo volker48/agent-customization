@@ -1,3 +1,4 @@
+export const DEFAULT_CLAUDE_MODEL = "opus";
 export const DEFAULT_REVIEW_LEVEL = "medium";
 export const REVIEW_LEVELS = ["low", "medium", "high", "max"] as const;
 export const CLAUDE_REVIEW_HAS_FINDINGS_START = "<CLAUDE_REVIEW_HAS_FINDINGS>";

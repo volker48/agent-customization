@@ -9,6 +9,7 @@ import {
   CLAUDE_REVIEW_HAS_FINDINGS_START,
   CLAUDE_REVIEW_RESULT_END,
   CLAUDE_REVIEW_RESULT_START,
+  DEFAULT_CLAUDE_MODEL,
 } from "./args.js";
 import {
   type ClaudeReviewJob,
@@ -61,6 +62,8 @@ export function claudeBackgroundArgs(
     sessionName,
     "--permission-mode",
     "auto",
+    "--model",
+    DEFAULT_CLAUDE_MODEL,
     "--tools",
     reviewTools,
     "--allowed-tools",

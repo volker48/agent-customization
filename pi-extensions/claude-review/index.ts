@@ -9,6 +9,7 @@ import { Markdown } from "@earendil-works/pi-tui";
 
 import {
   buildCodeReviewPrompt,
+  DEFAULT_CLAUDE_MODEL,
   parseClaudeReviewArgs,
   parseClaudeReviewJobArgs,
   parseClaudeReviewResultArgs,
@@ -48,6 +49,8 @@ function claudeArgs(prompt: string): string[] {
   return [
     "--permission-mode",
     "auto",
+    "--model",
+    DEFAULT_CLAUDE_MODEL,
     "--tools",
     REVIEW_TOOLS,
     "--allowed-tools",
