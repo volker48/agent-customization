@@ -244,6 +244,7 @@ public struct ConversationView: View {
 
   private var canStop: Bool {
     store.attachedSessionID == session.sessionID
+      && store.connectionState != .disconnected
   }
 
   private var connectionStatusBanner: some View {
