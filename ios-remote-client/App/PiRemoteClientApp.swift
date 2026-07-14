@@ -26,6 +26,7 @@ private struct RootView: View {
         )
       } else if let client {
         ClientView(client: client, savedTicket: savedTicket)
+          .id(savedTicket)
       } else {
         ProgressView("Starting Pi Remote…")
       }
@@ -66,6 +67,13 @@ private struct ClientView: View {
     Group {
       if !savedTicket.isEmpty, let sessionStore {
         SessionListView(store: sessionStore)
+          .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+              Button("Re-pair") {
+                savedTicket = ""
+              }
+            }
+          }
       } else {
         PairingView(viewModel: pairingViewModel)
           .onChange(of: pairingViewModel.isPaired) { _, isPaired in

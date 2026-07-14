@@ -198,6 +198,7 @@ public struct ConversationView: View {
       Composer(
         text: $draft,
         canSend: canSendPrompt,
+        canStop: canStop,
         onSend: sendPrompt,
         onStop: stopTurn
       )
@@ -239,6 +240,10 @@ public struct ConversationView: View {
 
   private var canSendPrompt: Bool {
     store.attachedSessionID == session.sessionID && store.connectionState == .connected
+  }
+
+  private var canStop: Bool {
+    store.attachedSessionID == session.sessionID
   }
 
   private var connectionStatusBanner: some View {
@@ -464,6 +469,7 @@ private struct ConnectionStatusBanner: View {
 private struct Composer: View {
   @Binding var text: String
   let canSend: Bool
+  let canStop: Bool
   let onSend: (String) async -> Bool
   let onStop: () async -> Void
   @State private var isSending = false
@@ -485,7 +491,7 @@ private struct Composer: View {
       Button("Stop", role: .destructive) {
         stop()
       }
-      .disabled(!canSend || isStopping)
+      .disabled(!canStop || isStopping)
     }
     .padding()
     .background(.regularMaterial)

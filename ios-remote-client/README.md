@@ -32,7 +32,8 @@ run entirely from a terminal; do not open Xcode.
 The scripts select `/Applications/Xcode.app/Contents/Developer` automatically. Set
 `DEVELOPER_DIR` when Xcode is installed elsewhere. The generated
 `PiRemoteClient.xcodeproj` and `App/Info.plist` are disposable and ignored by git;
-`project.yml` is the source of truth.
+`project.yml` is the source of truth. The app's Re-pair toolbar action clears a saved
+ticket when the daemon identity or allowlist changes.
 
 For a signed device build, copy `Local.xcconfig.example` to `Local.xcconfig` and set
 your Apple Developer Team ID, or export `DEVELOPMENT_TEAM` for one command. The

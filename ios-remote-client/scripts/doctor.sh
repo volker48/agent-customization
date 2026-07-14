@@ -9,7 +9,8 @@ require_command xcrun
 
 printf 'Developer directory: %s\n' "$DEVELOPER_DIR"
 xcodebuild -version
-xcodebuild -checkFirstLaunchStatus
+first_launch_status=0
+xcodebuild -checkFirstLaunchStatus || first_launch_status=$?
 xcodegen --version
 printf 'Swift: '
 swift --version | head -1
@@ -19,3 +20,7 @@ printf 'iOS Simulator SDK: '
 xcrun --sdk iphonesimulator --show-sdk-version
 printf '\nAvailable simulator runtimes:\n'
 xcrun simctl list runtimes
+
+if ((first_launch_status != 0)); then
+	fail "Xcode first-launch setup is incomplete; run xcodebuild -runFirstLaunch."
+fi

@@ -1,7 +1,9 @@
 # Pi Remote Client development
 
-Keep iOS work headless. Xcode.app must be installed for Apple SDKs, but do not open
-its GUI or commit generated `PiRemoteClient.xcodeproj` files.
+Keep recurring iOS work headless. Xcode.app must be installed for Apple SDKs, but do
+not open its GUI during normal development or commit generated
+`PiRemoteClient.xcodeproj` files. One-time Apple account and provisioning setup may
+require Xcode Settings → Accounts; all subsequent commands are terminal-only.
 
 ## Commands
 
