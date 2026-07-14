@@ -19,11 +19,15 @@ private struct RootView: View {
   var body: some View {
     Group {
       if let startupError {
-        ContentUnavailableView(
-          "Unable to Start",
-          systemImage: "exclamationmark.triangle",
-          description: Text(startupError)
-        )
+        ContentUnavailableView {
+          Label("Unable to Start", systemImage: "exclamationmark.triangle")
+        } description: {
+          Text(startupError)
+        } actions: {
+          Button("Retry") {
+            self.startupError = nil
+          }
+        }
       } else if let client {
         ClientView(client: client, savedTicket: savedTicket)
           .id(savedTicket)
@@ -31,7 +35,10 @@ private struct RootView: View {
         ProgressView("Starting Pi Remote…")
       }
     }
-    .task {
+    .task(id: startupError == nil) {
+      guard startupError == nil, client == nil else {
+        return
+      }
       await startClient()
     }
   }
