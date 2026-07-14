@@ -36,20 +36,9 @@ Every changed line should trace back to the user’s request.
 
 Hard limits unless the project explicitly differs:
 
-- ≤ 50 lines per function.
-- Cyclomatic complexity ≤ 8.
-- ≤ 5 positional params, ≤ 12 branches, ≤ 6 returns.
-- 100-character line length.
-- No `..` relative imports.
 - Google-style docstrings for non-trivial public APIs.
-- No scheduled CI without code changes.
 - All changed code must pass type checking.
 - No ignored type errors without justification.
-
-Follow existing project test conventions. For new projects:
-
-- Python: `tests/`
-- Node/TypeScript: colocated `*.test.ts`
 
 ## Comments
 
@@ -70,7 +59,7 @@ Use comments for non-obvious intent, tradeoffs, or constraints.
 - Never swallow exceptions silently.
 - Include context: operation, input, and failure cause.
 
-## Error-handling philosophy
+### Error-handling philosophy
 
 Make bad states unrepresentable; don't defensively handle them.
 
@@ -100,6 +89,10 @@ Do not commit rule-breaking code. PRs and issues should be factual, not hyperbol
 
 ## Testing
 
+Follow existing project test conventions. For new projects:
+
+- Python: `tests/`
+- Node/TypeScript: colocated `*.test.ts`
 - Mock boundaries, not logic.
 - Mock only slow, non-deterministic, or external things: network, filesystem, databases, time, randomness, and services you do not control.
 - Do not mock the code under test. If a test passes with the implementation removed, it is over-mocked.
@@ -109,7 +102,6 @@ Do not commit rule-breaking code. PRs and issues should be factual, not hyperbol
 
 - Justify every new dependency.
 - Prefer standard library or existing dependencies.
-- Do not document, validate, or configure phantom features.
 - Do not hardcode local paths; use config or environment variables.
 - Verify versions against official sources before specifying them.
 - If web access is unavailable, say so instead of guessing.
