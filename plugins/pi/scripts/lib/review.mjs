@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 
 import { appendJobLog, createReviewJob, updateJobRecord } from "./jobs.mjs";
 import { PiRpcClient } from "./pi-rpc-client.mjs";
-import { DEFAULT_INTENDED_MODEL, modelRef } from "./setup.mjs";
+import { DEFAULT_INTENDED_MODEL, DEFAULT_THINKING_LEVEL, modelRef } from "./setup.mjs";
 
 export const READ_ONLY_TOOLS = "read,grep,find,ls";
 const DEFAULT_AGENT_END_TIMEOUT_MS = 30 * 60 * 1000;
@@ -76,6 +76,8 @@ export function buildReviewPiArgs(job, options = {}) {
     "--mode",
     "rpc",
     ...modelArgs(options.model ?? process.env.PI_REVIEW_MODEL ?? DEFAULT_INTENDED_MODEL),
+    "--thinking",
+    options.thinkingLevel ?? process.env.PI_REVIEW_THINKING_LEVEL ?? DEFAULT_THINKING_LEVEL,
     "--session-dir",
     job.sessionRoot,
     "--no-session",

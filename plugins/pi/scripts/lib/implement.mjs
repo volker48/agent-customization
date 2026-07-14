@@ -13,7 +13,7 @@ import {
 } from "./jobs.mjs";
 import { PiRpcClient } from "./pi-rpc-client.mjs";
 import { terminateProcessTree } from "./process-tree.mjs";
-import { DEFAULT_INTENDED_MODEL, modelRef } from "./setup.mjs";
+import { DEFAULT_INTENDED_MODEL, DEFAULT_THINKING_LEVEL, modelRef } from "./setup.mjs";
 
 const WRITE_CAPABLE_TOOLS = "read,grep,find,ls,bash,edit,write";
 const DEFAULT_AGENT_END_TIMEOUT_MS = 30 * 60 * 1000;
@@ -250,7 +250,10 @@ function implementWorkerEnv(model) {
 
 function selectedModel(options) {
   return (
-    options.model ?? options.parentJob?.model ?? process.env.PI_IMPLEMENT_MODEL ?? DEFAULT_INTENDED_MODEL
+    options.model ??
+    options.parentJob?.model ??
+    process.env.PI_IMPLEMENT_MODEL ??
+    DEFAULT_INTENDED_MODEL
   );
 }
 
@@ -327,6 +330,8 @@ function buildPiArgs(job, options) {
     "--mode",
     "rpc",
     ...modelArgs(selectedModel(options)),
+    "--thinking",
+    options.thinkingLevel ?? process.env.PI_IMPLEMENT_THINKING_LEVEL ?? DEFAULT_THINKING_LEVEL,
     "--session-dir",
     job.sessionRoot,
     ...sessionArgs(options.parentJob),
