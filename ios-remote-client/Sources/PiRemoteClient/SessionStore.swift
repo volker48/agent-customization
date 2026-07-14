@@ -145,6 +145,9 @@ public struct SessionListView: View {
           ContentUnavailableView("No Remote Sessions", systemImage: "iphone.slash")
         }
       }
+      .safeAreaInset(edge: .top) {
+        feedErrorBanner
+      }
       .refreshable {
         await store.refresh()
       }
@@ -159,6 +162,13 @@ public struct SessionListView: View {
           registryPollingIsActive
         }
       }
+    }
+  }
+
+  @ViewBuilder
+  private var feedErrorBanner: some View {
+    if let message = store.feedErrorMessage {
+      ErrorBanner(message: message)
     }
   }
 
@@ -188,6 +198,7 @@ public struct ConversationView: View {
       Composer(
         text: $draft,
         canSend: canSendPrompt,
+        canStop: canStop,
         onSend: sendPrompt,
         onStop: stopTurn
       )
@@ -231,9 +242,22 @@ public struct ConversationView: View {
     store.attachedSessionID == session.sessionID && store.connectionState == .connected
   }
 
+  private var canStop: Bool {
+    store.attachedSessionID == session.sessionID
+      && store.connectionState != .disconnected
+  }
+
   private var connectionStatusBanner: some View {
-    ConnectionStatusBanner(state: store.connectionState)
-      .padding(.vertical, 8)
+    VStack(spacing: 6) {
+      if let message = store.feedErrorMessage {
+        ErrorBanner(message: message)
+      }
+      if let message = store.steeringErrorMessage {
+        ErrorBanner(message: message)
+      }
+      ConnectionStatusBanner(state: store.connectionState)
+    }
+    .padding(.vertical, 8)
   }
 
   private func sendPrompt(_ text: String) async -> Bool {
@@ -378,6 +402,26 @@ private struct SessionRow: View {
 }
 
 @available(iOS 17.5, macOS 14.5, *)
+private struct ErrorBanner: View {
+  let message: String
+
+  var body: some View {
+    Label {
+      Text(message)
+        .multilineTextAlignment(.leading)
+    } icon: {
+      Image(systemName: "exclamationmark.triangle.fill")
+    }
+    .font(.caption)
+    .foregroundStyle(.red)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(.horizontal, 12)
+    .padding(.vertical, 8)
+    .background(.red.opacity(0.12))
+  }
+}
+
+@available(iOS 17.5, macOS 14.5, *)
 private struct ConnectionStatusBanner: View {
   let state: ConnectionState
 
@@ -426,6 +470,7 @@ private struct ConnectionStatusBanner: View {
 private struct Composer: View {
   @Binding var text: String
   let canSend: Bool
+  let canStop: Bool
   let onSend: (String) async -> Bool
   let onStop: () async -> Void
   @State private var isSending = false
@@ -447,7 +492,7 @@ private struct Composer: View {
       Button("Stop", role: .destructive) {
         stop()
       }
-      .disabled(isStopping)
+      .disabled(!canStop || isStopping)
     }
     .padding()
     .background(.regularMaterial)

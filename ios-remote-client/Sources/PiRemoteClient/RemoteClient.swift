@@ -115,10 +115,12 @@ public actor RemoteClient {
     return transport.stream(ticket: ticket, envelopes: [envelope])
   }
 
+  /// Sends a prompt frame; success confirms transport completion, not agent processing.
   public func sendPrompt(sessionID: String, text: String) async throws {
     _ = try await requestSession(.prompt, sessionID: sessionID, payload: ["text": .string(text)])
   }
 
+  /// Sends an abort frame; success confirms transport completion, not agent interruption.
   public func abort(sessionID: String) async throws {
     _ = try await requestSession(.abort, sessionID: sessionID, payload: .object([]))
   }

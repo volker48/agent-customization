@@ -49,7 +49,7 @@ jobs:
         run: pnpm test:unit
 
   swift-remote-control:
-    name: Swift format and remote control unit tests
+    name: Swift checks and iOS simulator build
     runs-on: macos-26
 
     steps:
@@ -58,13 +58,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Check Swift formatting
-        working-directory: ios-remote-client
-        run: |
-          swift format lint --strict --recursive \
-            --configuration '{"rules":{"NoAccessLevelOnExtensionDeclaration":false}}' \
-            Sources Tests Package.swift
+      - name: Install XcodeGen
+        run: brew install xcodegen
 
-      - name: Run Swift unit tests
+      - name: Check Swift formatting and run unit tests
         working-directory: ios-remote-client
-        run: swift run pi-remote-client-tests
+        run: ./scripts/test.sh
+
+      - name: Build iOS Simulator app
+        working-directory: ios-remote-client
+        run: ./scripts/build-simulator.sh

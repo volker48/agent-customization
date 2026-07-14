@@ -1,0 +1,3 @@
+// Copy this file to Local.xcconfig for signed device builds.
+// Keep Local.xcconfig out of version control.
+DEVELOPMENT_TEAM = YOUR_APPLE_DEVELOPMENT_TEAM
