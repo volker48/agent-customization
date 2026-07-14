@@ -71,6 +71,8 @@ not part of this local device workflow; add that as a separate export pipeline w
 those distribution requirements exist. The local development target intentionally has
 no AppIcon asset; add one before distributing through TestFlight or the App Store.
 
+See <https://scottwillsey.com/building-and-shipping-mac-and-ios-apps-without-ever-opening-xcode/> for more info.
+
 ## Dependency caveat
 
 The pinned `iroh-ffi` 1.0.0 prebuilt framework can emit Xcode 26 linker warnings
