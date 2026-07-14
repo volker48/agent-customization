@@ -1,5 +1,9 @@
 node_modules/
 **/.build/
+ios-remote-client/PiRemoteClient.xcodeproj/
+ios-remote-client/build/
+ios-remote-client/App/Info.plist
+ios-remote-client/Local.xcconfig
 .iroh-connector-spike-key
 .DS_Store
 .pi-subagents/
