@@ -2,7 +2,8 @@ import { spawnSync } from "node:child_process";
 
 import { PiRpcClient } from "./pi-rpc-client.mjs";
 
-export const DEFAULT_INTENDED_MODEL = "openai-codex/gpt-5.5";
+export const DEFAULT_INTENDED_MODEL = "openai-codex/gpt-5.6-luna";
+export const DEFAULT_THINKING_LEVEL = "xhigh";
 const DEFAULT_PI_ARGS = [
   "--mode",
   "rpc",

@@ -172,6 +172,8 @@ describe("Claude Code Pi read-only review delegation", () => {
       "rpc",
       "--model",
       "anthropic/claude",
+      "--thinking",
+      "xhigh",
       "--session-dir",
       "/tmp/sessions",
       "--no-session",

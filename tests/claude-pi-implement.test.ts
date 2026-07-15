@@ -60,8 +60,8 @@ ${handlers}
 });
 function emitState(id) {
   emit({ id, type: "response", command: "get_state", success: true, data: {
-    model: { provider: "openai-codex", id: "gpt-5.5", name: "GPT 5.5" },
-    thinkingLevel: "high",
+    model: { provider: "openai-codex", id: "gpt-5.6-luna", name: "GPT 5.6 Luna" },
+    thinkingLevel: "xhigh",
     isStreaming: false,
     sessionId: "impl-session",
     sessionFile: "/tmp/impl-session.jsonl"
@@ -240,6 +240,53 @@ describe("Claude Code Pi implementation delegation", () => {
     expect(prompt).not.toContain("--model anthropic/claude-opus-4-20250514");
   });
 
+  it("lets Pi apply a per-invocation thinking suffix", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-impl-data-"));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(`#!/usr/bin/env node\n${successfulFakePi(logPath)}`);
+    await chmod(fakePi, 0o755);
+
+    const result = await runCompanion(
+      ["implement", "--wait"],
+      "--model anthropic/claude:low add the feature",
+      { ...process.env, PI_CLI: fakePi, PI_COMPANION_DATA_DIR: dataDir },
+    );
+    const records = (await readFile(logPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const argv = records.find((record) => record.type === "argv").argv;
+
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(argv).toContain("anthropic/claude:low");
+    expect(argv).not.toContain("--thinking");
+  });
+
+  it("keeps the default thinking level for model ids with non-thinking colon suffixes", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-impl-data-"));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(`#!/usr/bin/env node\n${successfulFakePi(logPath)}`);
+    await chmod(fakePi, 0o755);
+
+    const result = await runCompanion(
+      ["implement", "--wait"],
+      "--model ollama/llama3.1:8b add the feature",
+      { ...process.env, PI_CLI: fakePi, PI_COMPANION_DATA_DIR: dataDir },
+    );
+    const records = (await readFile(logPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const argv = records.find((record) => record.type === "argv").argv;
+    const thinkingIndex = argv.indexOf("--thinking");
+
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(argv).toContain("ollama/llama3.1:8b");
+    expect(argv[thinkingIndex + 1]).toBe("xhigh");
+  });
+
   it("rejects missing model values from argv and stdin flags", async () => {
     const env = { ...process.env, PI_CLI: "/definitely/missing/pi" };
 
@@ -375,13 +422,15 @@ describe("Claude Code Pi implementation delegation", () => {
     expect(result.finalText).toContain("Implemented the requested change");
     expect(result.piTerminated).toBe(true);
     expect(result.report).toContain("Status: completed");
-    expect(result.report).toContain("Model: openai-codex/gpt-5.5");
+    expect(result.report).toContain("Model: openai-codex/gpt-5.6-luna");
     expect(argv).toEqual([
       fakePi,
       "--mode",
       "rpc",
       "--model",
-      "openai-codex/gpt-5.5",
+      "openai-codex/gpt-5.6-luna",
+      "--thinking",
+      "xhigh",
       "--session-dir",
       join(dataDir, "pi-sessions"),
       "--no-extensions",
@@ -403,7 +452,7 @@ describe("Claude Code Pi implementation delegation", () => {
       workspaceRoot: "/repo-under-test",
       sessionId: "impl-session",
       piSessionFile: "/tmp/impl-session.jsonl",
-      model: "openai-codex/gpt-5.5",
+      model: "openai-codex/gpt-5.6-luna",
       result: result.finalText,
     });
   });
