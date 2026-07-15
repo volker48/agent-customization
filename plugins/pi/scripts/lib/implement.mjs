@@ -19,6 +19,7 @@ const WRITE_CAPABLE_TOOLS = "read,grep,find,ls,bash,edit,write";
 const DEFAULT_AGENT_END_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_TERMINATE_TIMEOUT_MS = 10_000;
 const DEFAULT_CANCEL_POLL_MS = 100;
+const THINKING_LEVEL_SUFFIX = /:(?:off|minimal|low|medium|high|xhigh|max)$/;
 const TERMINAL_STATUSES = new Set(["cancelled", "completed", "failed"]);
 const execFileAsync = promisify(execFile);
 
@@ -325,13 +326,13 @@ async function terminateCancellationProcess(job) {
 }
 
 function buildPiArgs(job, options) {
+  const model = selectedModel(options);
   return [
     ...(options.piPrefixArgs ?? []),
     "--mode",
     "rpc",
-    ...modelArgs(selectedModel(options)),
-    "--thinking",
-    options.thinkingLevel ?? process.env.PI_IMPLEMENT_THINKING_LEVEL ?? DEFAULT_THINKING_LEVEL,
+    ...modelArgs(model),
+    ...thinkingArgs(model, options),
     "--session-dir",
     job.sessionRoot,
     ...sessionArgs(options.parentJob),
@@ -349,6 +350,13 @@ function sessionArgs(parentJob) {
 
 function modelArgs(model) {
   return model ? ["--model", model] : [];
+}
+
+function thinkingArgs(model, options) {
+  const configuredLevel = options.thinkingLevel ?? process.env.PI_IMPLEMENT_THINKING_LEVEL;
+  if (configuredLevel !== undefined) return ["--thinking", configuredLevel];
+  if (THINKING_LEVEL_SUFFIX.test(model ?? "")) return [];
+  return ["--thinking", DEFAULT_THINKING_LEVEL];
 }
 
 async function requestData(client, command) {

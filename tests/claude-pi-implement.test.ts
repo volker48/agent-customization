@@ -240,6 +240,53 @@ describe("Claude Code Pi implementation delegation", () => {
     expect(prompt).not.toContain("--model anthropic/claude-opus-4-20250514");
   });
 
+  it("lets Pi apply a per-invocation thinking suffix", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-impl-data-"));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(`#!/usr/bin/env node\n${successfulFakePi(logPath)}`);
+    await chmod(fakePi, 0o755);
+
+    const result = await runCompanion(
+      ["implement", "--wait"],
+      "--model anthropic/claude:low add the feature",
+      { ...process.env, PI_CLI: fakePi, PI_COMPANION_DATA_DIR: dataDir },
+    );
+    const records = (await readFile(logPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const argv = records.find((record) => record.type === "argv").argv;
+
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(argv).toContain("anthropic/claude:low");
+    expect(argv).not.toContain("--thinking");
+  });
+
+  it("keeps the default thinking level for model ids with non-thinking colon suffixes", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-impl-data-"));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(`#!/usr/bin/env node\n${successfulFakePi(logPath)}`);
+    await chmod(fakePi, 0o755);
+
+    const result = await runCompanion(
+      ["implement", "--wait"],
+      "--model ollama/llama3.1:8b add the feature",
+      { ...process.env, PI_CLI: fakePi, PI_COMPANION_DATA_DIR: dataDir },
+    );
+    const records = (await readFile(logPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const argv = records.find((record) => record.type === "argv").argv;
+    const thinkingIndex = argv.indexOf("--thinking");
+
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(argv).toContain("ollama/llama3.1:8b");
+    expect(argv[thinkingIndex + 1]).toBe("xhigh");
+  });
+
   it("rejects missing model values from argv and stdin flags", async () => {
     const env = { ...process.env, PI_CLI: "/definitely/missing/pi" };
 

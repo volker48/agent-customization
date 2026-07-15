@@ -175,6 +175,40 @@ describe("Pi implementation continuation", () => {
     expect(result.report).toContain("Parent job: impl-latest");
   });
 
+  it("lets Pi apply a per-invocation thinking suffix during continuation", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-continue-data-"));
+    const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-continue-workspace-")));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(logPath);
+    await storedJob({
+      dataDir,
+      id: "impl-parent",
+      sessionFile: "/tmp/parent-session.jsonl",
+      sessionId: "parent-session",
+      updatedAt: "2026-07-04T00:00:00.000Z",
+      workspaceRoot,
+    });
+
+    const result = await runContinue("impl-parent", {
+      dataDir,
+      instruction: "continue with low thinking",
+      model: "anthropic/claude:low",
+      piCommand: process.execPath,
+      piPrefixArgs: [fakePi],
+      timeoutMs: 1_000,
+      workspaceRoot,
+    });
+    const argv = (await readFile(logPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .find((record) => record.type === "argv").argv;
+
+    expect(result.ok).toBe(true);
+    expect(argv).toContain("anthropic/claude:low");
+    expect(argv).not.toContain("--thinking");
+  });
+
   it("skips newer in-flight jobs when continuing latest", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "pi-continue-data-"));
     const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-continue-workspace-")));
