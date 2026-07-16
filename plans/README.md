@@ -26,7 +26,7 @@ row here.
 |-----|--------------------------------------------------|----------|--------|------|----------|------------|--------|
 | 001 | Remote session registry cleanup on socket close  | P1       | S      | LOW  | bug      | none       | DONE   |
 | 002 | Harden pairing — atomic allowlist + attempt cap  | P1       | S      | LOW  | security | none       | DONE   |
-| 006 | Webfetch SSRF: validate resolved IPs, not string | P1       | M      | MED  | security | none       | TODO   |
+| 006 | Webfetch SSRF: validate resolved IPs, not string | P1       | M      | MED  | security | none       | DONE   |
 | 003 | Accept-loop backoff (no busy-spin)               | P2       | S      | LOW  | bug      | none       | TODO   |
 | 004 | Extend lint/format scope to plugins & scripts    | P2       | S      | LOW  | dx       | none       | TODO   |
 | 005 | Remove unused GitLab CI, keep full test coverage | P2       | S      | LOW  | dx       | none       | TODO   |

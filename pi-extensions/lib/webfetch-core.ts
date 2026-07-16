@@ -19,6 +19,7 @@ import {
   truncateHead,
   type TruncationResult,
 } from "@earendil-works/pi-coding-agent";
+import { lookup } from "node:dns/promises";
 import { realpathSync } from "node:fs";
 import { mkdtemp, open, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -537,6 +538,39 @@ function getPrivateHostBlockReason(hostname: string): string | undefined {
     return `Blocked private IP host: ${normalized}`;
   }
 
+  return undefined;
+}
+
+export type HostLookup = (hostname: string) => Promise<{ address: string }[]>;
+
+const defaultHostLookup: HostLookup = (hostname) => lookup(hostname, { all: true });
+
+export async function getResolvedHostBlockReason(
+  hostname: string,
+  resolveHost: HostLookup = defaultHostLookup,
+): Promise<string | undefined> {
+  const literalReason = getPrivateHostBlockReason(hostname);
+  if (literalReason) return literalReason;
+
+  if (shouldAllowPrivateHosts()) return undefined;
+
+  const normalized = normalizeHostname(hostname);
+  if (!normalized) return "Target host is empty";
+
+  let addresses: { address: string }[];
+  try {
+    addresses = await resolveHost(normalized);
+  } catch {
+    return `Could not resolve host: ${normalized}`;
+  }
+  if (addresses.length === 0) {
+    return `Could not resolve host: ${normalized}`;
+  }
+  for (const { address } of addresses) {
+    if (isPrivateIPv4(address) || isPrivateIPv6(address)) {
+      return `Blocked host resolving to private/internal address: ${normalized}`;
+    }
+  }
   return undefined;
 }
 
@@ -1409,7 +1443,7 @@ async function fetchWithRedirects(args: {
     }
 
     const nextUrl = new URL(locationHeader, currentUrl).toString();
-    const blockReason = getPrivateHostBlockReason(new URL(nextUrl).hostname);
+    const blockReason = await getResolvedHostBlockReason(new URL(nextUrl).hostname);
     if (blockReason) {
       try {
         await response.body?.cancel();
@@ -2541,7 +2575,7 @@ export async function executeWebfetch(
   const requestedFragment = targetUrl.hash ? decodeUrlFragment(targetUrl.hash) : undefined;
   targetUrl.hash = "";
 
-  const blockReason = getPrivateHostBlockReason(targetUrl.hostname);
+  const blockReason = await getResolvedHostBlockReason(targetUrl.hostname);
   if (blockReason) {
     return createToolResult({
       isError: true,
@@ -2745,7 +2779,7 @@ export async function executeWebfetch(
         continue;
       }
 
-      const privateCandidateReason = getPrivateHostBlockReason(candidateUrl.hostname);
+      const privateCandidateReason = await getResolvedHostBlockReason(candidateUrl.hostname);
       if (privateCandidateReason) {
         smartNotes.push(
           `Skipped alternate ${candidate.url}: ${privateCandidateReason.toLowerCase()}.`,

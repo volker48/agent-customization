@@ -5,6 +5,10 @@ import { Readability } from "@mozilla/readability";
 import TurndownService from "turndown";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import {
+  getResolvedHostBlockReason,
+  type HostLookup,
+} from "../pi-extensions/lib/webfetch-core.js";
 import webfetchExtension from "../pi-extensions/webfetch.js";
 
 type WebFetchParams = {
@@ -683,7 +687,7 @@ describe("webfetch extension", () => {
     const result = await getTool().execute(
       "call_headers",
       {
-        url: "https://api.example.com/data",
+        url: "https://example.com/data",
         accept: "application/json",
         headers: {
           Authorization: "Bearer super-secret",
@@ -1440,6 +1444,83 @@ describe("webfetch extension", () => {
     expect(details?.detectedJsShell).toBe(true);
     expect(details?.alternateCandidates).toContain("https://example.com/wp-json");
     expect(details?.smartNotes?.length).toBeGreaterThan(0);
+  });
+
+  it("allows hosts that resolve to a public IP", async () => {
+    const resolveHost: HostLookup = async () => [{ address: "93.184.216.34" }];
+
+    await expect(getResolvedHostBlockReason("public.example", resolveHost)).resolves.toBeUndefined();
+  });
+
+  it("blocks hosts that resolve to loopback", async () => {
+    const resolveHost: HostLookup = async () => [{ address: "127.0.0.1" }];
+
+    await expect(getResolvedHostBlockReason("public.example", resolveHost)).resolves.toBe(
+      "Blocked host resolving to private/internal address: public.example",
+    );
+  });
+
+  it("blocks hosts that resolve to cloud metadata", async () => {
+    const resolveHost: HostLookup = async () => [{ address: "169.254.169.254" }];
+
+    await expect(getResolvedHostBlockReason("public.example", resolveHost)).resolves.toBe(
+      "Blocked host resolving to private/internal address: public.example",
+    );
+  });
+
+  it("blocks hosts that resolve to RFC1918 addresses", async () => {
+    const resolveHost: HostLookup = async () => [{ address: "10.0.0.5" }];
+
+    await expect(getResolvedHostBlockReason("public.example", resolveHost)).resolves.toBe(
+      "Blocked host resolving to private/internal address: public.example",
+    );
+  });
+
+  it("blocks hosts that resolve to IPv6 loopback", async () => {
+    const resolveHost: HostLookup = async () => [{ address: "::1" }];
+
+    await expect(getResolvedHostBlockReason("public.example", resolveHost)).resolves.toBe(
+      "Blocked host resolving to private/internal address: public.example",
+    );
+  });
+
+  it("fails closed when host resolution fails", async () => {
+    const throwingResolver: HostLookup = async () => {
+      throw new Error("DNS failure");
+    };
+    const emptyResolver: HostLookup = async () => [];
+
+    await expect(getResolvedHostBlockReason("unresolvable.example", throwingResolver)).resolves.toBe(
+      "Could not resolve host: unresolvable.example",
+    );
+    await expect(getResolvedHostBlockReason("unresolvable.example", emptyResolver)).resolves.toBe(
+      "Could not resolve host: unresolvable.example",
+    );
+  });
+
+  it("allows resolved private hosts with WEBFETCH_ALLOW_PRIVATE_HOSTS=1", async () => {
+    process.env.WEBFETCH_ALLOW_PRIVATE_HOSTS = "1";
+    let resolverCalled = false;
+    const resolveHost: HostLookup = async () => {
+      resolverCalled = true;
+      return [{ address: "127.0.0.1" }];
+    };
+
+    await expect(getResolvedHostBlockReason("public.example", resolveHost)).resolves.toBeUndefined();
+    expect(resolverCalled).toBe(false);
+  });
+
+  it("blocks literal private IPs without resolving them", async () => {
+    let resolverCalled = false;
+    const resolveHost: HostLookup = async () => {
+      resolverCalled = true;
+      return [{ address: "93.184.216.34" }];
+    };
+
+    await expect(getResolvedHostBlockReason("127.0.0.1", resolveHost)).resolves.toBe(
+      "Blocked private IP host: 127.0.0.1",
+    );
+    expect(resolverCalled).toBe(false);
   });
 
   it("blocks localhost/private IP targets by default", async () => {
