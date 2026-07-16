@@ -37,8 +37,17 @@ const DAEMON_SOCKET_FILE = "daemon.sock";
 const OWNER_ONLY_DIRECTORY_MODE = 0o700;
 const OWNER_ONLY_FILE_MODE = 0o600;
 const UNAUTHENTICATED_READ_TIMEOUT_MS = 30_000;
+const ACCEPT_BACKOFF_BASE_MS = 50;
+const ACCEPT_BACKOFF_MAX_MS = 1000;
 const REMOTE_CLOSE_ERROR_CODE = 0n;
 const READ_TIMEOUT_CLOSE_REASON = Array.from(Buffer.from("read timeout", "utf8"));
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
 
 type AcceptedConnection = Awaited<ReturnType<typeof acceptConnection>>;
 
@@ -114,14 +123,19 @@ async function acceptConnections(
   streamingAttachCounts: Map<string, number>,
   isClosed: () => boolean,
 ): Promise<void> {
+  let backoffMs = 0;
   while (!isClosed()) {
     try {
       const connection = await acceptConnection(endpoint);
+      backoffMs = 0;
       void handleConnection(connection, ipc, allowlist, pairingWindow, streamingAttachCounts).catch(
         () => undefined,
       );
     } catch {
       if (isClosed()) return;
+      backoffMs =
+        backoffMs === 0 ? ACCEPT_BACKOFF_BASE_MS : Math.min(backoffMs * 2, ACCEPT_BACKOFF_MAX_MS);
+      await delay(backoffMs);
     }
   }
 }
