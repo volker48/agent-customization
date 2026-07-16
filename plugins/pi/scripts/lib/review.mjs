@@ -48,7 +48,7 @@ export async function runReview(options = {}) {
 }
 
 export async function collectGitContext(workspaceRoot, options = {}) {
-  const limits = { ...DEFAULT_CONTEXT_LIMITS, ...(options.limits ?? {}) };
+  const limits = { ...DEFAULT_CONTEXT_LIMITS, ...options.limits };
   const notes = [];
   const status = await git(workspaceRoot, ["status", "--short", "--untracked-files=all"]);
   const ignored = await git(workspaceRoot, ["status", "--ignored", "--short"], {

@@ -236,7 +236,9 @@ async function main() {
   const expectedRtkBin = requestedRtkBin ?? "rtk";
   const expectedRewrite = `${expectedRtkBin} git status`;
   if (rewrite?.rewrittenCommand === expectedRewrite) {
-    console.log(`[rtk-verify] SUCCESS: tool result details recorded rewrite to \`${expectedRewrite}\`.`);
+    console.log(
+      `[rtk-verify] SUCCESS: tool result details recorded rewrite to \`${expectedRewrite}\`.`,
+    );
   } else {
     throw new Error(
       `[rtk-verify] Expected tool result details to contain rewritten command \`${expectedRewrite}\`, got: ${JSON.stringify(rewrite)}`,

@@ -199,7 +199,7 @@ async function runContinueCommand(args) {
   }
   const selector = parsedArgs.hasSelector
     ? parsedArgs.selector
-    : parsedInput.selector ?? parsedArgs.selector;
+    : (parsedInput.selector ?? parsedArgs.selector);
   await printResult(
     await runContinue(selector, {
       instruction: parsedInput.instruction,
