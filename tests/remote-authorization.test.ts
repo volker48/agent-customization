@@ -49,6 +49,18 @@ describe("remote authorization", () => {
     );
   });
 
+  it("preserves concurrent allowlist additions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-remote-auth-"));
+    const allowlist = new FileNodeAllowlist(root);
+
+    await Promise.all([allowlist.add("node-a"), allowlist.add("node-b")]);
+
+    await expect(allowlist.has("node-a")).resolves.toBe(true);
+    await expect(allowlist.has("node-b")).resolves.toBe(true);
+    const contents = await readFile(join(root, "allowed-node-ids.json"), "utf8");
+    expect(JSON.parse(contents)).toHaveLength(2);
+  });
+
   it("rejects unpaired session data before it is routed", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-remote-auth-"));
     const allowlist = new FileNodeAllowlist(root);
@@ -101,6 +113,19 @@ describe("remote authorization", () => {
       }),
     ).resolves.toEqual({ accepted: true, mode: "pairing" });
     await expect(allowlist.has("node-a")).resolves.toBe(true);
+  });
+
+  it("disarms pairing after too many failed attempts and resets on re-arm", () => {
+    const window = new PairingWindow(() => "123-456");
+    window.arm();
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      expect(window.verify("000-000")).toBe(false);
+    }
+    expect(window.verify("123-456")).toBe(false);
+
+    window.arm();
+    expect(window.verify("123-456")).toBe(true);
   });
 
   it("accepts a paired node id with no code", async () => {
