@@ -29,7 +29,7 @@ row here.
 | 006 | Webfetch SSRF: validate resolved IPs, not string | P1       | M      | MED  | security | none       | DONE   |
 | 003 | Accept-loop backoff (no busy-spin)               | P2       | S      | LOW  | bug      | none       | DONE   |
 | 004 | Extend lint/format scope to plugins & scripts    | P2       | S      | LOW  | dx       | none       | DONE   |
-| 005 | Remove unused GitLab CI, keep full test coverage | P2       | S      | LOW  | dx       | none       | TODO   |
+| 005 | Remove unused GitLab CI, keep full test coverage | P2       | S      | LOW  | dx       | none       | DONE   |
 
 ## Recommended execution order
 
