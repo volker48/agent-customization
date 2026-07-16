@@ -5,10 +5,13 @@ import { Readability } from "@mozilla/readability";
 import TurndownService from "turndown";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import {
-  getResolvedHostBlockReason,
-  type HostLookup,
-} from "../pi-extensions/lib/webfetch-core.js";
+const dnsLookupMock = vi.hoisted(() =>
+  vi.fn(async () => [{ address: "93.184.216.34", family: 4 }] as const),
+);
+
+vi.mock("node:dns/promises", () => ({ lookup: dnsLookupMock }));
+
+import { getResolvedHostBlockReason, type HostLookup } from "../pi-extensions/lib/webfetch-core.js";
 import webfetchExtension from "../pi-extensions/webfetch.js";
 
 type WebFetchParams = {
@@ -99,6 +102,7 @@ describe("webfetch extension", () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    dnsLookupMock.mockClear();
     delete process.env.WEBFETCH_ALLOW_PRIVATE_HOSTS;
     delete process.env.GITHUB_TOKEN;
     delete process.env.GH_TOKEN;
