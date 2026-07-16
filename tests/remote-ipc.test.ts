@@ -83,6 +83,7 @@ describe("remote Unix-socket IPC", () => {
   it("drops a session on shutdown and emits a session_ended control frame", async () => {
     const socketPath = await tempSocketPath();
     const controlFrames: IpcEnvelope[] = [];
+    const subscribedFrames: IpcEnvelope[] = [];
     const daemon = await startIpcDaemonServer(socketPath, {
       onControlFrame: (frame) => controlFrames.push(frame),
     });
@@ -94,16 +95,59 @@ describe("remote Unix-socket IPC", () => {
         cwd: "/repo",
       });
       await daemon.waitForSession("session-1");
+      const unsubscribe = daemon.subscribe((frame) => subscribedFrames.push(frame));
 
-      await extension.send({ sessionId: "session-1", type: "session_shutdown", payload: {} });
-      await daemon.waitForSessionEnd("session-1");
+      try {
+        await extension.send({ sessionId: "session-1", type: "session_shutdown", payload: {} });
+        await daemon.waitForSessionEnd("session-1");
+
+        expect(daemon.registry.get("session-1")).toBeUndefined();
+        expect(controlFrames).toEqual([
+          { sessionId: null, type: "session_ended", payload: { sessionId: "session-1" } },
+        ]);
+        expect(
+          subscribedFrames.filter(
+            (frame) => frame.type === "session_shutdown" || frame.type === "session_ended",
+          ),
+        ).toEqual([
+          { sessionId: "session-1", type: "session_shutdown", payload: {} },
+          { sessionId: null, type: "session_ended", payload: { sessionId: "session-1" } },
+        ]);
+        expect(subscribedFrames.filter((frame) => frame.type === "session_ended")).toHaveLength(1);
+      } finally {
+        unsubscribe();
+        await extension.close();
+      }
+    } finally {
+      await daemon.close();
+    }
+  });
+
+  it("abrupt socket close removes the session from the registry, emits a session_ended frame, and resolves waitForSessionEnd", async () => {
+    const socketPath = await tempSocketPath();
+    const daemon = await startIpcDaemonServer(socketPath);
+    const frames: IpcEnvelope[] = [];
+    const unsubscribe = daemon.subscribe((frame) => frames.push(frame));
+
+    try {
+      const extension = await connectIpcExtension(socketPath, {
+        sessionId: "session-1",
+        name: "Work session",
+        cwd: "/repo",
+      });
+      await daemon.waitForSession("session-1");
+      const endWaiter = daemon.waitForSessionEnd("session-1");
+
+      await extension.close();
+      await endWaiter;
 
       expect(daemon.registry.get("session-1")).toBeUndefined();
-      expect(controlFrames).toEqual([
+      expect(frames.filter((frame) => frame.type === "session_shutdown")).toHaveLength(0);
+      expect(frames.filter((frame) => frame.type === "session_ended")).toEqual([
         { sessionId: null, type: "session_ended", payload: { sessionId: "session-1" } },
       ]);
-      await extension.close();
     } finally {
+      unsubscribe();
       await daemon.close();
     }
   });
