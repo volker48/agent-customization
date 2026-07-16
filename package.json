@@ -9,9 +9,9 @@
   },
   "type": "module",
   "scripts": {
-    "lint": "oxlint pi-extensions opencode-plugins",
-    "format": "oxfmt --write pi-extensions opencode-plugins package.json tsconfig.json",
-    "format:check": "oxfmt --check pi-extensions opencode-plugins package.json tsconfig.json",
+    "lint": "oxlint pi-extensions opencode-plugins plugins scripts",
+    "format": "oxfmt --write pi-extensions opencode-plugins plugins scripts package.json tsconfig.json",
+    "format:check": "oxfmt --check pi-extensions opencode-plugins plugins scripts package.json tsconfig.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.mjs",
