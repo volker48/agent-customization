@@ -1,4 +1,4 @@
-import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 
 import { runFusion } from "../pi-extensions/fusion/orchestrator.js";
@@ -26,7 +26,8 @@ const MODELS = (
 
 describeIf("fusion extension e2e", () => {
   it("runs panel + judge against real providers, including a subscription model", async () => {
-    const registry = ModelRegistry.create(AuthStorage.create());
+    const modelRuntime = await ModelRuntime.create();
+    const registry = new ModelRegistry(modelRuntime);
     const config: FusionConfig = {
       judge: JUDGE,
       models: MODELS,

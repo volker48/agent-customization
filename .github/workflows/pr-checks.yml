@@ -31,6 +31,12 @@ jobs:
       - name: Configure pnpm security
         run: |
           pnpm config set minimumReleaseAge 1440
+          pnpm config set --json minimumReleaseAgeExclude '[
+            "@earendil-works/pi-agent-core@0.80.8",
+            "@earendil-works/pi-ai@0.80.8",
+            "@earendil-works/pi-coding-agent@0.80.8",
+            "@earendil-works/pi-tui@0.80.8"
+          ]'
           pnpm config set ignore-scripts true
 
       - name: Install dependencies
