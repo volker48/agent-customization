@@ -25,7 +25,7 @@ row here.
 | #   | Plan                                             | Priority | Effort | Risk | Category | Depends on | Status |
 |-----|--------------------------------------------------|----------|--------|------|----------|------------|--------|
 | 001 | Remote session registry cleanup on socket close  | P1       | S      | LOW  | bug      | none       | TODO   |
-| 002 | Harden pairing — atomic allowlist + attempt cap  | P1       | S      | LOW  | security | none       | TODO   |
+| 002 | Harden pairing — atomic allowlist + attempt cap  | P1       | S      | LOW  | security | none       | DONE   |
 | 006 | Webfetch SSRF: validate resolved IPs, not string | P1       | M      | MED  | security | none       | TODO   |
 | 003 | Accept-loop backoff (no busy-spin)               | P2       | S      | LOW  | bug      | none       | TODO   |
 | 004 | Extend lint/format scope to plugins & scripts    | P2       | S      | LOW  | dx       | none       | TODO   |
