@@ -254,6 +254,147 @@ describe("Context Capsule application service", () => {
     expect(serialized).not.toContain("350 tests passed");
   });
 
+  it("redacts adversarial credentials from every capsule field", async () => {
+    const pem = [
+      "-----BEGIN PRIVATE KEY-----",
+      "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC",
+      "-----END PRIVATE KEY-----",
+    ].join("\\n");
+    const secret = "api_key=super-secret";
+    const snapshot = extractSessionEvidence(
+      [{ type: "message", message: { role: "user", content: `${pem} ${secret}` } }],
+      "/work/project",
+    );
+    const result = await generateCapsule(
+      {
+        ...snapshot,
+        constraints: [`Authorization: Bearer bearer-secret`, `JWT eyJheader.payload.signature`],
+        decisions: [{ statement: "https://user:password@example.test/path", status: "unknown" }],
+        resources: [{ kind: "github", value: "AWS_SECRET_ACCESS_KEY=cloud-secret" }],
+        observedChanges: [{ path: "src/safe.ts", status: "observed", provenance: "none" }],
+        validation: [
+          { command: "pnpm test --token cli-secret", outcome: "unknown", evidence: "interrupted" },
+        ],
+      },
+      { sessionId: "session-1", cwd: "/work/project" },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const json = serializeCapsule(result.value);
+    expect(json).not.toContain("MIIEvQ");
+    expect(json).not.toContain("super-secret");
+    expect(json).not.toContain("bearer-secret");
+    expect(json).not.toContain("password@example");
+    expect(json).not.toContain("cloud-secret");
+    expect(json).not.toContain("cli-secret");
+    expect(() => previewCapsule(result.value)).not.toThrow();
+    expect(parseCapsule(json)).toMatchObject({ ok: true });
+  });
+
+  it("extracts bounded direct conversation evidence as unknown context", () => {
+    const snapshot = extractSessionEvidence(
+      [
+        {
+          type: "message",
+          message: { role: "user", content: "Constraint: do not change the API" },
+        },
+        {
+          type: "message",
+          message: { role: "assistant", content: "Decision: use the existing cache" },
+        },
+        {
+          type: "message",
+          message: {
+            role: "user",
+            content: "Risk: stale data; Blocker: waiting for CI; Next action: add tests",
+          },
+        },
+      ],
+      "/work/project",
+    );
+    expect(snapshot.constraints).toContain("do not change the API");
+    expect(snapshot.decisions).toContainEqual({
+      statement: "use the existing cache",
+      status: "unknown",
+    });
+    expect(snapshot.risks).toContain("stale data");
+    expect(snapshot.blockers).toContain("waiting for CI");
+    expect(snapshot.nextAction).toBe("add tests");
+    expect(snapshot.exclusions).toContainEqual(expect.objectContaining({ category: "untrusted" }));
+  });
+
+  it("records repository-state paths without attributing authorship", () => {
+    const snapshot = extractSessionEvidence(
+      [
+        {
+          type: "message",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "status",
+                name: "bash",
+                arguments: { command: "git status --short" },
+              },
+            ],
+          },
+        },
+        {
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolCallId: "status",
+            content: " M src/existing.ts\n?? src/new.ts",
+            isError: false,
+          },
+        },
+      ],
+      "/work/project",
+    );
+    expect(snapshot.observedChanges).toEqual([
+      { path: "src/existing.ts", status: "observed", provenance: "none" },
+      { path: "src/new.ts", status: "observed", provenance: "none" },
+    ]);
+  });
+
+  it("never reports ambiguous or interrupted validation as passed", () => {
+    const snapshot = extractSessionEvidence(
+      [
+        {
+          type: "message",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "ambiguous",
+                name: "bash",
+                arguments: { command: "pnpm test" },
+              },
+              { type: "toolCall", id: "killed", name: "bash", arguments: { command: "pnpm lint" } },
+            ],
+          },
+        },
+        {
+          type: "message",
+          message: { role: "toolResult", toolCallId: "ambiguous", content: "command completed" },
+        },
+        {
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolCallId: "killed",
+            content: "process killed",
+            isError: true,
+          },
+        },
+      ],
+      "/work/project",
+    );
+    expect(snapshot.validation.map((item) => item.outcome)).toEqual(["unknown", "blocked"]);
+  });
+
   it("requires successful tool results before reporting a tool-recorded change", () => {
     const snapshot = extractSessionEvidence(
       [
