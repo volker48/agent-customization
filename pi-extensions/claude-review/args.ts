@@ -54,19 +54,13 @@ export function parseClaudeReviewArgs(args: string): ClaudeReviewOptions {
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
     if (token === "--capsule" || token === "--capsule-current") {
-      const next = tokens[index + 1];
-      if (token === "--capsule" && next && !next.startsWith("--")) {
-        if (next === "saved") {
-          const savedReference = tokens[index + 2];
-          if (!savedReference || savedReference.startsWith("--")) {
-            throw new Error("--capsule saved requires a capsule id or path");
-          }
-          capsuleReference = savedReference;
-          index += 2;
-        } else {
-          capsuleReference = next === "current" ? "current" : next;
-          index += 1;
+      if (token === "--capsule" && tokens[index + 1] === "saved") {
+        const savedReference = tokens[index + 2];
+        if (!savedReference || savedReference.startsWith("--")) {
+          throw new Error("--capsule saved requires a capsule id or path");
         }
+        capsuleReference = savedReference;
+        index += 2;
       } else {
         capsuleReference = "current";
       }

@@ -210,6 +210,16 @@ describe("claude review arguments", () => {
     });
   });
 
+  it("keeps review arguments after the current-session capsule shorthand", () => {
+    expect(parseClaudeReviewArgs("--capsule high inspect")).toEqual({
+      autoFix: true,
+      level: "high",
+      contextMessage: "inspect",
+      mode: "background",
+      capsuleReference: "current",
+    });
+  });
+
   it("rejects ultra for headless review runs", () => {
     expect(() => parseClaudeReviewArgs("ultra review deeply")).toThrow(/ultra/);
   });
@@ -483,7 +493,7 @@ describe("claude review command", () => {
     ctx.hasUI = true;
     ctx.ui.confirm = vi.fn(async () => true);
 
-    await command().handler("--wait --no-fix --capsule capsule-review-test", ctx);
+    await command().handler("--wait --no-fix --capsule-ref capsule-review-test", ctx);
 
     expect(ctx.ui.confirm).toHaveBeenCalledOnce();
     expect(pi.exec).toHaveBeenCalledWith(
@@ -580,7 +590,7 @@ describe("claude review command", () => {
     ctx.hasUI = true;
     ctx.ui.confirm = vi.fn(async () => false);
 
-    await command().handler("--capsule capsule-review-test", ctx);
+    await command().handler("--capsule-ref capsule-review-test", ctx);
 
     expect(pi.exec).not.toHaveBeenCalled();
     await expect(readdir(jobDir)).resolves.toEqual([]);
