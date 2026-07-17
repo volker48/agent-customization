@@ -116,9 +116,16 @@ async function resumeFromCapsule(context: CapsuleCommandContext, capsule: Capsul
         `Related session created from Context Capsule ${label}.`,
         "info",
       );
-      await replacementContext.sendUserMessage(
-        `Continue from Context Capsule ${label}. Review and verify its recorded next action before choosing what to do.`,
-      );
+      try {
+        await replacementContext.sendUserMessage(
+          `Continue from Context Capsule ${label}. Review and verify its recorded next action before choosing what to do.`,
+        );
+      } catch (error) {
+        replacementContext.ui.notify(
+          `Unable to continue in replacement session: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+      }
     },
   });
 
