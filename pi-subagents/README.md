@@ -1,38 +1,26 @@
 # Pi subagent customizations
 
-These files shadow the builtin `pi-subagents` role definitions at user scope.
-They were copied from `pi-subagents` 0.34.0 at upstream commit
-`96d0bd8e3580c76aef3509fa8f47dd7fedd1d9dd`.
+These package-owned definitions shadow only the builtin `pi-subagents` roles whose prompts are intentionally customized here. They were based on `pi-subagents` 0.34.0 at upstream commit `96d0bd8e3580c76aef3509fa8f47dd7fedd1d9dd`.
 
 ## Ownership split
 
-- `agents/*.md` owns each role's frontmatter and system prompt.
-- `~/.pi/agent/settings.json` owns local model, thinking, and tool overrides.
-- The Markdown intentionally omits `tools` and `thinking`, allowing
-  `subagents.agentOverrides` to fill those fields for these custom agents.
+- `agents/context-builder.md` adapts external-research guidance to the local `exa_search` tool.
+- `agents/researcher.md` adapts search and fetch guidance to the local `exa_search` and `webfetch` schemas.
+- `agents/reviewer.md` keeps the repository's intentional non-mutating `bash` guidance.
+- Bundled definitions remain authoritative for roles without prompt customizations.
+- `~/.pi/agent/settings.json` owns local model, thinking, and tool overrides for every role.
 
-The tool overrides preserve each upstream allowlist and only translate tools
-that differ locally:
+The Markdown intentionally omits `tools` and `thinking`. `subagents.agentOverrides` fills those unset fields while explicit prompt frontmatter remains package-owned.
+
+The tool overrides preserve each upstream allowlist and translate tools that differ locally:
 
 - `web_search` becomes `exa_search`.
 - `fetch_content` and `get_search_content` collapse into `webfetch`.
 - All other upstream tool names remain unchanged.
 
-The researcher prompt is also adjusted for the local tool schemas: `exa_search`
-accepts one query per call, and `webfetch` retrieves selected source pages.
+## Discovery
 
-## Installation
-
-From the repository root, run:
-
-```bash
-./create-pi-subagent-symlinks.sh
-```
-
-This creates one symlink per definition under `~/.pi/agent/agents/`. User agent
-definitions take precedence over installed-package and builtin definitions with
-the same runtime name. The script refuses to replace existing files or unrelated
-symlinks.
+The repository's `package.json` publishes this directory through `pi.subagents.agents`. Because `agent-customization` is already installed as a Pi package, no separate installer or user-scope symlinks are required. Package definitions override builtins with the same runtime name; user and project definitions can still override this package.
 
 Restart Pi or use `/reload`, then verify with:
 
@@ -41,6 +29,8 @@ Restart Pi or use `/reload`, then verify with:
 /subagents-models researcher
 ```
 
-When updating from upstream, compare all files in `agents/`, preserve the
-ownership split above, update the tool-name references in the context-builder
-and researcher prompts, and record the new version and commit here.
+`/subagents-doctor` reports raw definitions by source, so its totals can include both builtin and package definitions. Runtime execution uses only the highest-precedence definition for each name. `subagent({ action: "list" })` hides shadowed definitions in versions containing upstream fix `4f9d6ae`.
+
+## Updating from upstream
+
+Compare the three files in `agents/` with their upstream counterparts. Keep only intentional prompt differences, preserve the ownership split above, update local web-tool references when schemas change, and record the new upstream version and commit here.
