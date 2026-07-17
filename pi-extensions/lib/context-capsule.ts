@@ -1213,16 +1213,11 @@ export type CapsuleRefreshProposal = {
 };
 
 function semanticText(value: string): string {
-  return value
-    .normalize("NFKC")
-    .trim()
-    .toLocaleLowerCase("en-US")
-    .replace(/\s+/g, " ")
-    .replace(/[.!?]+$/, "");
+  return value.normalize("NFKC").trim().toLocaleLowerCase("en-US").replace(/\s+/g, " ");
 }
 
 function semanticCommand(value: string): string {
-  return value.normalize("NFKC").trim().replace(/\s+/g, " ");
+  return value.trim();
 }
 
 function scalarDrift(before: string, after: string): ScalarCapsuleDrift {

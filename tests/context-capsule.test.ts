@@ -991,13 +991,13 @@ describe("Context Capsule application service", () => {
       capsuleId: "semantic-no-op-successor",
       revision: 2,
       predecessor: { capsuleId: predecessor.capsuleId, revision: predecessor.revision },
-      objective: predecessor.objective.toUpperCase() + ".",
-      constraints: predecessor.constraints.map((value) => `  ${value.toUpperCase()}!  `),
+      objective: predecessor.objective.toUpperCase(),
+      constraints: predecessor.constraints.map((value) => `  ${value.toUpperCase()}  `),
       decisions: predecessor.decisions.map((value) => ({
         ...value,
-        statement: value.statement.toUpperCase() + ".",
+        statement: value.statement.toUpperCase(),
       })),
-      nextAction: predecessor.nextAction.toUpperCase() + ".",
+      nextAction: predecessor.nextAction.toUpperCase(),
     };
 
     const drift = compareCapsules(predecessor, semanticallyEquivalent);
@@ -1011,6 +1011,64 @@ describe("Context Capsule application service", () => {
     });
     expect(rendered).toContain("No material context drift detected");
     expect(rendered.match(/Unchanged/g)).toHaveLength(10);
+  });
+
+  it("preserves terminal modality and exact command identity in refresh drift", async () => {
+    const base = await createCapsule({ capsuleId: "punctuation-and-command-source" });
+    const predecessor: Capsule = {
+      ...base,
+      validation: [
+        {
+          command: 'pnpm test "tests/context-capsule.test.ts"',
+          outcome: "passed",
+          evidence: "Observed tool result: passed.",
+        },
+        {
+          command: "pnpm  typecheck",
+          outcome: "passed",
+          evidence: "Observed tool result: passed.",
+        },
+      ],
+    };
+    const successor: Capsule = {
+      ...predecessor,
+      capsuleId: "punctuation-and-command-successor",
+      revision: 2,
+      predecessor: { capsuleId: predecessor.capsuleId, revision: predecessor.revision },
+      objective: `${predecessor.objective}?`,
+      validation: [
+        {
+          ...predecessor.validation[0],
+          command: "pnpm test tests/context-capsule.test.ts",
+        },
+        {
+          ...predecessor.validation[1],
+          command: "pnpm typecheck",
+        },
+      ],
+    };
+
+    const drift = compareCapsules(predecessor, successor);
+    expect(drift.noOp).toBe(false);
+    expect(drift.sections.objective).toMatchObject({ status: "changed" });
+    expect(drift.sections.validation.changes).toEqual([
+      {
+        kind: "removed",
+        before: expect.objectContaining({ command: 'pnpm test "tests/context-capsule.test.ts"' }),
+      },
+      {
+        kind: "removed",
+        before: expect.objectContaining({ command: "pnpm  typecheck" }),
+      },
+      {
+        kind: "introduced",
+        after: expect.objectContaining({ command: "pnpm test tests/context-capsule.test.ts" }),
+      },
+      {
+        kind: "introduced",
+        after: expect.objectContaining({ command: "pnpm typecheck" }),
+      },
+    ]);
   });
 
   it("reports structured material drift and retains validation evidence", async () => {
