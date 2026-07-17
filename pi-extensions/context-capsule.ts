@@ -1,3 +1,4 @@
+import { compact } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   capsulePrompt,
@@ -12,9 +13,9 @@ import {
   selectCapsuleFacts,
   previewCapsule,
   saveCapsule,
-  capsulePinsPrompt,
+  composePinnedCompactionSummary,
+  stripPinnedCompactionSummary,
   CONTEXT_CAPSULE_PINS_ENTRY,
-  CONTEXT_CAPSULE_PINS_MESSAGE,
   type Capsule,
   type CapsuleFact,
   type CapsulePinState,
@@ -22,6 +23,8 @@ import {
   type CapsuleStore,
   type SessionEntryLike,
 } from "./lib/context-capsule.js";
+
+type CompactionPreparation = Parameters<typeof compact>[0];
 
 export type CapsuleCommandState = {
   lastPreview?: Capsule;
@@ -389,35 +392,61 @@ export async function handleCapsuleCommand(
   );
 }
 
+function isPinnedProjectionMessage(message: unknown): boolean {
+  if (!message || typeof message !== "object") return false;
+  try {
+    const serialized = JSON.stringify(message);
+    return (
+      serialized.includes("CONFIRMED CONTEXT CAPSULE FACTS (") ||
+      serialized.includes("## Confirmed Context Capsule facts")
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Keep Pi's normal cut point and metadata while replacing only its summary projection. */
+function cleanCompactionPreparation(preparation: CompactionPreparation): CompactionPreparation {
+  return {
+    ...preparation,
+    previousSummary: preparation.previousSummary
+      ? stripPinnedCompactionSummary(preparation.previousSummary) || undefined
+      : undefined,
+    messagesToSummarize: preparation.messagesToSummarize.filter(
+      (message) => !isPinnedProjectionMessage(message),
+    ),
+    turnPrefixMessages: preparation.turnPrefixMessages.filter(
+      (message) => !isPinnedProjectionMessage(message),
+    ),
+  };
+}
+
 export default function contextCapsuleExtension(pi: ExtensionAPI): void {
   const state: CapsuleCommandState = {};
-  pi.on("session_compact", async (_event, context) => {
+  pi.on("session_before_compact", async (event, context) => {
     const pins = readCapsulePinState(context.sessionManager.getBranch() as SessionEntryLike[]);
-    if (!pins.pins.length) return;
-    const projection = capsulePinsPrompt(pins);
-    const sessionManager = context.sessionManager as typeof context.sessionManager & {
-      buildContextEntries?: () => unknown[];
-    };
-    const activeEntries = sessionManager.buildContextEntries?.() ?? sessionManager.getBranch();
-    const alreadyPresent = (activeEntries as SessionEntryLike[]).some(
-      (entry) =>
-        entry.type === "custom_message" &&
-        entry.customType === CONTEXT_CAPSULE_PINS_MESSAGE &&
-        entry.content === projection,
+    const model = context.model;
+    if (!model) return;
+    const auth = await context.modelRegistry.getApiKeyAndHeaders(model);
+    if (!auth.ok) return;
+
+    const result = await compact(
+      cleanCompactionPreparation(event.preparation),
+      model,
+      auth.apiKey,
+      auth.headers,
+      event.customInstructions,
+      event.signal,
+      undefined,
+      undefined,
+      auth.env,
     );
-    if (!alreadyPresent) {
-      // ExtensionContext exposes sendMessage rather than a mutable session manager.
-      // triggerTurn=false makes this a persisted context message without starting a turn.
-      pi.sendMessage(
-        {
-          customType: CONTEXT_CAPSULE_PINS_MESSAGE,
-          content: projection,
-          display: false,
-          details: { count: pins.pins.length },
-        },
-        { triggerTurn: false },
-      );
-    }
+    return {
+      compaction: {
+        ...result,
+        summary: composePinnedCompactionSummary(result.summary, pins),
+      },
+    };
   });
   pi.registerCommand("capsule", {
     description: "Generate, preview, save, load, or resume a Context Capsule",

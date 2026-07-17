@@ -2,15 +2,17 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { compact } from "@earendil-works/pi-coding-agent";
 import {
   CAPSULE_MAX_BYTES,
   CAPSULE_MAX_ENTRIES,
   CAPSULE_PIN_MAX_BYTES,
   CAPSULE_PIN_MAX_COUNT,
   CONTEXT_CAPSULE_PINS_ENTRY,
-  CONTEXT_CAPSULE_PINS_MESSAGE,
   capsulePinsPrompt,
   capsulePrompt,
+  composePinnedCompactionSummary,
+  stripPinnedCompactionSummary,
   extractSessionEvidence,
   generateCapsule,
   loadCapsule,
@@ -33,6 +35,11 @@ import contextCapsuleExtension, {
   handleCapsuleCommand,
   type CapsuleCommandContext,
 } from "../pi-extensions/context-capsule.js";
+
+vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@earendil-works/pi-coding-agent")>();
+  return { ...original, compact: vi.fn() };
+});
 
 const temporaryDirectories: string[] = [];
 afterEach(async () => {
@@ -367,6 +374,12 @@ describe("Context Capsule application service", () => {
     expect(
       readCapsulePinState([...branch, { type: "custom", customType: "other", data: {} }]),
     ).toEqual(pinned.value);
+    expect(
+      readCapsulePinState([
+        ...branch,
+        { type: "custom", customType: CONTEXT_CAPSULE_PINS_ENTRY, data: { version: 99 } },
+      ]),
+    ).toEqual({ version: 1, pins: [] });
     const removed = removeCapsulePins(pinned.value, [1]);
     expect(removed.pins).toEqual([facts[2]]);
     expect(validateCapsulePinState(JSON.parse(serializeCapsulePinState(removed)))).toEqual({
@@ -436,51 +449,115 @@ describe("Context Capsule application service", () => {
     expect(readCapsulePinState(cancelled.branch).pins).toHaveLength(1);
   });
 
-  it("renders a stable pin projection without duplication on repeated compaction", async () => {
+  it("uses the latest pin state for every compaction and revokes removed projections", async () => {
     const capsule = await createCapsule({ capsuleId: "compaction-pins" });
     const facts = selectCapsuleFacts(capsule);
-    const state = pinCapsuleFacts({ version: 1, pins: [] }, [facts[0], facts[4]]);
-    if (!state.ok) throw new Error("pin setup failed");
-    const pinEntry: SessionEntryLike = {
-      type: "custom",
-      customType: CONTEXT_CAPSULE_PINS_ENTRY,
-      data: state.value,
-    };
-    const branch: SessionEntryLike[] = [pinEntry];
-    let activeEntries: SessionEntryLike[] = [pinEntry];
-    const handlers: Array<(event: unknown, context: unknown) => Promise<void>> = [];
+    const first = pinCapsuleFacts({ version: 1, pins: [] }, [facts[0]]);
+    if (!first.ok) throw new Error("pin setup failed");
+    const second = pinCapsuleFacts({ version: 1, pins: [] }, [facts[4]]);
+    if (!second.ok) throw new Error("pin setup failed");
+    const branch: SessionEntryLike[] = [
+      { type: "custom", customType: CONTEXT_CAPSULE_PINS_ENTRY, data: first.value },
+    ];
+    const handlers: Array<(event: unknown, context: unknown) => Promise<unknown>> = [];
     const pi = {
       registerCommand: vi.fn(),
-      on: vi.fn((event: string, handler: (event: unknown, context: unknown) => Promise<void>) => {
-        if (event === "session_compact") handlers.push(handler);
-      }),
-      sendMessage: vi.fn((message: { customType: string; content: string }) => {
-        const entry: SessionEntryLike = {
-          type: "custom_message",
-          customType: message.customType,
-          content: message.content,
-        };
-        branch.push(entry);
-        activeEntries.push(entry);
-      }),
+      on: vi.fn(
+        (event: string, handler: (event: unknown, context: unknown) => Promise<unknown>) => {
+          if (event === "session_before_compact") handlers.push(handler);
+        },
+      ),
     };
     contextCapsuleExtension(pi as never);
+    vi.mocked(compact).mockImplementation(async (preparation) => ({
+      summary: "normal summary",
+      firstKeptEntryId: preparation.firstKeptEntryId,
+      tokensBefore: preparation.tokensBefore,
+      details: preparation.fileOps,
+    }));
     const context = {
-      sessionManager: {
-        getBranch: () => branch,
-        buildContextEntries: () => activeEntries,
-      },
+      model: { id: "test-model" },
+      modelRegistry: { getApiKeyAndHeaders: vi.fn(async () => ({ ok: true as const })) },
+      sessionManager: { getBranch: () => branch },
     };
-    await handlers[0]({ reason: "manual", willRetry: false }, context);
-    await handlers[0]({ reason: "manual", willRetry: false }, context);
-    expect(pi.sendMessage).toHaveBeenCalledOnce();
-    for (const reason of ["threshold", "overflow"] as const) {
-      // Simulate the previous projection having fallen outside Pi's recent boundary.
-      activeEntries = [pinEntry];
-      await handlers[0]({ reason, willRetry: reason === "overflow" }, context);
-    }
-    expect(pi.sendMessage).toHaveBeenCalledTimes(3);
-    expect(branch.at(-1)?.content).toBe(capsulePinsPrompt(state.value));
+    const preparation = {
+      firstKeptEntryId: "kept",
+      messagesToSummarize: [
+        { role: "user", content: capsulePinsPrompt(first.value) },
+        { role: "user", content: "ordinary history" },
+      ],
+      turnPrefixMessages: [],
+      isSplitTurn: false,
+      tokensBefore: 123,
+      previousSummary: `old summary\n${composePinnedCompactionSummary("", first.value)}`,
+      fileOps: { readFiles: [], modifiedFiles: [] },
+      settings: {},
+    };
+    const compactEvent = {
+      preparation,
+      customInstructions: undefined,
+      signal: new AbortController().signal,
+    };
+    const firstResult = await handlers[0](compactEvent, context);
+    expect(firstResult).toMatchObject({
+      compaction: {
+        firstKeptEntryId: "kept",
+        tokensBefore: 123,
+        summary: expect.stringContaining(facts[0].statement),
+      },
+    });
+    expect(vi.mocked(compact).mock.calls[0][0].messagesToSummarize).toHaveLength(1);
+
+    branch.push({
+      type: "custom",
+      customType: CONTEXT_CAPSULE_PINS_ENTRY,
+      data: { version: 1, pins: [] },
+    });
+    const removedResult = await handlers[0](
+      {
+        ...compactEvent,
+        preparation: { ...preparation, previousSummary: (firstResult as any).compaction.summary },
+      },
+      context,
+    );
+    expect((removedResult as any).compaction.summary).not.toContain(facts[0].statement);
+
+    branch.push({ type: "custom", customType: CONTEXT_CAPSULE_PINS_ENTRY, data: second.value });
+    const replacedResult = await handlers[0](
+      {
+        ...compactEvent,
+        reason: "overflow",
+        willRetry: true,
+        preparation: { ...preparation, previousSummary: (removedResult as any).compaction.summary },
+      },
+      context,
+    );
+    expect((replacedResult as any).compaction.summary).toContain(facts[4].statement);
+    expect((replacedResult as any).compaction.summary).not.toContain(facts[0].statement);
+    expect(stripPinnedCompactionSummary((replacedResult as any).compaction.summary)).toBe(
+      "normal summary",
+    );
+
+    const repeatedResult = await handlers[0](
+      {
+        ...compactEvent,
+        reason: "threshold",
+        preparation: {
+          ...preparation,
+          previousSummary: (replacedResult as any).compaction.summary,
+        },
+      },
+      context,
+    );
+    expect((repeatedResult as any).compaction.summary).toBe(
+      (replacedResult as any).compaction.summary,
+    );
+    expect(
+      readCapsulePinState([
+        ...branch,
+        { type: "compaction", summary: (repeatedResult as any).compaction.summary },
+      ]),
+    ).toEqual(second.value);
   });
 
   it("round trips through deterministic canonical JSON and renders every section", async () => {

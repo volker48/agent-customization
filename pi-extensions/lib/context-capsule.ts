@@ -12,7 +12,6 @@ export const CAPSULE_PIN_MAX_COUNT = 20;
 /** Maximum UTF-8 size of the persisted pin state and compaction projection. */
 export const CAPSULE_PIN_MAX_BYTES = 8 * 1024;
 export const CONTEXT_CAPSULE_PINS_ENTRY = "context-capsule-pins";
-export const CONTEXT_CAPSULE_PINS_MESSAGE = "context-capsule-pinned-facts";
 
 const MAX_TEXT = 2_000;
 const MAX_ENTRY = 1_000;
@@ -725,13 +724,13 @@ export function serializeCapsulePinState(state: CapsulePinState): string {
   return pinStateJson(validated.value);
 }
 
-/** Recover state from the active branch only, so pins do not leak across branches. */
+/** Recover only the latest state from the active branch, so old pins cannot resurrect. */
 export function readCapsulePinState(entries: readonly SessionEntryLike[]): CapsulePinState {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
     if (entry.type !== "custom" || entry.customType !== CONTEXT_CAPSULE_PINS_ENTRY) continue;
     const result = validateCapsulePinState(entry.data);
-    if (result.ok) return result.value;
+    return result.ok ? result.value : { version: 1, pins: [] };
   }
   return { version: 1, pins: [] };
 }
@@ -780,7 +779,7 @@ export function renderCapsulePins(state: CapsulePinState): string {
     .join("\n");
 }
 
-/** A stable hidden message projection used after every successful compaction. */
+/** A stable hidden projection used in the saved Pi compaction summary. */
 export function capsulePinsPrompt(state: CapsulePinState): string {
   return [
     "CONFIRMED CONTEXT CAPSULE FACTS (user-selected; bounded; authoritative only as stated):",
@@ -789,15 +788,34 @@ export function capsulePinsPrompt(state: CapsulePinState): string {
   ].join("\n");
 }
 
-/** Pure helper for consumers that already have the normal Pi summary. */
+const PINNED_SUMMARY_MARKER = "## Confirmed Context Capsule facts";
+const PINNED_PROMPT_END = "Do not add, infer, or promote other capsule facts.";
+
+/** Remove projections from older compactions before Pi summarizes again. */
+export function stripPinnedCompactionSummary(summary: string): string {
+  let cleaned = summary;
+  const headingStart = cleaned.indexOf(PINNED_SUMMARY_MARKER);
+  if (headingStart >= 0) cleaned = cleaned.slice(0, headingStart).trimEnd();
+  const promptStart = cleaned.indexOf("CONFIRMED CONTEXT CAPSULE FACTS (");
+  if (promptStart >= 0) {
+    const promptEnd = cleaned.indexOf(PINNED_PROMPT_END, promptStart);
+    cleaned = (
+      promptEnd < 0
+        ? cleaned.slice(0, promptStart)
+        : cleaned.slice(0, promptStart) + cleaned.slice(promptEnd + PINNED_PROMPT_END.length)
+    ).trim();
+  }
+  return cleaned;
+}
+
+/** Compose the current authoritative projection onto Pi's normal summary. */
 export function composePinnedCompactionSummary(
   normalSummary: string,
   state: CapsulePinState,
 ): string {
-  if (!state.pins.length) return normalSummary;
-  const marker = "## Confirmed Context Capsule facts";
-  if (normalSummary.includes(marker)) return normalSummary;
-  return `${normalSummary.trim()}\n\n${marker}\n${renderCapsulePins(state)}`;
+  const cleaned = stripPinnedCompactionSummary(normalSummary);
+  if (!state.pins.length) return cleaned;
+  return `${cleaned}\n\n${PINNED_SUMMARY_MARKER}\n${renderCapsulePins(state)}`;
 }
 
 export async function generateCapsule(
