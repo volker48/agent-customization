@@ -118,7 +118,7 @@ public actor RemoteClient {
       payload: ["operation": .string("capsule"), "sessionId": .string(sessionID)]
     )
     let payload = try requireControlPayload(responses.first, type: .list)
-    if case .array = payload {
+    if isJSONArrayPayload(payload) {
       throw RemoteClientError.unsupportedCapability("context capsule")
     }
     let result = try decodePayload(CapsuleResponse.self, from: payload)
@@ -384,6 +384,20 @@ private func requireControlPayload(
   }
 
   return control.payload
+}
+
+private func isJSONArrayPayload(_ payload: JSONValue) -> Bool {
+  switch payload {
+  case .array:
+    return true
+  case .rawJSON:
+    guard let value = try? JSONSerialization.jsonObject(with: payload.jsonData()) else {
+      return false
+    }
+    return value is [Any]
+  default:
+    return false
+  }
 }
 
 private func decodePayload<T: Decodable>(_ type: T.Type, from payload: JSONValue) throws -> T {

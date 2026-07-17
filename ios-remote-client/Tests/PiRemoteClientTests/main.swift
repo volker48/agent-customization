@@ -281,9 +281,10 @@ private func fetchCapsuleUsesListCompatibilityEnvelope() async throws {
 }
 
 private func oldDaemonReturnsTypedUnsupportedCapability() async throws {
-  let transport = RecordingTransport(responses: [
-    [.control(.init(type: .list, payload: []))]
-  ])
+  let legacyListResponse = try decodeFrame(
+    "{\"sessionId\":null,\"type\":\"list\",\"payload\":[]}\n"
+  )
+  let transport = RecordingTransport(responses: [[legacyListResponse]])
   let client = RemoteClient(ticket: "ticket", transport: transport)
 
   try await expectThrows(RemoteClientError.unsupportedCapability("context capsule")) {
