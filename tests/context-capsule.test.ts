@@ -5,12 +5,23 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CAPSULE_MAX_BYTES,
   CAPSULE_MAX_ENTRIES,
+  CAPSULE_PIN_MAX_BYTES,
+  CAPSULE_PIN_MAX_COUNT,
+  CONTEXT_CAPSULE_PINS_ENTRY,
+  CONTEXT_CAPSULE_PINS_MESSAGE,
+  capsulePinsPrompt,
   capsulePrompt,
   extractSessionEvidence,
   generateCapsule,
   loadCapsule,
   parseCapsule,
+  pinCapsuleFacts,
+  readCapsulePinState,
+  removeCapsulePins,
   previewCapsule,
+  selectCapsuleFacts,
+  serializeCapsulePinState,
+  validateCapsulePinState,
   resolveCapsuleReference,
   saveCapsule,
   serializeCapsule,
@@ -18,7 +29,7 @@ import {
   type Capsule,
   type SessionEntryLike,
 } from "../pi-extensions/lib/context-capsule.js";
-import {
+import contextCapsuleExtension, {
   handleCapsuleCommand,
   type CapsuleCommandContext,
 } from "../pi-extensions/context-capsule.js";
@@ -136,7 +147,9 @@ async function createCapsule(overrides: Partial<Parameters<typeof generateCapsul
   return result.value;
 }
 
-function commandContext(options: { confirm?: boolean; hasUI?: boolean } = {}) {
+function commandContext(
+  options: { confirm?: boolean; hasUI?: boolean; branch?: SessionEntryLike[] } = {},
+) {
   const notifications: Array<{ message: string; level?: string }> = [];
   const appended: Array<{
     customType: string;
@@ -145,15 +158,20 @@ function commandContext(options: { confirm?: boolean; hasUI?: boolean } = {}) {
     details?: unknown;
   }> = [];
   const sent: string[] = [];
+  const branch = options.branch ?? [...entries];
   let newSessionOptions: Parameters<CapsuleCommandContext["newSession"]>[0] | undefined;
   const context: CapsuleCommandContext = {
     cwd: "/work/project",
     hasUI: options.hasUI ?? true,
     waitForIdle: vi.fn(async () => undefined),
     sessionManager: {
-      getBranch: () => entries,
+      getBranch: () => branch,
       getSessionId: () => "session-1",
       getSessionFile: () => "/sessions/session-1.jsonl",
+      appendCustomEntry: (customType, data) => {
+        branch.push({ type: "custom", customType, data });
+        return "pin-entry";
+      },
     },
     ui: {
       notify: (message, level) => notifications.push({ message, level }),
@@ -182,6 +200,7 @@ function commandContext(options: { confirm?: boolean; hasUI?: boolean } = {}) {
     appended,
     sent,
     getNewSessionOptions: () => newSessionOptions,
+    branch,
   };
 }
 
@@ -320,6 +339,148 @@ describe("Context Capsule application service", () => {
         expect.objectContaining({ category: "oversized" }),
       );
     }
+  });
+
+  it("selects only explicit facts and persists bounded state across branch reloads", async () => {
+    const capsule = await createCapsule({ capsuleId: "pin-capsule" });
+    const facts = selectCapsuleFacts(capsule);
+    expect(facts.map((fact) => fact.category)).toEqual([
+      "objective",
+      "constraint",
+      "decision",
+      "blocker",
+      "next-action",
+    ]);
+    const pinned = pinCapsuleFacts({ version: 1, pins: [] }, [facts[0], facts[2]]);
+    expect(pinned).toEqual({
+      ok: true,
+      value: {
+        version: 1,
+        pins: [facts[0], facts[2]],
+      },
+    });
+    if (!pinned.ok) return;
+    const branch: SessionEntryLike[] = [
+      { type: "custom", customType: CONTEXT_CAPSULE_PINS_ENTRY, data: pinned.value },
+    ];
+    expect(readCapsulePinState(branch)).toEqual(pinned.value);
+    expect(
+      readCapsulePinState([...branch, { type: "custom", customType: "other", data: {} }]),
+    ).toEqual(pinned.value);
+    const removed = removeCapsulePins(pinned.value, [1]);
+    expect(removed.pins).toEqual([facts[2]]);
+    expect(validateCapsulePinState(JSON.parse(serializeCapsulePinState(removed)))).toEqual({
+      ok: true,
+      value: removed,
+    });
+  });
+
+  it("rejects pin count and serialized-size limits with actionable errors", async () => {
+    const facts = Array.from({ length: CAPSULE_PIN_MAX_COUNT + 1 }, (_, index) => ({
+      category: "constraint" as const,
+      statement: `constraint-${index}`,
+    }));
+    expect(pinCapsuleFacts({ version: 1, pins: [] }, facts)).toMatchObject({
+      ok: false,
+      error: { code: "oversized" },
+    });
+    const largeFacts = Array.from({ length: CAPSULE_PIN_MAX_COUNT }, (_, index) => ({
+      category: "constraint" as const,
+      statement: `${index}-${"x".repeat(900)}`,
+    }));
+    const largeResult = pinCapsuleFacts({ version: 1, pins: [] }, largeFacts);
+    expect(largeResult).toMatchObject({ ok: false, error: { code: "oversized" } });
+    expect(CAPSULE_PIN_MAX_BYTES).toBeGreaterThan(0);
+  });
+
+  it("requires confirmation for pin selection, supports removal, and reload inspection", async () => {
+    const capsule = await createCapsule({ capsuleId: "command-pins" });
+    const first = commandContext({ confirm: true });
+    const state = { lastPreview: capsule };
+    await handleCapsuleCommand("pins select", first.context, state, {
+      load: vi.fn(),
+      save: vi.fn(),
+    });
+    await handleCapsuleCommand("pins confirm 1,2", first.context, state, {
+      load: vi.fn(),
+      save: vi.fn(),
+    });
+    expect(first.branch).toContainEqual(
+      expect.objectContaining({
+        type: "custom",
+        customType: CONTEXT_CAPSULE_PINS_ENTRY,
+      }),
+    );
+    const reloaded = commandContext({ confirm: true, branch: first.branch });
+    await handleCapsuleCommand(
+      "pins inspect",
+      reloaded.context,
+      {},
+      { load: vi.fn(), save: vi.fn() },
+    );
+    expect(reloaded.notifications.at(-1)?.message).toContain("[objective]");
+    await handleCapsuleCommand(
+      "pins remove 1",
+      reloaded.context,
+      {},
+      { load: vi.fn(), save: vi.fn() },
+    );
+    expect(readCapsulePinState(reloaded.branch).pins).toHaveLength(1);
+    const cancelled = commandContext({ confirm: false, branch: reloaded.branch });
+    await handleCapsuleCommand(
+      "pins remove all",
+      cancelled.context,
+      {},
+      { load: vi.fn(), save: vi.fn() },
+    );
+    expect(readCapsulePinState(cancelled.branch).pins).toHaveLength(1);
+  });
+
+  it("renders a stable pin projection without duplication on repeated compaction", async () => {
+    const capsule = await createCapsule({ capsuleId: "compaction-pins" });
+    const facts = selectCapsuleFacts(capsule);
+    const state = pinCapsuleFacts({ version: 1, pins: [] }, [facts[0], facts[4]]);
+    if (!state.ok) throw new Error("pin setup failed");
+    const pinEntry: SessionEntryLike = {
+      type: "custom",
+      customType: CONTEXT_CAPSULE_PINS_ENTRY,
+      data: state.value,
+    };
+    const branch: SessionEntryLike[] = [pinEntry];
+    let activeEntries: SessionEntryLike[] = [pinEntry];
+    const handlers: Array<(event: unknown, context: unknown) => Promise<void>> = [];
+    const pi = {
+      registerCommand: vi.fn(),
+      on: vi.fn((event: string, handler: (event: unknown, context: unknown) => Promise<void>) => {
+        if (event === "session_compact") handlers.push(handler);
+      }),
+      sendMessage: vi.fn((message: { customType: string; content: string }) => {
+        const entry: SessionEntryLike = {
+          type: "custom_message",
+          customType: message.customType,
+          content: message.content,
+        };
+        branch.push(entry);
+        activeEntries.push(entry);
+      }),
+    };
+    contextCapsuleExtension(pi as never);
+    const context = {
+      sessionManager: {
+        getBranch: () => branch,
+        buildContextEntries: () => activeEntries,
+      },
+    };
+    await handlers[0]({ reason: "manual", willRetry: false }, context);
+    await handlers[0]({ reason: "manual", willRetry: false }, context);
+    expect(pi.sendMessage).toHaveBeenCalledOnce();
+    for (const reason of ["threshold", "overflow"] as const) {
+      // Simulate the previous projection having fallen outside Pi's recent boundary.
+      activeEntries = [pinEntry];
+      await handlers[0]({ reason, willRetry: reason === "overflow" }, context);
+    }
+    expect(pi.sendMessage).toHaveBeenCalledTimes(3);
+    expect(branch.at(-1)?.content).toBe(capsulePinsPrompt(state.value));
   });
 
   it("round trips through deterministic canonical JSON and renders every section", async () => {

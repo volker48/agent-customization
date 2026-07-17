@@ -5,9 +5,19 @@ import {
   extractSessionEvidence,
   generateCapsule,
   loadCapsule,
+  pinCapsuleFacts,
+  readCapsulePinState,
+  removeCapsulePins,
+  renderCapsulePins,
+  selectCapsuleFacts,
   previewCapsule,
   saveCapsule,
+  capsulePinsPrompt,
+  CONTEXT_CAPSULE_PINS_ENTRY,
+  CONTEXT_CAPSULE_PINS_MESSAGE,
   type Capsule,
+  type CapsuleFact,
+  type CapsulePinState,
   type CapsuleResult,
   type CapsuleStore,
   type SessionEntryLike,
@@ -15,6 +25,7 @@ import {
 
 export type CapsuleCommandState = {
   lastPreview?: Capsule;
+  pendingFacts?: CapsuleFact[];
 };
 
 export type CapsuleCommandContext = {
@@ -25,6 +36,13 @@ export type CapsuleCommandContext = {
     getBranch: () => unknown[];
     getSessionId: () => string;
     getSessionFile: () => string | undefined;
+    appendCustomEntry?: (customType: string, data?: unknown) => string;
+    appendCustomMessageEntry?: (
+      customType: string,
+      content: string,
+      display: boolean,
+      details?: unknown,
+    ) => string;
   };
   ui: {
     notify: (message: string, level?: "info" | "warning" | "error") => void;
@@ -59,6 +77,18 @@ const defaultDependencies: CapsuleCommandDependencies = {
 
 function resultError(result: CapsuleResult<unknown>): string {
   return "error" in result ? `${result.error.code}: ${result.error.message}` : "";
+}
+
+function currentPinState(context: CapsuleCommandContext): CapsulePinState {
+  return readCapsulePinState(context.sessionManager.getBranch() as SessionEntryLike[]);
+}
+
+function pinError(result: CapsuleResult<unknown>): string {
+  return "error" in result ? `${result.error.code}: ${result.error.message}` : "";
+}
+
+function showPins(context: CapsuleCommandContext, state = currentPinState(context)): void {
+  context.ui.notify(renderCapsulePins(state), "info");
 }
 
 function showPreview(context: CapsuleCommandContext, capsule: Capsule): void {
@@ -128,6 +158,132 @@ async function resumeFromCapsule(context: CapsuleCommandContext, capsule: Capsul
   }
 }
 
+function parseIndices(raw: string): number[] | "all" | undefined {
+  if (raw.trim().toLowerCase() === "all") return "all";
+  const values = raw.split(",").map((value) => Number(value.trim()));
+  if (!values.length || values.some((value) => !Number.isInteger(value) || value < 1))
+    return undefined;
+  return [...new Set(values)];
+}
+
+async function handlePinsCommand(
+  argumentText: string,
+  context: CapsuleCommandContext,
+  state: CapsuleCommandState,
+  dependencies: CapsuleCommandDependencies,
+): Promise<void> {
+  const separator = argumentText.search(/\s/);
+  const subcommand = (
+    separator < 0 ? argumentText : argumentText.slice(0, separator)
+  ).toLowerCase();
+  const argument = separator < 0 ? "" : argumentText.slice(separator).trim();
+
+  if (subcommand === "inspect" || !subcommand) {
+    showPins(context);
+    return;
+  }
+  if (subcommand === "select") {
+    let capsule = state.lastPreview;
+    if (argument) {
+      const loaded = await dependencies.load(argument);
+      if (!loaded.ok) {
+        context.ui.notify(`Capsule load failed: ${resultError(loaded)}`, "error");
+        return;
+      }
+      capsule = loaded.value;
+      state.lastPreview = capsule;
+    }
+    if (!capsule) {
+      context.ui.notify(
+        "Usage: /capsule pins select [capsule-id-or-path] (preview or load a capsule first).",
+        "error",
+      );
+      return;
+    }
+    state.pendingFacts = selectCapsuleFacts(capsule);
+    const existing = currentPinState(context);
+    const text = state.pendingFacts
+      .map(
+        (fact, index) =>
+          `${index + 1}. [${fact.category}] ${fact.statement}${existing.pins.some((pin) => pin.category === fact.category && pin.statement === fact.statement) ? " (already pinned)" : ""}`,
+      )
+      .join("\n");
+    context.ui.notify(text || "No selectable facts found.", "info");
+    return;
+  }
+  if (subcommand === "confirm") {
+    const indices = parseIndices(argument);
+    if (!indices || indices === "all") {
+      context.ui.notify("Usage: /capsule pins confirm <comma-separated fact numbers>", "error");
+      return;
+    }
+    if (!state.pendingFacts) {
+      context.ui.notify("Select capsule facts first: /capsule pins select [ref]", "error");
+      return;
+    }
+    const selected = indices.map((index) => state.pendingFacts?.[index - 1]);
+    if (selected.some((fact) => !fact)) {
+      context.ui.notify("One or more selected fact numbers are out of range.", "error");
+      return;
+    }
+    const proposed = pinCapsuleFacts(currentPinState(context), selected as CapsuleFact[]);
+    if (!proposed.ok) {
+      context.ui.notify(`Pin confirmation failed: ${pinError(proposed)}`, "error");
+      return;
+    }
+    const confirmed = await confirmSideEffect(
+      context,
+      "Confirm Context Capsule facts?",
+      `Persist ${selected.length} selected fact(s) for future compaction. Unselected and unconfirmed facts will not be pinned.`,
+    );
+    if (!confirmed) {
+      context.ui.notify("Pin confirmation cancelled; no facts were persisted.", "info");
+      return;
+    }
+    if (!context.sessionManager.appendCustomEntry) {
+      context.ui.notify("Pin persistence is unavailable in this Pi session.", "error");
+      return;
+    }
+    context.sessionManager.appendCustomEntry(CONTEXT_CAPSULE_PINS_ENTRY, proposed.value);
+    state.pendingFacts = undefined;
+    context.ui.notify(`Confirmed ${selected.length} Context Capsule fact(s).`, "info");
+    return;
+  }
+  if (subcommand === "remove") {
+    const indices = parseIndices(argument);
+    if (!indices) {
+      context.ui.notify("Usage: /capsule pins remove <comma-separated pin numbers|all>", "error");
+      return;
+    }
+    const current = currentPinState(context);
+    if (indices !== "all" && indices.some((index) => index > current.pins.length)) {
+      context.ui.notify("One or more selected pin numbers are out of range.", "error");
+      return;
+    }
+    const next = removeCapsulePins(current, indices);
+    const confirmed = await confirmSideEffect(
+      context,
+      "Remove Context Capsule facts?",
+      `Remove ${indices === "all" ? "all" : indices.length} confirmed fact(s) from future compactions.`,
+    );
+    if (!confirmed) {
+      context.ui.notify("Pin removal cancelled; no facts were changed.", "info");
+      return;
+    }
+    if (!context.sessionManager.appendCustomEntry) {
+      context.ui.notify("Pin persistence is unavailable in this Pi session.", "error");
+      return;
+    }
+    context.sessionManager.appendCustomEntry(CONTEXT_CAPSULE_PINS_ENTRY, next);
+    context.ui.notify("Confirmed Context Capsule facts updated.", "info");
+    return;
+  }
+  context.ui.notify(
+    "Usage: /capsule pins select [ref] | confirm <numbers> | inspect | remove <numbers|all>",
+    "error",
+  );
+}
+
 function parseCommand(rawArguments: string): { command: string; reference?: string } {
   const trimmed = rawArguments.trim();
   if (!trimmed) return { command: "preview" };
@@ -146,6 +302,11 @@ export async function handleCapsuleCommand(
   dependencies: CapsuleCommandDependencies = defaultDependencies,
 ): Promise<void> {
   const { command, reference } = parseCommand(rawArguments);
+
+  if (command === "pins") {
+    await handlePinsCommand(reference ?? "", context, state, dependencies);
+    return;
+  }
 
   if (command === "preview" || command === "save") {
     const generated = await generateCurrentCapsule(context);
@@ -223,13 +384,41 @@ export async function handleCapsuleCommand(
   }
 
   context.ui.notify(
-    "Usage: /capsule preview | save | load <capsule-id-or-path> | resume [capsule-id-or-path]",
+    "Usage: /capsule preview | save | load <capsule-id-or-path> | resume [capsule-id-or-path] | pins select [ref] | pins confirm <numbers> | pins inspect | pins remove <numbers|all>",
     "error",
   );
 }
 
 export default function contextCapsuleExtension(pi: ExtensionAPI): void {
   const state: CapsuleCommandState = {};
+  pi.on("session_compact", async (_event, context) => {
+    const pins = readCapsulePinState(context.sessionManager.getBranch() as SessionEntryLike[]);
+    if (!pins.pins.length) return;
+    const projection = capsulePinsPrompt(pins);
+    const sessionManager = context.sessionManager as typeof context.sessionManager & {
+      buildContextEntries?: () => unknown[];
+    };
+    const activeEntries = sessionManager.buildContextEntries?.() ?? sessionManager.getBranch();
+    const alreadyPresent = (activeEntries as SessionEntryLike[]).some(
+      (entry) =>
+        entry.type === "custom_message" &&
+        entry.customType === CONTEXT_CAPSULE_PINS_MESSAGE &&
+        entry.content === projection,
+    );
+    if (!alreadyPresent) {
+      // ExtensionContext exposes sendMessage rather than a mutable session manager.
+      // triggerTurn=false makes this a persisted context message without starting a turn.
+      pi.sendMessage(
+        {
+          customType: CONTEXT_CAPSULE_PINS_MESSAGE,
+          content: projection,
+          display: false,
+          details: { count: pins.pins.length },
+        },
+        { triggerTurn: false },
+      );
+    }
+  });
   pi.registerCommand("capsule", {
     description: "Generate, preview, save, load, or resume a Context Capsule",
     handler: async (argumentsText, context) => {

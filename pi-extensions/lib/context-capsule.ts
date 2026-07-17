@@ -7,6 +7,12 @@ export const CONTEXT_CAPSULE_SCHEMA = 1 as const;
 export const CAPSULE_MAX_BYTES = 32 * 1024;
 export const CAPSULE_MAX_ENTRIES = 20;
 export const CAPSULE_STORE_DIRECTORY = "context-capsules";
+/** Maximum number of facts that can be confirmed for compaction persistence. */
+export const CAPSULE_PIN_MAX_COUNT = 20;
+/** Maximum UTF-8 size of the persisted pin state and compaction projection. */
+export const CAPSULE_PIN_MAX_BYTES = 8 * 1024;
+export const CONTEXT_CAPSULE_PINS_ENTRY = "context-capsule-pins";
+export const CONTEXT_CAPSULE_PINS_MESSAGE = "context-capsule-pinned-facts";
 
 const MAX_TEXT = 2_000;
 const MAX_ENTRY = 1_000;
@@ -22,6 +28,21 @@ export type CapsuleId = string;
 export type CapsuleDecision = {
   statement: string;
   status: "confirmed" | "proposed" | "unknown";
+};
+export type CapsulePinCategory =
+  | "objective"
+  | "constraint"
+  | "decision"
+  | "blocker"
+  | "next-action";
+export type CapsuleFact = {
+  category: CapsulePinCategory;
+  statement: string;
+};
+export type CapsulePin = CapsuleFact;
+export type CapsulePinState = {
+  version: 1;
+  pins: CapsulePin[];
 };
 export type CapsuleResource = {
   kind: "path" | "url" | "github";
@@ -123,6 +144,10 @@ export type SessionEntryLike = {
   timestamp?: string;
   summary?: unknown;
   firstKeptEntryId?: string;
+  customType?: string;
+  data?: unknown;
+  content?: unknown;
+  display?: boolean;
   message?: {
     role?: string;
     content?: unknown;
@@ -638,6 +663,141 @@ function sanitizeDecisions(
     addExclusion(exclusions, "oversized", output.length - CAPSULE_MAX_ENTRIES);
   }
   return output.slice(0, CAPSULE_MAX_ENTRIES);
+}
+
+function pinStateJson(state: CapsulePinState): string {
+  return JSON.stringify({ version: 1, pins: state.pins.map((pin) => ({ ...pin })) });
+}
+
+function pinStateSize(state: CapsulePinState): number {
+  return Buffer.byteLength(pinStateJson(state), "utf8");
+}
+
+function validPinCategory(value: unknown): value is CapsulePinCategory {
+  return ["objective", "constraint", "decision", "blocker", "next-action"].includes(
+    value as string,
+  );
+}
+
+function normalizePin(value: unknown): CapsulePin | undefined {
+  if (!isRecord(value) || !validPinCategory(value.category)) return undefined;
+  const statement = sanitizeText(value.statement, MAX_ENTRY).value;
+  return statement ? { category: value.category, statement } : undefined;
+}
+
+/** Return the explicitly selectable facts in stable, user-facing order. */
+export function selectCapsuleFacts(capsule: Capsule): CapsuleFact[] {
+  return [
+    { category: "objective", statement: capsule.objective },
+    ...capsule.constraints.map((statement) => ({ category: "constraint" as const, statement })),
+    ...capsule.decisions.map(({ statement }) => ({ category: "decision" as const, statement })),
+    ...capsule.blockers.map((statement) => ({ category: "blocker" as const, statement })),
+    { category: "next-action", statement: capsule.nextAction },
+  ];
+}
+
+/** Validate persisted state; malformed custom entries are ignored, never promoted to context. */
+export function validateCapsulePinState(input: unknown): CapsuleResult<CapsulePinState> {
+  if (!isRecord(input) || input.version !== 1 || !Array.isArray(input.pins)) {
+    return fail("malformed", "Context Capsule pin state is malformed.");
+  }
+  if (input.pins.length > CAPSULE_PIN_MAX_COUNT) {
+    return fail("oversized", `At most ${CAPSULE_PIN_MAX_COUNT} facts may be pinned.`);
+  }
+  const pins: CapsulePin[] = [];
+  for (const value of input.pins) {
+    const pin = normalizePin(value);
+    if (!pin) return fail("unsafe", "Pinned facts must contain safe bounded text.");
+    if (!pins.some((item) => item.category === pin.category && item.statement === pin.statement)) {
+      pins.push(pin);
+    }
+  }
+  const state = { version: 1 as const, pins };
+  if (pinStateSize(state) > CAPSULE_PIN_MAX_BYTES) {
+    return fail("oversized", `Pinned facts exceed ${CAPSULE_PIN_MAX_BYTES} UTF-8 bytes.`);
+  }
+  return ok(state);
+}
+
+export function serializeCapsulePinState(state: CapsulePinState): string {
+  const validated = validateCapsulePinState(state);
+  if (!validated.ok) throw new Error(capsuleError(validated).message);
+  return pinStateJson(validated.value);
+}
+
+/** Recover state from the active branch only, so pins do not leak across branches. */
+export function readCapsulePinState(entries: readonly SessionEntryLike[]): CapsulePinState {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry.type !== "custom" || entry.customType !== CONTEXT_CAPSULE_PINS_ENTRY) continue;
+    const result = validateCapsulePinState(entry.data);
+    if (result.ok) return result.value;
+  }
+  return { version: 1, pins: [] };
+}
+
+export function pinCapsuleFacts(
+  current: CapsulePinState,
+  facts: readonly CapsuleFact[],
+): CapsuleResult<CapsulePinState> {
+  const pins = [...current.pins];
+  for (const fact of facts) {
+    const pin = normalizePin(fact);
+    if (!pin) return fail("unsafe", "Selected fact is unsafe or empty.");
+    if (pins.some((item) => item.category === pin.category && item.statement === pin.statement))
+      continue;
+    if (pins.length >= CAPSULE_PIN_MAX_COUNT) {
+      return fail(
+        "oversized",
+        `Pin limit reached (${CAPSULE_PIN_MAX_COUNT} facts). Remove a pin first.`,
+      );
+    }
+    const candidate = { version: 1 as const, pins: [...pins, pin] };
+    if (pinStateSize(candidate) > CAPSULE_PIN_MAX_BYTES) {
+      return fail(
+        "oversized",
+        `Pin size limit reached (${CAPSULE_PIN_MAX_BYTES} bytes). Remove a pin first.`,
+      );
+    }
+    pins.push(pin);
+  }
+  return ok({ version: 1, pins });
+}
+
+export function removeCapsulePins(
+  current: CapsulePinState,
+  indices: readonly number[] | "all",
+): CapsulePinState {
+  if (indices === "all") return { version: 1, pins: [] };
+  const remove = new Set(indices);
+  return { version: 1, pins: current.pins.filter((_pin, index) => !remove.has(index + 1)) };
+}
+
+export function renderCapsulePins(state: CapsulePinState): string {
+  if (!state.pins.length) return "No confirmed Context Capsule facts are pinned.";
+  return state.pins
+    .map((pin, index) => `${index + 1}. [${pin.category}] ${pin.statement}`)
+    .join("\n");
+}
+
+/** A stable hidden message projection used after every successful compaction. */
+export function capsulePinsPrompt(state: CapsulePinState): string {
+  return [
+    "CONFIRMED CONTEXT CAPSULE FACTS (user-selected; bounded; authoritative only as stated):",
+    renderCapsulePins(state),
+    "Do not add, infer, or promote other capsule facts.",
+  ].join("\n");
+}
+
+/** Pure helper for consumers that already have the normal Pi summary. */
+export function composePinnedCompactionSummary(
+  normalSummary: string,
+  state: CapsulePinState,
+): string {
+  if (!state.pins.length) return normalSummary;
+  const marker = "## Confirmed Context Capsule facts";
+  if (normalSummary.includes(marker)) return normalSummary;
+  return `${normalSummary.trim()}\n\n${marker}\n${renderCapsulePins(state)}`;
 }
 
 export async function generateCapsule(
