@@ -191,3 +191,14 @@ shfmt -d script.sh
 - Commit messages: imperative mood, ≤ 72-character subject.
 - One logical change per commit.
 - Never amend or rebase commits already pushed to shared branches.
+
+
+<pi-intercom>
+Coordinate with other local pi sessions on related codebases. Use `/skill:pi-intercom` for patterns.
+
+**When:** Same codebase (parallel work), reference codebase (consulting patterns), related repos (shared libraries).
+
+**Not when:** Unrelated codebases, trivial questions, or when you can proceed independently.
+
+**Principle:** Prefer `send` for notifications; `ask` only when blocked waiting for input.
+</pi-intercom>

@@ -19,8 +19,8 @@ pi-extensions/         # Pi agent extensions (TypeScript)
   rtk.ts               # RTK bash rewrite hook
   fusion/              # Multi-model Fusion panel and judge command
 
-pi-subagents/          # Repo-owned overrides for pi-subagents builtin roles
-  agents/              # User-scope agent definitions symlinked into Pi
+pi-subagents/          # Package-owned prompt overrides for selected pi-subagents roles
+  agents/              # Customized prompts published through the Pi package manifest
 
 skills/                # Agent Skills shared by Pi and compatible agents
   claude-review/       # Claude Code /code-review workflow
@@ -29,8 +29,7 @@ pi-themes/             # Pi agent color themes
   obsec-dark.json
   obsec-light.json
 
-create-sound-symlinks.sh       # Shares sound files across harness event names
-create-pi-subagent-symlinks.sh # Installs repo-owned Pi subagent definitions
+create-sound-symlinks.sh # Shares sound files across harness event names
 ```
 
 ## Sound Notifications
@@ -184,13 +183,15 @@ extension from this checkout (or distribute it as a pi package); copying only
 
 ### Pi: Subagent definitions (`pi-subagents/`)
 
-Overrides all builtin `pi-subagents` role prompts at user scope while keeping local model,
-thinking, and tool selection in `~/.pi/agent/settings.json`. The local tool mapping replaces
-`web_search` with `exa_search` and collapses `fetch_content`/`get_search_content` into
-`webfetch`; other upstream allowlists are preserved. Run `./create-pi-subagent-symlinks.sh`
-to link the definitions into `~/.pi/agent/agents/`.
+Publishes package-owned prompt overrides for the `context-builder`, `researcher`, and
+`reviewer` roles while keeping local model, thinking, and tool selection in
+`~/.pi/agent/settings.json`. Unmodified roles continue to use the bundled definitions. The
+local web-tool mapping replaces `web_search` with `exa_search` and collapses
+`fetch_content`/`get_search_content` into `webfetch`.
 
-See [`pi-subagents/README.md`](pi-subagents/README.md) for provenance and update guidance.
+The installed `agent-customization` Pi package exposes these definitions through
+`pi.subagents.agents`; no user-scope symlinks are required. See
+[`pi-subagents/README.md`](pi-subagents/README.md) for provenance and update guidance.
 
 ### Pi: RTK (`pi-extensions/rtk.ts`)
 

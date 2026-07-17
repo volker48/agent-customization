@@ -57,6 +57,11 @@
     ],
     "prompts": [
       "./prompts"
-    ]
+    ],
+    "subagents": {
+      "agents": [
+        "./pi-subagents/agents"
+      ]
+    }
   }
 }
