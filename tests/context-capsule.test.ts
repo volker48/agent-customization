@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile as writeFileFs } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -136,7 +136,7 @@ async function createCapsule(overrides: Partial<Parameters<typeof generateCapsul
   return result.value;
 }
 
-function commandContext(options: { confirm?: boolean; hasUI?: boolean } = {}) {
+function commandContext(options: { confirm?: boolean; hasUI?: boolean; sendError?: Error } = {}) {
   const notifications: Array<{ message: string; level?: string }> = [];
   const appended: Array<{
     customType: string;
@@ -169,6 +169,7 @@ function commandContext(options: { confirm?: boolean; hasUI?: boolean } = {}) {
       });
       await nextOptions.withSession?.({
         sendUserMessage: async (content) => {
+          if (options.sendError) throw options.sendError;
           sent.push(content);
         },
         ui: { notify: (message, level) => notifications.push({ message, level }) },
@@ -236,14 +237,25 @@ describe("Context Capsule application service", () => {
     ].join("\\n");
     const secret = "api_key=super-secret";
     const snapshot = extractSessionEvidence(
-      [{ type: "message", message: { role: "user", content: `${pem} ${secret}` } }],
+      [
+        {
+          type: "message",
+          message: {
+            role: "user",
+            content: `${pem} ${secret} https://token@example.test/path https://user:password@example.test/path`,
+          },
+        },
+      ],
       "/work/project",
     );
     const result = await generateCapsule(
       {
         ...snapshot,
         constraints: [`Authorization: Bearer bearer-secret`, `JWT eyJheader.payload.signature`],
-        decisions: [{ statement: "https://user:password@example.test/path", status: "unknown" }],
+        decisions: [
+          { statement: "https://token@example.test/path", status: "unknown" },
+          { statement: "https://user:password@example.test/path", status: "unknown" },
+        ],
         resources: [{ kind: "github", value: "AWS_SECRET_ACCESS_KEY=cloud-secret" }],
         observedChanges: [{ path: "src/safe.ts", status: "observed", provenance: "none" }],
         validation: [
@@ -258,6 +270,7 @@ describe("Context Capsule application service", () => {
     expect(json).not.toContain("MIIEvQ");
     expect(json).not.toContain("super-secret");
     expect(json).not.toContain("bearer-secret");
+    expect(json).not.toContain("token@example");
     expect(json).not.toContain("password@example");
     expect(json).not.toContain("cloud-secret");
     expect(json).not.toContain("cli-secret");
@@ -295,6 +308,7 @@ describe("Context Capsule application service", () => {
 
     const unsafeCapsules: Capsule[] = [
       { ...generated.value, objective: "OPENAI_API_KEY=unredacted" },
+      { ...generated.value, objective: "https://token@example.test/path" },
       { ...generated.value, constraints: ["GH_TOKEN: unredacted"] },
       {
         ...generated.value,
@@ -455,7 +469,36 @@ describe("Context Capsule application service", () => {
       },
     ];
 
-    const snapshot = extractSessionEvidence([...toolCalls, ...prose], "/work/project");
+    const chained = [
+      "cd /tmp && git status --short",
+      "echo before; git diff --name-only",
+      "git status --short && echo after",
+    ].flatMap((command, index) => [
+      {
+        type: "message" as const,
+        message: {
+          role: "assistant" as const,
+          content: [
+            {
+              type: "toolCall" as const,
+              id: `status-chained-${index}`,
+              name: "bash",
+              arguments: { command },
+            },
+          ],
+        },
+      },
+      {
+        type: "message" as const,
+        message: {
+          role: "toolResult" as const,
+          toolCallId: `status-chained-${index}`,
+          content: " M src/should-not-be-recorded.ts",
+          isError: false,
+        },
+      },
+    ]);
+    const snapshot = extractSessionEvidence([...toolCalls, ...prose, ...chained], "/work/project");
     expect(snapshot.observedChanges).toEqual(
       [
         "src/short.ts",
@@ -466,6 +509,67 @@ describe("Context Capsule application service", () => {
         "src/diff.ts",
       ].map((path) => ({ path, status: "observed", provenance: "none" })),
     );
+  });
+
+  it("recognizes explicit zero-failure validation output as passed", () => {
+    const cases = ["10 passed, 0 failed", "Found 0 errors", "no failures"];
+    const entries = cases.flatMap((output, index) => [
+      {
+        type: "message" as const,
+        message: {
+          role: "assistant" as const,
+          content: [
+            {
+              type: "toolCall" as const,
+              id: `success-${index}`,
+              name: "bash",
+              arguments: { command: "pnpm test" },
+            },
+          ],
+        },
+      },
+      {
+        type: "message" as const,
+        message: {
+          role: "toolResult" as const,
+          toolCallId: `success-${index}`,
+          content: output,
+          isError: false,
+        },
+      },
+    ]);
+    const snapshot = extractSessionEvidence(entries, "/work/project");
+    expect(snapshot.validation.map((item) => item.outcome)).toEqual(["passed", "passed", "passed"]);
+
+    const mixed = extractSessionEvidence(
+      [
+        {
+          type: "message",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "mixed",
+                name: "bash",
+                arguments: { command: "pnpm test" },
+              },
+            ],
+          },
+        },
+        {
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolCallId: "mixed",
+            content: "10 passed, 1 failed",
+            isError: false,
+          },
+        },
+      ],
+      "/work/project",
+    );
+    expect(mixed.validation[0]?.outcome).toBe("failed");
   });
 
   it("never reports ambiguous or interrupted validation as passed", () => {
@@ -695,6 +799,13 @@ describe("Context Capsule application service", () => {
       value: capsule,
     });
 
+    const oversizedPath = join(root, "oversized.json");
+    await writeFileFs(oversizedPath, "x".repeat(CAPSULE_MAX_BYTES + 1), "utf8");
+    await expect(loadCapsule(oversizedPath)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "oversized" },
+    });
+
     const duplicate = await saveCapsule({ ...capsule, objective: "mutated" }, { rootDir: root });
     expect(duplicate).toMatchObject({ ok: false, error: { code: "io" } });
     expect(await readFile(join(root, "capsule-secure.json"), "utf8")).toBe(
@@ -823,6 +934,24 @@ describe("/capsule command", () => {
       expect.stringContaining("Review and verify its recorded next action"),
     ]);
     expect(harness.sent[0]).not.toContain(capsule.nextAction);
+  });
+
+  it("reports post-switch message failures through the replacement session UI", async () => {
+    const capsule = await createCapsule({ capsuleId: "send-failure-capsule" });
+    const harness = commandContext({ confirm: true, sendError: new Error("send failed") });
+
+    await expect(
+      handleCapsuleCommand(
+        "resume",
+        harness.context,
+        { lastPreview: capsule },
+        { load: vi.fn(), save: vi.fn() },
+      ),
+    ).resolves.toBeUndefined();
+    expect(harness.notifications.at(-1)).toEqual({
+      message: "Unable to continue in replacement session: send failed",
+      level: "error",
+    });
   });
 
   it("keeps adversarial next-action text inside the untrusted capsule boundary", async () => {

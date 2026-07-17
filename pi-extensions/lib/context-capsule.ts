@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmod, link, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, open, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 
@@ -189,7 +189,7 @@ const PEM_PRIVATE_KEY =
   /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/gi;
 const PEM_REMAINDER = /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*$/i;
 const AUTHORIZATION_CREDENTIAL = /\b(?:authorization\s*:\s*|bearer\s+)(?:bearer\s+)?[^\s,;]+/gi;
-const CREDENTIAL_URL = /([a-z][a-z\d+.-]*:\/\/)([^\s/@:]+):([^\s/@]+)@/gi;
+const CREDENTIAL_URL = /([a-z][a-z\d+.-]*:\/\/)([^\s/@]+)@/gi;
 const JWT = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
 const SECRET_MARKERS = [
   /\bgh[opusr]_[A-Za-z0-9_]{20,}\b/g,
@@ -216,11 +216,7 @@ function containsSensitiveValue(value: string): boolean {
     return true;
   }
   CREDENTIAL_URL.lastIndex = 0;
-  if (
-    [...value.matchAll(CREDENTIAL_URL)].some(
-      (match) => match[2] !== "[REDACTED]" || match[3] !== "[REDACTED]",
-    )
-  ) {
+  if ([...value.matchAll(CREDENTIAL_URL)].some((match) => match[2] !== "[REDACTED]")) {
     CREDENTIAL_URL.lastIndex = 0;
     return true;
   }
@@ -559,20 +555,28 @@ function validationOutcome(result: SessionEntryLike | undefined): CapsuleValidat
     return "blocked";
   }
   if (result.message?.isError) return "failed";
-  if (
-    /command exited with code [1-9]\d*/i.test(output) ||
-    /\b(?:failed|failure|error)\b/i.test(output)
-  ) {
-    return "failed";
-  }
-  // A successful result must carry explicit zero/success evidence. An empty
-  // or otherwise ambiguous tool result is never promoted to passed.
-  if (
+  const hasExplicitSuccess =
     /\b(?:exit(?:ed)?|status|code)\s*[:=]?\s*0\b/i.test(output) ||
-    /\b(?:passed|pass|success(?:ful)?|completed successfully|all tests? passed|ok)\b/i.test(output)
+    /\b(?:passed|pass|success(?:ful)?|completed successfully|all tests? passed|ok)\b/i.test(
+      output,
+    ) ||
+    /\b\d+\s+passed\b/i.test(output) ||
+    /\b0\s+(?:failed|failures?|errors?)\b/i.test(output) ||
+    /\bno\s+failures?\b/i.test(output);
+  const hasNonZeroFailure =
+    /command exited with code [1-9]\d*/i.test(output) ||
+    /\b[1-9]\d*\s+(?:failed|failures?|errors?)\b/i.test(output);
+  const failureEvidence = output
+    .replace(/\b0\s+(?:failed|failures?|errors?)\b/gi, "")
+    .replace(/\bno\s+failures?\b/gi, "");
+  if (
+    hasExplicitSuccess &&
+    !hasNonZeroFailure &&
+    !/\b(?:failed|failure|error)\b/i.test(failureEvidence)
   ) {
     return "passed";
   }
+  if (hasNonZeroFailure || /\b(?:failed|failure|error)\b/i.test(output)) return "failed";
   return "unknown";
 }
 
@@ -583,7 +587,8 @@ function isValidationCommand(command: string): boolean {
 }
 
 function repositoryStateCommand(command: string): boolean {
-  return /(?:^|[;&|]\s*)git\s+(?:(?:status\s+(?:--short|--porcelain(?:=v[12])?|-s)(?:\s+[^;&|]+)?)|(?:diff\s+--name-only(?:\s+[^;&|]+)?))\s*$/i.test(
+  if (/[;&|<>\n\r`]/.test(command) || command.includes("$(")) return false;
+  return /^git\s+(?:(?:status\s+(?:--short|--porcelain(?:=v[12])?|-s)(?:\s+[^;&|\n]+)?)|(?:diff\s+--name-only(?:\s+[^;&|\n]+)?))\s*$/i.test(
     command.trim(),
   );
 }
@@ -1422,13 +1427,24 @@ export async function loadCapsule(
   const target = resolveCapsuleReference(reference, store.rootDir ?? defaultCapsuleRoot());
   try {
     if (!store.readFile) {
-      const metadata = await stat(target);
-      if (!metadata.isFile()) return fail("io", "Capsule reference is not a regular file.");
-      const raw = await readFile(target);
-      if (raw.byteLength > CAPSULE_MAX_BYTES) {
-        return fail("oversized", `Capsule exceeds ${CAPSULE_MAX_BYTES} UTF-8 bytes.`);
+      const file = await open(target, "r");
+      try {
+        const metadata = await file.stat();
+        if (!metadata.isFile()) return fail("io", "Capsule reference is not a regular file.");
+        const buffer = Buffer.allocUnsafe(CAPSULE_MAX_BYTES + 1);
+        let bytesRead = 0;
+        while (bytesRead < buffer.length) {
+          const result = await file.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+          if (result.bytesRead === 0) break;
+          bytesRead += result.bytesRead;
+        }
+        if (bytesRead > CAPSULE_MAX_BYTES) {
+          return fail("oversized", `Capsule exceeds ${CAPSULE_MAX_BYTES} UTF-8 bytes.`);
+        }
+        return parseCapsule(buffer.subarray(0, bytesRead).toString("utf8"));
+      } finally {
+        await file.close();
       }
-      return parseCapsule(raw.toString("utf8"));
     }
     const raw = await store.readFile(target);
     if (Buffer.byteLength(raw, "utf8") > CAPSULE_MAX_BYTES) {
