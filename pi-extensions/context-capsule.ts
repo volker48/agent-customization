@@ -16,6 +16,7 @@ import {
   composePinnedCompactionSummary,
   stripPinnedCompactionSummary,
   CONTEXT_CAPSULE_PINS_ENTRY,
+  CONTEXT_CAPSULE_PINS_MESSAGE,
   type Capsule,
   type CapsuleFact,
   type CapsulePinState,
@@ -26,9 +27,16 @@ import {
 
 type CompactionPreparation = Parameters<typeof compact>[0];
 
+type PendingCapsuleSelection = {
+  facts: CapsuleFact[];
+  sessionId: string;
+  capsuleId: string;
+  revision: number;
+};
+
 export type CapsuleCommandState = {
   lastPreview?: Capsule;
-  pendingFacts?: CapsuleFact[];
+  pendingFacts?: PendingCapsuleSelection;
 };
 
 export type CapsuleCommandContext = {
@@ -92,6 +100,11 @@ function pinError(result: CapsuleResult<unknown>): string {
 
 function showPins(context: CapsuleCommandContext, state = currentPinState(context)): void {
   context.ui.notify(renderCapsulePins(state), "info");
+}
+
+function setLastPreview(state: CapsuleCommandState, capsule: Capsule): void {
+  state.lastPreview = capsule;
+  state.pendingFacts = undefined;
 }
 
 function showPreview(context: CapsuleCommandContext, capsule: Capsule): void {
@@ -201,7 +214,7 @@ async function handlePinsCommand(
         return;
       }
       capsule = loaded.value;
-      state.lastPreview = capsule;
+      setLastPreview(state, capsule);
     }
     if (!capsule) {
       context.ui.notify(
@@ -210,9 +223,15 @@ async function handlePinsCommand(
       );
       return;
     }
-    state.pendingFacts = selectCapsuleFacts(capsule);
+    const pendingFacts = selectCapsuleFacts(capsule);
+    state.pendingFacts = {
+      facts: pendingFacts,
+      sessionId: context.sessionManager.getSessionId(),
+      capsuleId: capsule.capsuleId,
+      revision: capsule.revision,
+    };
     const existing = currentPinState(context);
-    const text = state.pendingFacts
+    const text = pendingFacts
       .map(
         (fact, index) =>
           `${index + 1}. [${fact.category}] ${fact.statement}${existing.pins.some((pin) => pin.category === fact.category && pin.statement === fact.statement) ? " (already pinned)" : ""}`,
@@ -227,11 +246,23 @@ async function handlePinsCommand(
       context.ui.notify("Usage: /capsule pins confirm <comma-separated fact numbers>", "error");
       return;
     }
-    if (!state.pendingFacts) {
+    const pending = state.pendingFacts;
+    const currentCapsule = state.lastPreview;
+    if (!pending) {
       context.ui.notify("Select capsule facts first: /capsule pins select [ref]", "error");
       return;
     }
-    const selected = indices.map((index) => state.pendingFacts?.[index - 1]);
+    if (
+      pending.sessionId !== context.sessionManager.getSessionId() ||
+      !currentCapsule ||
+      pending.capsuleId !== currentCapsule.capsuleId ||
+      pending.revision !== currentCapsule.revision
+    ) {
+      state.pendingFacts = undefined;
+      context.ui.notify("Capsule fact selection is stale; select facts again.", "error");
+      return;
+    }
+    const selected = indices.map((index) => pending.facts[index - 1]);
     if (selected.some((fact) => !fact)) {
       context.ui.notify("One or more selected fact numbers are out of range.", "error");
       return;
@@ -324,7 +355,7 @@ export async function handleCapsuleCommand(
       context.ui.notify(`Capsule generation failed: ${resultError(generated)}`, "error");
       return;
     }
-    state.lastPreview = generated.value;
+    setLastPreview(state, generated.value);
     showPreview(context, generated.value);
 
     if (command === "save") {
@@ -356,7 +387,7 @@ export async function handleCapsuleCommand(
       context.ui.notify(`Capsule load failed: ${resultError(loaded)}`, "error");
       return;
     }
-    state.lastPreview = loaded.value;
+    setLastPreview(state, loaded.value);
     showPreview(context, loaded.value);
     return;
   }
@@ -370,6 +401,7 @@ export async function handleCapsuleCommand(
         return;
       }
       capsule = loaded.value;
+      setLastPreview(state, capsule);
     }
     if (!capsule) {
       context.ui.notify(
@@ -401,15 +433,8 @@ export async function handleCapsuleCommand(
 
 function isPinnedProjectionMessage(message: unknown): boolean {
   if (!message || typeof message !== "object") return false;
-  try {
-    const serialized = JSON.stringify(message);
-    return (
-      serialized.includes("CONFIRMED CONTEXT CAPSULE FACTS (") ||
-      serialized.includes("## Confirmed Context Capsule facts")
-    );
-  } catch {
-    return false;
-  }
+  const candidate = message as { role?: unknown; customType?: unknown };
+  return candidate.role === "custom" && candidate.customType === CONTEXT_CAPSULE_PINS_MESSAGE;
 }
 
 /** Keep Pi's normal cut point and metadata while replacing only its summary projection. */

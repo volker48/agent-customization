@@ -12,6 +12,8 @@ export const CAPSULE_PIN_MAX_COUNT = 20;
 /** Maximum UTF-8 size of the persisted pin state and compaction projection. */
 export const CAPSULE_PIN_MAX_BYTES = 8 * 1024;
 export const CONTEXT_CAPSULE_PINS_ENTRY = "context-capsule-pins";
+/** Custom message type used by older sessions for the hidden pin projection. */
+export const CONTEXT_CAPSULE_PINS_MESSAGE = "context-capsule-pinned-facts";
 
 const MAX_TEXT = 2_000;
 const MAX_ENTRY = 1_000;
@@ -949,8 +951,12 @@ function validPinCategory(value: unknown): value is CapsulePinCategory {
 
 function normalizePin(value: unknown): CapsulePin | undefined {
   if (!isRecord(value) || !validPinCategory(value.category)) return undefined;
-  const statement = sanitizeText(value.statement, MAX_ENTRY).value;
-  return statement ? { category: value.category, statement } : undefined;
+  if (typeof value.statement !== "string") return undefined;
+  const sanitized = sanitizeText(value.statement, MAX_ENTRY);
+  // Persisted facts must already be canonical and safe. Never silently turn a
+  // redacted, truncated, or whitespace-normalized statement into a different fact.
+  if (!sanitized.value || sanitized.value !== value.statement) return undefined;
+  return { category: value.category, statement: sanitized.value };
 }
 
 /** Return the explicitly selectable facts in stable, user-facing order. */
@@ -1058,23 +1064,36 @@ export function capsulePinsPrompt(state: CapsulePinState): string {
 }
 
 const PINNED_SUMMARY_MARKER = "## Confirmed Context Capsule facts";
-const PINNED_PROMPT_END = "Do not add, infer, or promote other capsule facts.";
+const PINNED_SUMMARY_ENVELOPE = "pi-context-capsule-pins";
+const PINNED_SUMMARY_CLOSE = `<!-- /${PINNED_SUMMARY_ENVELOPE}:v1 -->`;
 
-/** Remove projections from older compactions before Pi summarizes again. */
-export function stripPinnedCompactionSummary(summary: string): string {
-  let cleaned = summary;
-  const headingStart = cleaned.indexOf(PINNED_SUMMARY_MARKER);
-  if (headingStart >= 0) cleaned = cleaned.slice(0, headingStart).trimEnd();
-  const promptStart = cleaned.indexOf("CONFIRMED CONTEXT CAPSULE FACTS (");
-  if (promptStart >= 0) {
-    const promptEnd = cleaned.indexOf(PINNED_PROMPT_END, promptStart);
-    cleaned = (
-      promptEnd < 0
-        ? cleaned.slice(0, promptStart)
-        : cleaned.slice(0, promptStart) + cleaned.slice(promptEnd + PINNED_PROMPT_END.length)
-    ).trim();
+function encodePinnedProjection(projection: string): string {
+  return Buffer.from(projection, "utf8").toString("base64url");
+}
+
+function decodePinnedProjection(encoded: string): string | undefined {
+  try {
+    return Buffer.from(encoded, "base64url").toString("utf8");
+  } catch {
+    return undefined;
   }
-  return cleaned;
+}
+
+/** Remove only projections emitted by composePinnedCompactionSummary. */
+export function stripPinnedCompactionSummary(summary: string): string {
+  // Match and validate the complete envelope in one pass. The encoded payload
+  // must exactly equal the visible body, so marker-like ordinary prose is safe.
+  const envelope = new RegExp(
+    `<!-- ${PINNED_SUMMARY_ENVELOPE}:v1:([A-Za-z0-9_-]+) -->\\n([\\s\\S]*?)\\n${PINNED_SUMMARY_CLOSE}`,
+    "g",
+  );
+  let removed = false;
+  const cleaned = summary.replace(envelope, (full, encoded: string, body: string) => {
+    if (decodePinnedProjection(encoded) !== body) return full;
+    removed = true;
+    return "";
+  });
+  return removed ? cleaned.replace(/\n{3,}/g, "\n\n").trim() : summary;
 }
 
 /** Compose the current authoritative projection onto Pi's normal summary. */
@@ -1084,7 +1103,9 @@ export function composePinnedCompactionSummary(
 ): string {
   const cleaned = stripPinnedCompactionSummary(normalSummary);
   if (!state.pins.length) return cleaned;
-  return `${cleaned}\n\n${PINNED_SUMMARY_MARKER}\n${renderCapsulePins(state)}`;
+  const projection = `${PINNED_SUMMARY_MARKER}\n${renderCapsulePins(state)}`;
+  const encoded = encodePinnedProjection(projection);
+  return `${cleaned}\n\n<!-- ${PINNED_SUMMARY_ENVELOPE}:v1:${encoded} -->\n${projection}\n${PINNED_SUMMARY_CLOSE}`;
 }
 
 export async function generateCapsule(

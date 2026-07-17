@@ -9,6 +9,7 @@ import {
   CAPSULE_PIN_MAX_BYTES,
   CAPSULE_PIN_MAX_COUNT,
   CONTEXT_CAPSULE_PINS_ENTRY,
+  CONTEXT_CAPSULE_PINS_MESSAGE,
   capsulePinsPrompt,
   capsulePrompt,
   composePinnedCompactionSummary,
@@ -160,6 +161,7 @@ function commandContext(
     hasUI?: boolean;
     branch?: SessionEntryLike[];
     sendError?: Error;
+    sessionId?: string;
   } = {},
 ) {
   const notifications: Array<{ message: string; level?: string }> = [];
@@ -171,6 +173,7 @@ function commandContext(
   }> = [];
   const sent: string[] = [];
   const branch = options.branch ?? [...entries];
+  let sessionId = options.sessionId ?? "session-1";
   let newSessionOptions: Parameters<CapsuleCommandContext["newSession"]>[0] | undefined;
   const context: CapsuleCommandContext = {
     cwd: "/work/project",
@@ -178,7 +181,7 @@ function commandContext(
     waitForIdle: vi.fn(async () => undefined),
     sessionManager: {
       getBranch: () => branch,
-      getSessionId: () => "session-1",
+      getSessionId: () => sessionId,
       getSessionFile: () => "/sessions/session-1.jsonl",
       appendCustomEntry: (customType, data) => {
         branch.push({ type: "custom", customType, data });
@@ -213,6 +216,9 @@ function commandContext(
     appended,
     sent,
     getNewSessionOptions: () => newSessionOptions,
+    setSessionId: (next: string) => {
+      sessionId = next;
+    },
     branch,
   };
 }
@@ -774,6 +780,24 @@ describe("Context Capsule application service", () => {
     });
   });
 
+  it("rejects persisted pin statements changed by sanitization", () => {
+    const valid = { version: 1, pins: [{ category: "objective", statement: "Keep this exact" }] };
+    expect(validateCapsulePinState(valid)).toMatchObject({ ok: true, value: valid });
+    for (const statement of [" Keep this exact", "Keep  this exact", "token=secret"]) {
+      expect(
+        validateCapsulePinState({
+          version: 1,
+          pins: [{ category: "objective", statement }],
+        }),
+      ).toMatchObject({ ok: false, error: { code: "unsafe" } });
+    }
+    expect(
+      pinCapsuleFacts({ version: 1, pins: [] }, [
+        { category: "objective", statement: "Keep this exact " },
+      ]),
+    ).toMatchObject({ ok: false, error: { code: "unsafe" } });
+  });
+
   it("rejects pin count and serialized-size limits with actionable errors", async () => {
     const facts = Array.from({ length: CAPSULE_PIN_MAX_COUNT + 1 }, (_, index) => ({
       category: "constraint" as const,
@@ -835,6 +859,45 @@ describe("Context Capsule application service", () => {
     expect(readCapsulePinState(cancelled.branch).pins).toHaveLength(1);
   });
 
+  it("preserves ordinary marker text in messages and summaries", () => {
+    const markerText =
+      "ordinary ## Confirmed Context Capsule facts and CONFIRMED CONTEXT CAPSULE FACTS ( text";
+    expect(stripPinnedCompactionSummary(markerText)).toBe(markerText);
+    const message = {
+      role: "user",
+      content: markerText,
+    };
+    expect(message).toEqual({ role: "user", content: markerText });
+  });
+
+  it("rejects confirmation after switching capsules or sessions", async () => {
+    const firstCapsule = await createCapsule({ capsuleId: "switch-first" });
+    const secondCapsule = await createCapsule({ capsuleId: "switch-second", revision: 2 });
+    const harness = commandContext({ confirm: true });
+    const state = { lastPreview: firstCapsule };
+    const dependencies = {
+      load: vi.fn(async () => ({ ok: true as const, value: secondCapsule })),
+      save: vi.fn(),
+    };
+
+    await handleCapsuleCommand("pins select", harness.context, state, dependencies);
+    await handleCapsuleCommand("load second", harness.context, state, dependencies);
+    await handleCapsuleCommand("pins confirm 1", harness.context, state, dependencies);
+    expect(harness.branch).not.toContainEqual(
+      expect.objectContaining({ customType: CONTEXT_CAPSULE_PINS_ENTRY }),
+    );
+    expect(harness.notifications.at(-1)?.message).toContain("Select capsule facts first");
+
+    state.lastPreview = firstCapsule;
+    await handleCapsuleCommand("pins select", harness.context, state, dependencies);
+    harness.setSessionId("session-switched");
+    await handleCapsuleCommand("pins confirm 1", harness.context, state, dependencies);
+    expect(harness.branch).not.toContainEqual(
+      expect.objectContaining({ customType: CONTEXT_CAPSULE_PINS_ENTRY }),
+    );
+    expect(harness.notifications.at(-1)?.message).toContain("selection is stale");
+  });
+
   it("uses the latest pin state for every compaction and revokes removed projections", async () => {
     const capsule = await createCapsule({ capsuleId: "compaction-pins" });
     const facts = selectCapsuleFacts(capsule);
@@ -869,7 +932,15 @@ describe("Context Capsule application service", () => {
     const preparation = {
       firstKeptEntryId: "kept",
       messagesToSummarize: [
-        { role: "user", content: capsulePinsPrompt(first.value) },
+        {
+          role: "custom",
+          customType: CONTEXT_CAPSULE_PINS_MESSAGE,
+          content: capsulePinsPrompt(first.value),
+        },
+        {
+          role: "user",
+          content: "ordinary ## Confirmed Context Capsule facts marker text",
+        },
         { role: "user", content: "ordinary history" },
       ],
       turnPrefixMessages: [],
@@ -892,7 +963,12 @@ describe("Context Capsule application service", () => {
         summary: expect.stringContaining(facts[0].statement),
       },
     });
-    expect(vi.mocked(compact).mock.calls[0][0].messagesToSummarize).toHaveLength(1);
+    expect(vi.mocked(compact).mock.calls[0][0].messagesToSummarize).toHaveLength(2);
+    expect(vi.mocked(compact).mock.calls[0][0].messagesToSummarize).toContainEqual(
+      expect.objectContaining({
+        content: "ordinary ## Confirmed Context Capsule facts marker text",
+      }),
+    );
 
     branch.push({
       type: "custom",
