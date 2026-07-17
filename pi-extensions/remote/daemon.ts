@@ -99,7 +99,7 @@ export async function startRemoteDaemon(options: RemoteDaemonOptions): Promise<R
   const endpoint = await bindEndpoint(await loadSecretKey(remoteRoot));
   const ticket = endpointTicket(endpoint);
   const pairingWindow = new PairingWindow(pairingCodeFactory(options));
-  const streamingAttachCounts = new Map<string, number>();
+  const streamingAttachCounts = new Map<string, Map<number, number>>();
   const nodeAttachCounts = new Map<string, number>();
   let daemon: RemoteDaemon;
   let ipc: IpcDaemonServer;
@@ -145,7 +145,7 @@ async function acceptConnections(
   ipc: IpcDaemonServer,
   allowlist: FileNodeAllowlist,
   pairingWindow: PairingWindow,
-  streamingAttachCounts: Map<string, number>,
+  streamingAttachCounts: Map<string, Map<number, number>>,
   nodeAttachCounts: Map<string, number>,
   isClosed: () => boolean,
 ): Promise<void> {
@@ -171,7 +171,7 @@ async function handleConnection(
   ipc: IpcDaemonServer,
   allowlist: FileNodeAllowlist,
   pairingWindow: PairingWindow,
-  streamingAttachCounts: Map<string, number>,
+  streamingAttachCounts: Map<string, Map<number, number>>,
   nodeAttachCounts: Map<string, number>,
 ): Promise<void> {
   const stream = await acceptStream(connection);
@@ -210,7 +210,7 @@ async function handleConnection(
       if (streamingAttachSessionId && response && !retained.has(streamingAttachSessionId)) {
         const generation = ipc.registry.get(streamingAttachSessionId)?.generation;
         if (generation !== undefined) {
-          retainStreamingAttach(streamingAttachCounts, streamingAttachSessionId);
+          retainStreamingAttach(streamingAttachCounts, streamingAttachSessionId, generation);
           retainNodeAttach(nodeAttachCounts, nodeId, streamingAttachSessionId, generation);
           retained.set(streamingAttachSessionId, generation);
         }
@@ -246,7 +246,7 @@ async function handleConnection(
     try {
       await detachAttachedSessions(
         ipc,
-        releaseStreamingAttaches(streamingAttachCounts, retained.keys()),
+        releaseStreamingAttaches(streamingAttachCounts, retained.entries()),
       );
     } finally {
       unsubscribe();
@@ -514,7 +514,14 @@ function capsuleProjectionFrom(value: unknown): CapsuleProjection | "oversized" 
   }
   const redactions = value.redactions.map(redactionFrom);
   if (redactions.some((entry) => entry === null)) return null;
-  if (typeof value.truncated !== "boolean" || value.maxPayloadBytes !== CAPSULE_MAX_BYTES) {
+  const expectedTruncated = (redactions as CapsuleProjection["redactions"]).some(
+    (entry) => entry.category === "oversized",
+  );
+  if (
+    typeof value.truncated !== "boolean" ||
+    value.truncated !== expectedTruncated ||
+    value.maxPayloadBytes !== CAPSULE_MAX_BYTES
+  ) {
     return null;
   }
 
@@ -784,15 +791,25 @@ async function receiveEnvelopesWithTimeout(
 
 async function detachAttachedSessions(
   ipc: IpcDaemonServer,
-  sessionIds: Set<string>,
+  sessionGenerations: Iterable<readonly [string, number]>,
 ): Promise<void> {
-  for (const sessionId of sessionIds) {
+  for (const [sessionId, generation] of sessionGenerations) {
+    const entry = ipc.registry.get(sessionId);
+    if (!entry || entry.generation !== generation) continue;
     await safeSendToSession(ipc, { sessionId, type: "detach", payload: {} });
   }
 }
 
-function retainStreamingAttach(counts: Map<string, number>, sessionId: string): void {
-  counts.set(sessionId, (counts.get(sessionId) ?? 0) + 1);
+type StreamingAttachCounts = Map<string, Map<number, number>>;
+
+function retainStreamingAttach(
+  counts: StreamingAttachCounts,
+  sessionId: string,
+  generation: number,
+): void {
+  const generations = counts.get(sessionId) ?? new Map<number, number>();
+  generations.set(generation, (generations.get(generation) ?? 0) + 1);
+  counts.set(sessionId, generations);
 }
 
 function nodeAttachKey(nodeId: string, sessionId: string, generation: number): string {
@@ -832,17 +849,19 @@ function releaseNodeAttaches(
 }
 
 function releaseStreamingAttaches(
-  counts: Map<string, number>,
-  sessionIds: Iterable<string>,
-): Set<string> {
-  const lastReleased = new Set<string>();
-  for (const sessionId of sessionIds) {
-    const count = counts.get(sessionId) ?? 0;
+  counts: StreamingAttachCounts,
+  sessionGenerations: Iterable<readonly [string, number]>,
+): Set<readonly [string, number]> {
+  const lastReleased = new Set<readonly [string, number]>();
+  for (const [sessionId, generation] of sessionGenerations) {
+    const generations = counts.get(sessionId);
+    const count = generations?.get(generation) ?? 0;
     if (count <= 1) {
-      counts.delete(sessionId);
-      lastReleased.add(sessionId);
+      generations?.delete(generation);
+      if (generations?.size === 0) counts.delete(sessionId);
+      lastReleased.add([sessionId, generation]);
     } else {
-      counts.set(sessionId, count - 1);
+      generations?.set(generation, count - 1);
     }
   }
   return lastReleased;

@@ -301,9 +301,9 @@ private func cancelledCapsuleFetchDoesNotLeaveAnError() async throws {
   request.cancel()
   _ = await request.value
 
-  let errorMessage = await store.capsuleErrorMessage
+  let errorMessages = await store.capsuleErrorMessages
   let capsule = await store.capsule(for: "session-1")
-  try expect(errorMessage == nil)
+  try expect(errorMessages.isEmpty)
   try expect(capsule == nil)
 }
 
@@ -898,8 +898,34 @@ private actor CancellableCapsuleTransport: RemoteTransport {
 
   func request(ticket: String, envelopes: [Envelope]) async throws -> [Envelope] {
     requestStarted = true
-    try await Task.sleep(nanoseconds: 10_000_000_000)
-    return []
+    try? await Task.sleep(nanoseconds: 10_000_000_000)
+    return [
+      .control(
+        .init(
+          type: .list,
+          payload: [
+            "operation": .string("capsule"),
+            "requestId": .string("cancelled"),
+            "supported": .bool(true),
+            "capsule": [
+              "capsuleId": .string("cancelled-capsule"),
+              "schemaVersion": .number(1),
+              "revision": .number(1),
+              "objective": .string("Should not be stored"),
+              "constraints": .array([]),
+              "decisions": .array([]),
+              "validation": .array([]),
+              "blockers": .array([]),
+              "risks": .array([]),
+              "nextAction": .string("No action"),
+              "redactions": .array([]),
+              "truncated": .bool(false),
+              "maxPayloadBytes": .number(32 * 1024),
+            ],
+          ]
+        )
+      )
+    ]
   }
 
   nonisolated func stream(

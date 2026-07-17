@@ -386,6 +386,91 @@ describe("remote Unix-socket IPC", () => {
     }
   });
 
+  it("keeps request identities exact for colon-containing session and request ids", async () => {
+    const socketPath = await tempSocketPath();
+    const daemon = await startIpcDaemonServer(socketPath);
+
+    try {
+      const first = await connectIpcExtension(socketPath, {
+        sessionId: "tenant",
+        name: "First",
+        cwd: "/repo/one",
+      });
+      const second = await connectIpcExtension(socketPath, {
+        sessionId: "tenant:one",
+        name: "Second",
+        cwd: "/repo/two",
+      });
+      await daemon.waitForSession("tenant");
+      await daemon.waitForSession("tenant:one");
+
+      const firstResponse = daemon.requestFromSession({
+        sessionId: "tenant",
+        type: "capsule",
+        payload: { requestId: "one:two" },
+      });
+      const secondResponse = daemon.requestFromSession({
+        sessionId: "tenant:one",
+        type: "capsule",
+        payload: { requestId: "two" },
+      });
+      await first.readNext();
+      await second.readNext();
+      await first.send({
+        sessionId: "tenant",
+        type: "capsule",
+        payload: { requestId: "one:two", supported: true },
+      });
+      await second.send({
+        sessionId: "tenant:one",
+        type: "capsule",
+        payload: { requestId: "two", supported: true },
+      });
+
+      await expect(firstResponse).resolves.toMatchObject({ sessionId: "tenant" });
+      await expect(secondResponse).resolves.toMatchObject({ sessionId: "tenant:one" });
+      await first.close();
+      await second.close();
+    } finally {
+      await daemon.close();
+    }
+  });
+
+  it("consumes late capsule responses without publishing them to listeners", async () => {
+    const socketPath = await tempSocketPath();
+    const published: IpcEnvelope[] = [];
+    const daemon = await startIpcDaemonServer(socketPath, {
+      onFrame: (frame) => published.push(frame),
+    });
+
+    try {
+      const extension = await connectIpcExtension(socketPath, {
+        sessionId: "session:one",
+        name: "Work session",
+        cwd: "/repo",
+      });
+      await daemon.waitForSession("session:one");
+      const response = daemon.requestFromSession(
+        { sessionId: "session:one", type: "capsule", payload: { requestId: "late" } },
+        { timeoutMs: 1 },
+      );
+      const rejection = expect(response).rejects.toThrow("timed out");
+      await extension.readNext();
+      await rejection;
+      await extension.send({
+        sessionId: "session:one",
+        type: "capsule",
+        payload: { requestId: "late", supported: true },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(published.some((frame) => frame.type === "capsule")).toBe(false);
+      await extension.close();
+    } finally {
+      await daemon.close();
+    }
+  });
+
   it("keeps multiple concurrent sessions in the registry", async () => {
     const socketPath = await tempSocketPath();
     const daemon = await startIpcDaemonServer(socketPath);

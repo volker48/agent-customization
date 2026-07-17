@@ -77,7 +77,10 @@ type DaemonState = {
   listeners: Set<(envelope: IpcEnvelope) => void>;
   requestWaiters: Map<
     string,
-    { socket: Socket; generation: number; waiter: Waiter<IpcEnvelope>; cleanup(): void }
+    Map<
+      string,
+      { socket: Socket; generation: number; waiter: Waiter<IpcEnvelope>; cleanup(): void }
+    >
   >;
   nextGeneration: number;
 };
@@ -185,19 +188,21 @@ function createDaemonFacade(server: Server, state: DaemonState): IpcDaemonServer
       if (!entry) {
         return Promise.reject(new Error(`IPC session is not registered: ${envelope.sessionId}`));
       }
-      const key = requestKey(sessionId, requestId);
-      if (state.requestWaiters.has(key)) {
-        return Promise.reject(new Error(`IPC request is already pending: ${key}`));
+      const waiters = requestWaitersFor(state, sessionId, true)!;
+      if (waiters.has(requestId)) {
+        return Promise.reject(
+          new Error(`IPC request is already pending: ${sessionId}/${requestId}`),
+        );
       }
       if (options.signal?.aborted) return Promise.reject(abortError());
       return new Promise((resolve, reject) => {
         let timeout: NodeJS.Timeout | undefined;
-        const onAbort = () => rejectPendingRequest(state, key, abortError());
+        const onAbort = () => rejectPendingRequest(state, sessionId, requestId, abortError());
         const cleanup = () => {
           if (timeout) clearTimeout(timeout);
           options.signal?.removeEventListener("abort", onAbort);
         };
-        state.requestWaiters.set(key, {
+        waiters.set(requestId, {
           socket: entry.socket,
           generation: entry.generation,
           waiter: { resolve, reject },
@@ -206,12 +211,18 @@ function createDaemonFacade(server: Server, state: DaemonState): IpcDaemonServer
         options.signal?.addEventListener("abort", onAbort, { once: true });
         if (options.timeoutMs !== undefined) {
           timeout = setTimeout(
-            () => rejectPendingRequest(state, key, new Error("IPC session request timed out")),
+            () =>
+              rejectPendingRequest(
+                state,
+                sessionId,
+                requestId,
+                new Error("IPC session request timed out"),
+              ),
             options.timeoutMs,
           );
         }
         void writeEnvelope(entry.socket, envelope).catch((error) => {
-          rejectPendingRequest(state, key, error);
+          rejectPendingRequest(state, sessionId, requestId, error);
         });
       });
     },
@@ -247,13 +258,32 @@ async function handleReceivedEnvelope(
   state: DaemonState,
   options: IpcDaemonOptions,
 ): Promise<void> {
-  options.onFrame?.(envelope);
   if (resolveRequestWaiter(state, envelope, socket)) return;
-  const emitted = await handleDaemonFrame(envelope, socket, state, options);
-  state.listeners.forEach((listener) => listener(envelope));
-  emitted.forEach((frame) => state.listeners.forEach((listener) => listener(frame)));
+  // Preserve the synchronous observability timing of onFrame while applying the
+  // same acceptance filter used by handleDaemonFrame. Capsule responses are
+  // intentionally consumed and never published here.
+  if (isPublishableDaemonFrame(envelope, socket, state)) options.onFrame?.(envelope);
+  const accepted = await handleDaemonFrame(envelope, socket, state, options);
+  accepted.forEach((frame) => state.listeners.forEach((listener) => listener(frame)));
   resolveSessionWaiters(envelope, state.registry, state.sessionWaiters);
   resolveEndWaiters(envelope, state.endWaiters);
+}
+
+function isPublishableDaemonFrame(
+  envelope: IpcEnvelope,
+  socket: Socket,
+  state: DaemonState,
+): boolean {
+  if (envelope.type === "capsule") return false;
+  if (envelope.sessionId !== null) {
+    const entry = state.registry.get(envelope.sessionId);
+    if (!entry || entry.socket !== socket) return false;
+  }
+  if (isRegisterEnvelope(envelope)) {
+    const existing = state.registry.get(envelope.payload.sessionId);
+    if (existing && existing.socket !== socket) return false;
+  }
+  return true;
 }
 
 async function handleDaemonFrame(
@@ -268,6 +298,9 @@ async function handleDaemonFrame(
     const entry = registry.get(envelope.sessionId);
     if (!entry || entry.socket !== socket) return emitted;
   }
+  // Capsule frames are request responses, not broadcastable daemon events. This
+  // also consumes late, timed-out, cancelled, and ownership-rejected responses.
+  if (envelope.type === "capsule") return emitted;
   if (isRegisterEnvelope(envelope)) {
     const existing = registry.get(envelope.payload.sessionId);
     if (existing && existing.socket !== socket) {
@@ -327,7 +360,7 @@ async function handleDaemonFrame(
     });
   }
 
-  return emitted;
+  return [envelope, ...emitted];
 }
 
 function requestIdFrom(payload: unknown): string | null {
@@ -339,58 +372,85 @@ function requestIdFrom(payload: unknown): string | null {
     : null;
 }
 
-function requestKey(sessionId: string, requestId: string): string {
-  return `${sessionId}:${requestId}`;
+function requestWaitersFor(
+  state: DaemonState,
+  sessionId: string,
+  create = false,
+):
+  | Map<
+      string,
+      { socket: Socket; generation: number; waiter: Waiter<IpcEnvelope>; cleanup(): void }
+    >
+  | undefined {
+  let waiters = state.requestWaiters.get(sessionId);
+  if (!waiters && create) {
+    waiters = new Map();
+    state.requestWaiters.set(sessionId, waiters);
+  }
+  return waiters;
 }
 
 function resolveRequestWaiter(state: DaemonState, envelope: IpcEnvelope, socket: Socket): boolean {
   if (envelope.type !== "capsule" || envelope.sessionId === null) return false;
   const requestId = requestIdFrom(envelope.payload);
   if (!requestId) return false;
-  const key = requestKey(envelope.sessionId, requestId);
-  const pending = state.requestWaiters.get(key);
+  const waiters = requestWaitersFor(state, envelope.sessionId);
+  const pending = waiters?.get(requestId);
   const entry = state.registry.get(envelope.sessionId);
   if (!pending || !entry || pending.socket !== socket || pending.generation !== entry.generation) {
     return false;
   }
-  state.requestWaiters.delete(key);
+  waiters?.delete(requestId);
+  if (waiters?.size === 0) state.requestWaiters.delete(envelope.sessionId);
   pending.cleanup();
   pending.waiter.resolve(envelope);
   return true;
 }
 
 function rejectSocketRequests(state: DaemonState, socket: Socket, error: Error): void {
-  for (const [key, pending] of state.requestWaiters) {
-    if (pending.socket === socket) {
-      state.requestWaiters.delete(key);
-      pending.cleanup();
-      pending.waiter.reject(error);
+  for (const [sessionId, waiters] of state.requestWaiters) {
+    for (const [requestId, pending] of waiters) {
+      if (pending.socket === socket) {
+        waiters.delete(requestId);
+        pending.cleanup();
+        pending.waiter.reject(error);
+      }
     }
+    if (waiters.size === 0) state.requestWaiters.delete(sessionId);
   }
 }
 
 function rejectSessionRequests(state: DaemonState, sessionId: string, error: Error): void {
-  for (const [key, pending] of state.requestWaiters) {
-    if (key.startsWith(`${sessionId}:`)) {
-      state.requestWaiters.delete(key);
+  const waiters = state.requestWaiters.get(sessionId);
+  if (!waiters) return;
+  for (const pending of waiters.values()) {
+    pending.cleanup();
+    pending.waiter.reject(error);
+  }
+  state.requestWaiters.delete(sessionId);
+}
+
+function rejectRequestWaiters(state: DaemonState, error: Error): void {
+  for (const waiters of state.requestWaiters.values()) {
+    for (const pending of waiters.values()) {
       pending.cleanup();
       pending.waiter.reject(error);
     }
   }
-}
-
-function rejectRequestWaiters(state: DaemonState, error: Error): void {
-  for (const pending of state.requestWaiters.values()) {
-    pending.cleanup();
-    pending.waiter.reject(error);
-  }
   state.requestWaiters.clear();
 }
 
-function rejectPendingRequest(state: DaemonState, key: string, error: Error): void {
-  const pending = state.requestWaiters.get(key);
+function rejectPendingRequest(
+  state: DaemonState,
+  sessionId: string,
+  requestId: string,
+  error: Error,
+): void {
+  const waiters = state.requestWaiters.get(sessionId);
+  const pending = waiters?.get(requestId);
   if (!pending) return;
-  state.requestWaiters.delete(key);
+  waiters?.delete(requestId);
+  if (waiters?.size === 0) state.requestWaiters.delete(sessionId);
   pending.cleanup();
   pending.waiter.reject(error);
 }

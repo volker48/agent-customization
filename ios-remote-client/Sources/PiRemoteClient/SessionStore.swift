@@ -17,8 +17,14 @@ public final class SessionStore {
   public private(set) var connectionState: ConnectionState
   public private(set) var feedErrorMessage: String?
   public private(set) var steeringErrorMessage: String?
-  public private(set) var capsuleErrorMessage: String?
+  public private(set) var capsuleErrorMessages: [String: String]
   public private(set) var capsules: [String: CapsuleBrief]
+
+  /// Compatibility accessor for callers that display the currently attached session.
+  public var capsuleErrorMessage: String? {
+    guard let sessionID = attachedSessionID else { return nil }
+    return capsuleErrorMessages[sessionID]
+  }
 
   private let client: RemoteClient
   private let reconnectDelayNanoseconds: UInt64
@@ -37,7 +43,7 @@ public final class SessionStore {
     self.connectionState = .disconnected
     self.feedErrorMessage = nil
     self.steeringErrorMessage = nil
-    self.capsuleErrorMessage = nil
+    self.capsuleErrorMessages = [:]
     self.capsules = [:]
     self.reconnectDelayNanoseconds = reconnectDelayNanoseconds
     self.registryRefreshIntervalNanoseconds = registryRefreshIntervalNanoseconds
@@ -114,13 +120,14 @@ public final class SessionStore {
   public func fetchCapsule(for sessionID: String) async -> CapsuleBrief? {
     do {
       let capsule = try await client.fetchCapsule(sessionID: sessionID)
+      try Task.checkCancellation()
       capsules[sessionID] = capsule
-      capsuleErrorMessage = nil
+      capsuleErrorMessages[sessionID] = nil
       return capsule
     } catch is CancellationError {
       return nil
     } catch {
-      capsuleErrorMessage = String(describing: error)
+      capsuleErrorMessages[sessionID] = String(describing: error)
       return nil
     }
   }
@@ -282,7 +289,7 @@ public struct ConversationView: View {
       if let message = store.steeringErrorMessage {
         ErrorBanner(message: message)
       }
-      if let message = store.capsuleErrorMessage {
+      if let message = store.capsuleErrorMessages[session.sessionID] {
         ErrorBanner(message: message)
       }
       ConnectionStatusBanner(state: store.connectionState)

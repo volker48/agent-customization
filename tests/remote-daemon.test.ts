@@ -251,6 +251,49 @@ describe("remote daemon", () => {
       expect(canonicalPayload).not.toHaveProperty("capsule.secret");
       expect(JSON.stringify(canonicalPayload)).not.toContain("do-not-relay");
 
+      const inconsistentTruncationRequest = exchange(client, daemon.ticket, [
+        {
+          sessionId: null,
+          type: "list",
+          payload: { operation: "capsule", sessionId: "session-1" },
+        },
+      ]);
+      const inconsistentIpcRequest = await extension.readNext();
+      const inconsistentRequestId = (inconsistentIpcRequest.payload as { requestId: string })
+        .requestId;
+      await extension.send({
+        sessionId: "session-1",
+        type: "capsule",
+        payload: {
+          requestId: inconsistentRequestId,
+          supported: true,
+          capsule: {
+            capsuleId: "capsule-inconsistent-truncation",
+            schemaVersion: 1,
+            revision: 1,
+            objective: "Host-generated brief",
+            constraints: [],
+            decisions: [],
+            validation: [],
+            blockers: [],
+            risks: [],
+            nextAction: "Review the brief",
+            redactions: [{ category: "oversized", count: 1 }],
+            truncated: false,
+            maxPayloadBytes: 32 * 1024,
+          },
+        },
+      });
+      await expect(inconsistentTruncationRequest).resolves.toMatchObject([
+        {
+          payload: {
+            operation: "capsule",
+            requestId: inconsistentRequestId,
+            error: { code: "malformed" },
+          },
+        },
+      ]);
+
       const objectiveSecret = "GH_TOKEN=gho_abcdefghijklmnopqrstuvwxyz";
       const unsafeObjectiveRequest = exchange(client, daemon.ticket, [
         {
@@ -648,6 +691,55 @@ describe("remote daemon", () => {
     } finally {
       await closeEndpoint(client);
       await extension.close();
+      await daemon.close();
+    }
+  }, 30_000);
+
+  it("does not let an old streaming generation detach a replacement session", async () => {
+    const root = await tempRoot();
+    const daemon = await startRemoteDaemon({ remoteRoot: root, pairingCode: "123-456" });
+    const oldExtension = await connectIpcExtension(daemon.socketPath, {
+      sessionId: "session-1",
+      name: "Old session",
+      cwd: "/repo/old",
+    });
+    const client = await bindEndpoint();
+    let oldConnection: Awaited<ReturnType<typeof connectEndpoint>> | undefined;
+    let newExtension: Awaited<ReturnType<typeof connectIpcExtension>> | undefined;
+
+    try {
+      await daemon.ipc.waitForSession("session-1");
+      await armPairing(daemon.socketPath);
+      const addr = EndpointTicket.fromString(daemon.ticket).endpointAddr();
+      oldConnection = await connectEndpoint(client, addr);
+      const stream = await openStream(oldConnection);
+      await sendEnvelope(stream, { sessionId: null, type: "pair", payload: { code: "123-456" } });
+      await sendEnvelope(stream, {
+        sessionId: null,
+        type: "attach",
+        payload: { sessionId: "session-1", stream: true },
+      });
+      await finishSending(stream);
+      await expect(oldExtension.readNext()).resolves.toMatchObject({ type: "attach" });
+
+      await oldExtension.close();
+      newExtension = await connectIpcExtension(daemon.socketPath, {
+        sessionId: "session-1",
+        name: "New session",
+        cwd: "/repo/new",
+      });
+      await expect(daemon.ipc.waitForSession("session-1")).resolves.toMatchObject({
+        name: "New session",
+      });
+
+      oldConnection.close(0n, []);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(newExtension.receivedCount()).toBe(0);
+    } finally {
+      oldConnection?.close(0n, []);
+      await newExtension?.close();
+      await closeEndpoint(client);
+      await oldExtension.close().catch(() => undefined);
       await daemon.close();
     }
   }, 30_000);
