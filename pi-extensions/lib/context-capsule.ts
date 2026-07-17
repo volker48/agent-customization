@@ -697,6 +697,395 @@ export async function generateCapsule(
   return validated;
 }
 
+export type ScalarCapsuleDrift = {
+  status: "unchanged" | "changed";
+  before: string;
+  after: string;
+};
+
+export type CollectionDriftChange<T> = {
+  kind: "introduced" | "removed" | "changed";
+  before?: T;
+  after?: T;
+};
+
+export type CollectionCapsuleDrift<T> = {
+  status: "unchanged" | "changed";
+  unchangedCount: number;
+  changes: CollectionDriftChange<T>[];
+};
+
+export type DecisionDriftChange = {
+  kind: "introduced" | "superseded" | "status-changed";
+  before?: CapsuleDecision;
+  after?: CapsuleDecision;
+};
+
+export type ValidationDriftChange = {
+  kind: "introduced" | "removed" | "outcome-changed" | "evidence-updated";
+  before?: CapsuleValidation;
+  after?: CapsuleValidation;
+};
+
+export type BlockerDriftChange = {
+  kind: "introduced" | "resolved";
+  blocker: string;
+};
+
+export type CapsuleDrift = {
+  noOp: boolean;
+  changedSections: number;
+  sections: {
+    objective: ScalarCapsuleDrift;
+    constraints: CollectionCapsuleDrift<string>;
+    decisions: Omit<CollectionCapsuleDrift<CapsuleDecision>, "changes"> & {
+      changes: DecisionDriftChange[];
+    };
+    resources: CollectionCapsuleDrift<CapsuleResource>;
+    observedChanges: CollectionCapsuleDrift<CapsuleObservedChange>;
+    validation: Omit<CollectionCapsuleDrift<CapsuleValidation>, "changes"> & {
+      changes: ValidationDriftChange[];
+    };
+    blockers: Omit<CollectionCapsuleDrift<string>, "changes"> & {
+      changes: BlockerDriftChange[];
+    };
+    risks: CollectionCapsuleDrift<string>;
+    nextAction: ScalarCapsuleDrift;
+    exclusions: CollectionCapsuleDrift<CapsuleExclusion>;
+  };
+};
+
+export type CapsuleRefreshProposal = {
+  predecessor: Capsule;
+  successor: Capsule;
+  drift: CapsuleDrift;
+};
+
+function semanticText(value: string): string {
+  return value
+    .normalize("NFKC")
+    .trim()
+    .toLocaleLowerCase("en-US")
+    .replace(/\s+/g, " ")
+    .replace(/[.!?]+$/, "");
+}
+
+function semanticCommand(value: string): string {
+  return value.normalize("NFKC").trim().replace(/\s+/g, " ");
+}
+
+function scalarDrift(before: string, after: string): ScalarCapsuleDrift {
+  return {
+    status: semanticText(before) === semanticText(after) ? "unchanged" : "changed",
+    before,
+    after,
+  };
+}
+
+function compareTextCollection(
+  before: readonly string[],
+  after: readonly string[],
+): CollectionCapsuleDrift<string> {
+  const beforeByMeaning = new Map(before.map((value) => [semanticText(value), value]));
+  const afterByMeaning = new Map(after.map((value) => [semanticText(value), value]));
+  const changes: CollectionDriftChange<string>[] = [];
+  for (const [meaning, value] of beforeByMeaning) {
+    if (!afterByMeaning.has(meaning)) changes.push({ kind: "removed", before: value });
+  }
+  for (const [meaning, value] of afterByMeaning) {
+    if (!beforeByMeaning.has(meaning)) changes.push({ kind: "introduced", after: value });
+  }
+  return {
+    status: changes.length ? "changed" : "unchanged",
+    unchangedCount: [...beforeByMeaning.keys()].filter((key) => afterByMeaning.has(key)).length,
+    changes,
+  };
+}
+
+function compareDecisions(
+  before: readonly CapsuleDecision[],
+  after: readonly CapsuleDecision[],
+): CapsuleDrift["sections"]["decisions"] {
+  const beforeByMeaning = new Map(before.map((value) => [semanticText(value.statement), value]));
+  const afterByMeaning = new Map(after.map((value) => [semanticText(value.statement), value]));
+  const changes: DecisionDriftChange[] = [];
+  let unchangedCount = 0;
+  for (const [meaning, value] of beforeByMeaning) {
+    const current = afterByMeaning.get(meaning);
+    if (!current) changes.push({ kind: "superseded", before: value });
+    else if (current.status !== value.status) {
+      changes.push({ kind: "status-changed", before: value, after: current });
+    } else unchangedCount += 1;
+  }
+  for (const [meaning, value] of afterByMeaning) {
+    if (!beforeByMeaning.has(meaning)) changes.push({ kind: "introduced", after: value });
+  }
+  return { status: changes.length ? "changed" : "unchanged", unchangedCount, changes };
+}
+
+function compareResources(
+  before: readonly CapsuleResource[],
+  after: readonly CapsuleResource[],
+): CollectionCapsuleDrift<CapsuleResource> {
+  const key = (value: CapsuleResource) => `${value.kind}\u0000${value.value}`;
+  const beforeByIdentity = new Map(before.map((value) => [key(value), value]));
+  const afterByIdentity = new Map(after.map((value) => [key(value), value]));
+  const changes: CollectionDriftChange<CapsuleResource>[] = [];
+  let unchangedCount = 0;
+  for (const [identity, value] of beforeByIdentity) {
+    const current = afterByIdentity.get(identity);
+    if (!current) changes.push({ kind: "removed", before: value });
+    else if (semanticText(value.detail ?? "") !== semanticText(current.detail ?? "")) {
+      changes.push({ kind: "changed", before: value, after: current });
+    } else unchangedCount += 1;
+  }
+  for (const [identity, value] of afterByIdentity) {
+    if (!beforeByIdentity.has(identity)) changes.push({ kind: "introduced", after: value });
+  }
+  return { status: changes.length ? "changed" : "unchanged", unchangedCount, changes };
+}
+
+function compareObservedChanges(
+  before: readonly CapsuleObservedChange[],
+  after: readonly CapsuleObservedChange[],
+): CollectionCapsuleDrift<CapsuleObservedChange> {
+  const beforeByPath = new Map(before.map((value) => [value.path, value]));
+  const afterByPath = new Map(after.map((value) => [value.path, value]));
+  const changes: CollectionDriftChange<CapsuleObservedChange>[] = [];
+  let unchangedCount = 0;
+  for (const [path, value] of beforeByPath) {
+    const current = afterByPath.get(path);
+    if (!current) changes.push({ kind: "removed", before: value });
+    else if (current.status !== value.status || current.provenance !== value.provenance) {
+      changes.push({ kind: "changed", before: value, after: current });
+    } else unchangedCount += 1;
+  }
+  for (const [path, value] of afterByPath) {
+    if (!beforeByPath.has(path)) changes.push({ kind: "introduced", after: value });
+  }
+  return { status: changes.length ? "changed" : "unchanged", unchangedCount, changes };
+}
+
+function latestValidationByCommand(
+  values: readonly CapsuleValidation[],
+): Map<string, CapsuleValidation> {
+  const output = new Map<string, CapsuleValidation>();
+  for (const value of values) output.set(semanticCommand(value.command), value);
+  return output;
+}
+
+function compareValidation(
+  before: readonly CapsuleValidation[],
+  after: readonly CapsuleValidation[],
+): CapsuleDrift["sections"]["validation"] {
+  const beforeByCommand = latestValidationByCommand(before);
+  const afterByCommand = latestValidationByCommand(after);
+  const changes: ValidationDriftChange[] = [];
+  let unchangedCount = 0;
+  for (const [command, value] of beforeByCommand) {
+    const current = afterByCommand.get(command);
+    if (!current) changes.push({ kind: "removed", before: value });
+    else if (current.outcome !== value.outcome) {
+      changes.push({ kind: "outcome-changed", before: value, after: current });
+    } else if (
+      semanticText(current.evidence) !== semanticText(value.evidence) ||
+      current.observedAt !== value.observedAt
+    ) {
+      changes.push({ kind: "evidence-updated", before: value, after: current });
+    } else unchangedCount += 1;
+  }
+  for (const [command, value] of afterByCommand) {
+    if (!beforeByCommand.has(command)) changes.push({ kind: "introduced", after: value });
+  }
+  return { status: changes.length ? "changed" : "unchanged", unchangedCount, changes };
+}
+
+function compareBlockers(
+  before: readonly string[],
+  after: readonly string[],
+): CapsuleDrift["sections"]["blockers"] {
+  const compared = compareTextCollection(before, after);
+  return {
+    status: compared.status,
+    unchangedCount: compared.unchangedCount,
+    changes: compared.changes.map((change) =>
+      change.kind === "introduced"
+        ? { kind: "introduced", blocker: change.after as string }
+        : { kind: "resolved", blocker: change.before as string },
+    ),
+  };
+}
+
+function compareExclusions(
+  before: readonly CapsuleExclusion[],
+  after: readonly CapsuleExclusion[],
+): CollectionCapsuleDrift<CapsuleExclusion> {
+  const beforeByCategory = new Map(before.map((value) => [value.category, value]));
+  const afterByCategory = new Map(after.map((value) => [value.category, value]));
+  const changes: CollectionDriftChange<CapsuleExclusion>[] = [];
+  let unchangedCount = 0;
+  for (const [category, value] of beforeByCategory) {
+    const current = afterByCategory.get(category);
+    if (!current) changes.push({ kind: "removed", before: value });
+    else if (current.count !== value.count) {
+      changes.push({ kind: "changed", before: value, after: current });
+    } else unchangedCount += 1;
+  }
+  for (const [category, value] of afterByCategory) {
+    if (!beforeByCategory.has(category)) changes.push({ kind: "introduced", after: value });
+  }
+  return { status: changes.length ? "changed" : "unchanged", unchangedCount, changes };
+}
+
+export function compareCapsules(predecessor: Capsule, successor: Capsule): CapsuleDrift {
+  const sections: CapsuleDrift["sections"] = {
+    objective: scalarDrift(predecessor.objective, successor.objective),
+    constraints: compareTextCollection(predecessor.constraints, successor.constraints),
+    decisions: compareDecisions(predecessor.decisions, successor.decisions),
+    resources: compareResources(predecessor.resources, successor.resources),
+    observedChanges: compareObservedChanges(predecessor.observedChanges, successor.observedChanges),
+    validation: compareValidation(predecessor.validation, successor.validation),
+    blockers: compareBlockers(predecessor.blockers, successor.blockers),
+    risks: compareTextCollection(predecessor.risks, successor.risks),
+    nextAction: scalarDrift(predecessor.nextAction, successor.nextAction),
+    exclusions: compareExclusions(predecessor.exclusions, successor.exclusions),
+  };
+  const materialSections: Array<Exclude<keyof CapsuleDrift["sections"], "exclusions">> = [
+    "objective",
+    "constraints",
+    "decisions",
+    "resources",
+    "observedChanges",
+    "validation",
+    "blockers",
+    "risks",
+    "nextAction",
+  ];
+  const changedSections = materialSections.filter(
+    (key) => sections[key].status === "changed",
+  ).length;
+  return { noOp: changedSections === 0, changedSections, sections };
+}
+
+export async function proposeCapsuleRefresh(
+  predecessor: Capsule,
+  snapshot: EvidenceSnapshot,
+  options: {
+    sessionId: string;
+    sessionFile?: string;
+    cwd?: string;
+    signal?: AbortSignal;
+    now?: () => Date;
+  },
+): Promise<CapsuleResult<CapsuleRefreshProposal>> {
+  const validatedPredecessor = validateCapsule(predecessor);
+  if ("error" in validatedPredecessor) {
+    return fail(
+      validatedPredecessor.error.code,
+      validatedPredecessor.error.message,
+      validatedPredecessor.error.field,
+    );
+  }
+  if (options.signal?.aborted) {
+    return fail("cancelled", "Capsule refresh was cancelled before side effects.");
+  }
+  const generated = await generateCapsule(snapshot, {
+    ...options,
+    revision: predecessor.revision + 1,
+    predecessor: {
+      capsuleId: predecessor.capsuleId,
+      revision: predecessor.revision,
+    },
+  });
+  if ("error" in generated) {
+    return fail(generated.error.code, generated.error.message, generated.error.field);
+  }
+  return ok({
+    predecessor: validatedPredecessor.value,
+    successor: generated.value,
+    drift: compareCapsules(validatedPredecessor.value, generated.value),
+  });
+}
+
+function renderDriftValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (isRecord(value) && "command" in value) {
+    const validation = value as CapsuleValidation;
+    return `\`${validation.command}\` — ${validation.outcome}; ${validation.evidence}${validation.observedAt ? `; observed ${validation.observedAt}` : ""}`;
+  }
+  if (isRecord(value) && "statement" in value) {
+    const decision = value as CapsuleDecision;
+    return `[${decision.status}] ${decision.statement}`;
+  }
+  if (isRecord(value) && "path" in value) {
+    const observed = value as CapsuleObservedChange;
+    return `${observed.path} — ${observed.status}; provenance: ${observed.provenance}`;
+  }
+  if (isRecord(value) && "kind" in value && "value" in value) {
+    const resource = value as CapsuleResource;
+    return `[${resource.kind}] ${resource.value}${resource.detail ? ` — ${resource.detail}` : ""}`;
+  }
+  if (isRecord(value) && "category" in value) {
+    const exclusion = value as CapsuleExclusion;
+    return `${exclusion.category}: ${exclusion.count}`;
+  }
+  return JSON.stringify(value);
+}
+
+function renderCollectionDrift(section: {
+  status: "unchanged" | "changed";
+  unchangedCount: number;
+  changes: readonly unknown[];
+}): string[] {
+  if (section.status === "unchanged") return [`Unchanged (${section.unchangedCount} entries).`];
+  const lines = section.changes.flatMap((rawChange) => {
+    const change = rawChange as Record<string, unknown>;
+    if ("blocker" in change) return [`- ${change.kind}: ${String(change.blocker)}`];
+    const before = change.before === undefined ? undefined : renderDriftValue(change.before);
+    const after = change.after === undefined ? undefined : renderDriftValue(change.after);
+    if (before !== undefined && after !== undefined) {
+      return [`- ${String(change.kind)}:`, `  - before: ${before}`, `  - after: ${after}`];
+    }
+    return [`- ${String(change.kind)}: ${after ?? before ?? ""}`];
+  });
+  if (section.unchangedCount) lines.push(`Unchanged entries collapsed: ${section.unchangedCount}.`);
+  return lines;
+}
+
+export function renderCapsuleDrift(proposal: CapsuleRefreshProposal): string {
+  const { drift, predecessor, successor } = proposal;
+  const lines = [
+    `# Context drift: ${capsuleRevisionLabel(predecessor)} → ${capsuleRevisionLabel(successor)}`,
+    drift.noOp
+      ? "No material context drift detected; no successor should be saved."
+      : `${drift.changedSections} section(s) contain material drift.`,
+  ];
+  const labels: Array<[keyof CapsuleDrift["sections"], string]> = [
+    ["objective", "Objective"],
+    ["constraints", "Constraints"],
+    ["decisions", "Decisions"],
+    ["resources", "Resources"],
+    ["observedChanges", "Observed changed paths"],
+    ["validation", "Validation evidence"],
+    ["blockers", "Blockers"],
+    ["risks", "Risks"],
+    ["nextAction", "Next action"],
+    ["exclusions", "Exclusions"],
+  ];
+  for (const [key, label] of labels) {
+    const section = drift.sections[key];
+    lines.push("", `## ${label}`);
+    if (key === "objective" || key === "nextAction") {
+      const scalar = section as ScalarCapsuleDrift;
+      if (scalar.status === "unchanged") lines.push("Unchanged.");
+      else lines.push(`- before: ${scalar.before}`, `- after: ${scalar.after}`);
+    } else {
+      lines.push(...renderCollectionDrift(section as never));
+    }
+  }
+  return lines.join("\n");
+}
+
 const TOP_LEVEL_KEYS = new Set([
   "kind",
   "schemaVersion",

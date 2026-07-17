@@ -6,6 +6,8 @@ import {
   generateCapsule,
   loadCapsule,
   previewCapsule,
+  proposeCapsuleRefresh,
+  renderCapsuleDrift,
   saveCapsule,
   type Capsule,
   type CapsuleResult,
@@ -175,6 +177,63 @@ export async function handleCapsuleCommand(
     return;
   }
 
+  if (command === "refresh") {
+    if (!reference) {
+      context.ui.notify("Usage: /capsule refresh <capsule-id-or-path>", "error");
+      return;
+    }
+    const loaded = await dependencies.load(reference);
+    if (!loaded.ok) {
+      context.ui.notify(`Capsule load failed: ${resultError(loaded)}`, "error");
+      return;
+    }
+    await context.waitForIdle();
+    const proposed = await proposeCapsuleRefresh(
+      loaded.value,
+      extractSessionEvidence(context.sessionManager.getBranch() as SessionEntryLike[], context.cwd),
+      {
+        sessionId: context.sessionManager.getSessionId(),
+        sessionFile: context.sessionManager.getSessionFile(),
+        cwd: context.cwd,
+      },
+    );
+    if (!proposed.ok) {
+      context.ui.notify(`Capsule refresh failed: ${resultError(proposed)}`, "error");
+      return;
+    }
+
+    const successorPreview = previewCapsule(proposed.value.successor);
+    context.ui.notify(
+      `${renderCapsuleDrift(proposed.value)}\n\n# Proposed successor\n\n${successorPreview.humanText}\n\nCanonical representation: ${successorPreview.byteLength} UTF-8 bytes`,
+      "info",
+    );
+    if (proposed.value.drift.noOp) return;
+
+    const confirmed = await confirmSideEffect(
+      context,
+      "Save this refreshed Context Capsule revision?",
+      "The complete successor shown above will be saved as a new immutable capsule. Its predecessor will remain unchanged.",
+    );
+    if (!confirmed) {
+      context.ui.notify(
+        "Capsule refresh cancelled; the predecessor and active session were unchanged.",
+        "info",
+      );
+      return;
+    }
+    const saved = await dependencies.save(proposed.value.successor);
+    if (!saved.ok) {
+      context.ui.notify(
+        `Capsule refresh save failed: ${resultError(saved)}; the predecessor and active session were unchanged.`,
+        "error",
+      );
+      return;
+    }
+    state.lastPreview = proposed.value.successor;
+    context.ui.notify(`Refreshed capsule saved: ${saved.value}`, "info");
+    return;
+  }
+
   if (command === "load") {
     if (!reference) {
       context.ui.notify("Usage: /capsule load <capsule-id-or-path>", "error");
@@ -223,7 +282,7 @@ export async function handleCapsuleCommand(
   }
 
   context.ui.notify(
-    "Usage: /capsule preview | save | load <capsule-id-or-path> | resume [capsule-id-or-path]",
+    "Usage: /capsule preview | save | refresh <capsule-id-or-path> | load <capsule-id-or-path> | resume [capsule-id-or-path]",
     "error",
   );
 }
@@ -231,7 +290,7 @@ export async function handleCapsuleCommand(
 export default function contextCapsuleExtension(pi: ExtensionAPI): void {
   const state: CapsuleCommandState = {};
   pi.registerCommand("capsule", {
-    description: "Generate, preview, save, load, or resume a Context Capsule",
+    description: "Generate, preview, save, refresh, load, or resume a Context Capsule",
     handler: async (argumentsText, context) => {
       try {
         await handleCapsuleCommand(
