@@ -35,6 +35,8 @@ import {
 import type { FusionResult } from "./types.js";
 
 const LOADER_KEY = "fusion";
+const DEFAULT_CAPSULE_TASK =
+  "Use the Context Capsule's recorded objective as the task and continue with its recorded next action.";
 
 interface ResolveContext {
   hasUI?: boolean;
@@ -136,8 +138,8 @@ export async function resolvePrompt(
 
   const capsule = await prepareCapsule(parsed.capsuleReference, ctx, signal);
   const preview = previewCapsule(capsule);
-  const taskPreview =
-    parsed.text || "(none — use the capsule's recorded objective and next action)";
+  const effectiveTask = parsed.text || DEFAULT_CAPSULE_TASK;
+  const taskPreview = parsed.text || `(none provided — ${DEFAULT_CAPSULE_TASK})`;
   ctx.ui.notify(
     [
       "Fusion Context Capsule preview (complete bounded input)",
@@ -162,8 +164,8 @@ export async function resolvePrompt(
 
   const context = capsulePrompt(capsule);
   return {
-    prompt: parsed.text ? `${context}\n\nAdditional task text:\n${parsed.text}` : context,
-    displayPrompt: parsed.text || "Context Capsule objective and next action",
+    prompt: `${context}\n\nAdditional task text:\n${effectiveTask}`,
+    displayPrompt: effectiveTask,
     capsule,
   };
 }

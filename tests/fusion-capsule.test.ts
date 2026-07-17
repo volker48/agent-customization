@@ -117,9 +117,13 @@ describe("Fusion Context Capsule input", () => {
       new AbortController().signal,
     );
 
-    expect(resolved.displayPrompt).toContain("Context Capsule");
+    expect(resolved.displayPrompt).toBe(
+      "Use the Context Capsule's recorded objective as the task and continue with its recorded next action.",
+    );
     expect(resolved.prompt).toContain('"capsuleId":"capsule-93"');
-    expect(resolved.prompt).not.toContain("Additional task text:");
+    expect(resolved.prompt).toContain(
+      "Additional task text:\nUse the Context Capsule's recorded objective as the task and continue with its recorded next action.",
+    );
   });
 
   it("returns typed invalid and cancellation paths before model work", async () => {
