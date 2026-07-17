@@ -209,7 +209,7 @@ describe("remote daemon", () => {
                 command: "pnpm test",
                 outcome: "passed",
                 evidence: "focused",
-                observedAt: "now",
+                observedAt: "2026-01-01T00:00:00.000Z",
                 secret: "do-not-relay",
               },
             ],
@@ -234,7 +234,12 @@ describe("remote daemon", () => {
               objective: "Host-generated brief",
               decisions: [{ statement: "Keep it bounded", status: "confirmed" }],
               validation: [
-                { command: "pnpm test", outcome: "passed", evidence: "focused", observedAt: "now" },
+                {
+                  command: "pnpm test",
+                  outcome: "passed",
+                  evidence: "focused",
+                  observedAt: "2026-01-01T00:00:00.000Z",
+                },
               ],
               redactions: [{ category: "secret", count: 1 }],
             },
@@ -245,6 +250,105 @@ describe("remote daemon", () => {
       expect(canonicalPayload).not.toHaveProperty("responseSecret");
       expect(canonicalPayload).not.toHaveProperty("capsule.secret");
       expect(JSON.stringify(canonicalPayload)).not.toContain("do-not-relay");
+
+      const objectiveSecret = "GH_TOKEN=gho_abcdefghijklmnopqrstuvwxyz";
+      const unsafeObjectiveRequest = exchange(client, daemon.ticket, [
+        {
+          sessionId: null,
+          type: "list",
+          payload: { operation: "capsule", sessionId: "session-1" },
+        },
+      ]);
+      const unsafeObjectiveIpcRequest = await extension.readNext();
+      const unsafeObjectiveRequestId = (unsafeObjectiveIpcRequest.payload as { requestId: string })
+        .requestId;
+      await extension.send({
+        sessionId: "session-1",
+        type: "capsule",
+        payload: {
+          requestId: unsafeObjectiveRequestId,
+          supported: true,
+          capsule: {
+            capsuleId: "capsule-unsafe-objective",
+            schemaVersion: 1,
+            revision: 1,
+            objective: objectiveSecret,
+            constraints: [],
+            decisions: [],
+            validation: [],
+            blockers: [],
+            risks: [],
+            nextAction: "Review the brief",
+            redactions: [{ category: "secret", count: 1 }],
+            truncated: false,
+            maxPayloadBytes: 32 * 1024,
+          },
+        },
+      });
+      const unsafeObjectiveResponse = await unsafeObjectiveRequest;
+      expect(unsafeObjectiveResponse).toMatchObject([
+        {
+          sessionId: null,
+          type: "list",
+          payload: {
+            operation: "capsule",
+            requestId: unsafeObjectiveRequestId,
+            supported: true,
+            error: { code: "unsafe", message: "Capsule contains unsafe text." },
+          },
+        },
+      ]);
+      expect(JSON.stringify(unsafeObjectiveResponse)).not.toContain(objectiveSecret);
+
+      const validationSecret = "GH_TOKEN=gho_zyxwvutsrqponmlkjihgfedcba";
+      const unsafeValidationRequest = exchange(client, daemon.ticket, [
+        {
+          sessionId: null,
+          type: "list",
+          payload: { operation: "capsule", sessionId: "session-1" },
+        },
+      ]);
+      const unsafeValidationIpcRequest = await extension.readNext();
+      const unsafeValidationRequestId = (
+        unsafeValidationIpcRequest.payload as { requestId: string }
+      ).requestId;
+      await extension.send({
+        sessionId: "session-1",
+        type: "capsule",
+        payload: {
+          requestId: unsafeValidationRequestId,
+          supported: true,
+          capsule: {
+            capsuleId: "capsule-unsafe-validation",
+            schemaVersion: 1,
+            revision: 1,
+            objective: "Host-generated brief",
+            constraints: [],
+            decisions: [],
+            validation: [{ command: "pnpm test", outcome: "passed", evidence: validationSecret }],
+            blockers: [],
+            risks: [],
+            nextAction: "Review the brief",
+            redactions: [{ category: "secret", count: 1 }],
+            truncated: false,
+            maxPayloadBytes: 32 * 1024,
+          },
+        },
+      });
+      const unsafeValidationResponse = await unsafeValidationRequest;
+      expect(unsafeValidationResponse).toMatchObject([
+        {
+          sessionId: null,
+          type: "list",
+          payload: {
+            operation: "capsule",
+            requestId: unsafeValidationRequestId,
+            supported: true,
+            error: { code: "malformed", message: "Invalid capsule response." },
+          },
+        },
+      ]);
+      expect(JSON.stringify(unsafeValidationResponse)).not.toContain(validationSecret);
 
       const malformedRequest = exchange(client, daemon.ticket, [
         {
@@ -291,7 +395,11 @@ describe("remote daemon", () => {
         payload: {
           requestId: errorRequestId,
           supported: true,
-          error: { code: "io", message: "safe error", secret: "do-not-relay" },
+          error: {
+            code: "io",
+            message: "GH_TOKEN=gho_abcdefghijklmnopqrstuvwxyz",
+            secret: "do-not-relay",
+          },
           secret: "do-not-relay",
         },
       });
@@ -301,13 +409,14 @@ describe("remote daemon", () => {
             operation: "capsule",
             requestId: errorRequestId,
             supported: true,
-            error: { code: "io", message: "safe error" },
+            error: { code: "io", message: "Capsule is unavailable." },
           },
         },
       ]);
       const errorPayload = (await errorRequest)[0]?.payload;
       expect(errorPayload).not.toHaveProperty("error.secret");
       expect(JSON.stringify(errorPayload)).not.toContain("do-not-relay");
+      expect(JSON.stringify(errorPayload)).not.toContain("GH_TOKEN=gho_abcdefghijklmnopqrstuvwxyz");
 
       const oversizedRequest = exchange(client, daemon.ticket, [
         {

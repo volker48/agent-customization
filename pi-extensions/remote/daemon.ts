@@ -3,7 +3,12 @@ import { randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import { CAPSULE_MAX_BYTES, CAPSULE_MAX_ENTRIES } from "../lib/context-capsule.js";
+import {
+  CAPSULE_MAX_BYTES,
+  CAPSULE_MAX_ENTRIES,
+  validateCapsule,
+  type Capsule,
+} from "../lib/context-capsule.js";
 import type { CapsuleProjection } from "./capsule-projection.js";
 
 import {
@@ -49,6 +54,21 @@ const OWNER_ONLY_FILE_MODE = 0o600;
 const UNAUTHENTICATED_READ_TIMEOUT_MS = 30_000;
 const CAPSULE_REQUEST_TIMEOUT_MS = 10_000;
 const CAPSULE_MAX_ERROR_BYTES = 2_000;
+const CAPSULE_SYNTHETIC_LINEAGE: Pick<Capsule, "createdAt" | "source"> = {
+  createdAt: "1970-01-01T00:00:00.000Z",
+  source: { sessionId: "remote-daemon", cwd: "." },
+};
+const CAPSULE_ERROR_MESSAGES: Record<CapsuleControlError["code"], string> = {
+  cancelled: "Capsule request was cancelled.",
+  io: "Capsule is unavailable.",
+  malformed: "Invalid capsule response.",
+  "not-attached": "Attach to the session before requesting its capsule.",
+  "not-found": "Capsule was not found.",
+  oversized: "Capsule response is too large.",
+  unavailable: "Capsule is unavailable.",
+  unsafe: "Capsule contains unsafe text.",
+  "unsupported-version": "Unsupported capsule version.",
+};
 const REMOTE_CLOSE_ERROR_CODE = 0n;
 const READ_TIMEOUT_CLOSE_REASON = Array.from(Buffer.from("read timeout", "utf8"));
 
@@ -278,7 +298,7 @@ async function handleControlEnvelope(
     const request = parseCapsuleControlRequest(envelope.payload);
     if (request) return retrieveCapsule(request.sessionId, context);
     if (isCapsuleControlRequest(envelope.payload)) {
-      return capsuleErrorResponse(randomUUID(), "malformed", "Invalid capsule request.");
+      return capsuleErrorResponse(randomUUID(), "malformed");
     }
     return { sessionId: null, type: "list", payload: listSessions(ipc) };
   }
@@ -354,7 +374,7 @@ async function retrieveCapsule(
 ): Promise<Envelope> {
   const requestId = randomUUID();
   const entry = context.ipc.registry.get(sessionId);
-  if (!entry) return capsuleErrorResponse(requestId, "unavailable", "Capsule is unavailable.");
+  if (!entry) return capsuleErrorResponse(requestId, "unavailable");
   if (!entry.capabilities.includes(CAPSULE_CAPABILITY)) {
     return {
       sessionId: null,
@@ -372,11 +392,7 @@ async function retrieveCapsule(
     generation === undefined ||
     !isNodeAttached(context.nodeAttachCounts, context.nodeId, sessionId, generation)
   ) {
-    return capsuleErrorResponse(
-      requestId,
-      "not-attached",
-      "Attach to the session before requesting its capsule.",
-    );
+    return capsuleErrorResponse(requestId, "not-attached");
   }
 
   try {
@@ -390,30 +406,21 @@ async function retrieveCapsule(
       payload: capsuleResultFrom(response.payload, requestId),
     };
   } catch (error) {
-    return capsuleErrorResponse(
-      requestId,
-      isAbortError(error) ? "cancelled" : "unavailable",
-      isAbortError(error) ? "Capsule request was cancelled." : "Capsule is unavailable.",
-    );
+    return capsuleErrorResponse(requestId, isAbortError(error) ? "cancelled" : "unavailable");
   }
 }
 
-function capsuleErrorResponse(
-  requestId: string,
-  code: CapsuleControlError["code"],
-  message: string,
-): Envelope {
+function capsuleErrorResponse(requestId: string, code: CapsuleControlError["code"]): Envelope {
   return {
     sessionId: null,
     type: "list",
-    payload: capsuleErrorResult(requestId, code, message),
+    payload: capsuleErrorResult(requestId, code),
   };
 }
 
 function capsuleErrorResult(
   requestId: string,
   code: CapsuleControlError["code"],
-  message: string,
 ): CapsuleControlResult<CapsuleProjection> {
   return {
     operation: CAPSULE_OPERATION,
@@ -421,7 +428,7 @@ function capsuleErrorResult(
     supported: true,
     error: {
       code,
-      message: boundedErrorMessage(message),
+      message: CAPSULE_ERROR_MESSAGES[code],
     },
   };
 }
@@ -431,9 +438,9 @@ function capsuleResultFrom(
   requestId: string,
 ): CapsuleControlResult<CapsuleProjection> {
   const malformed = (): CapsuleControlResult<CapsuleProjection> =>
-    capsuleErrorResult(requestId, "malformed", "Invalid capsule response.");
+    capsuleErrorResult(requestId, "malformed");
   const oversized = (): CapsuleControlResult<CapsuleProjection> =>
-    capsuleErrorResult(requestId, "oversized", "Capsule response is too large.");
+    capsuleErrorResult(requestId, "oversized");
 
   if (
     !isRecord(payload) ||
@@ -465,6 +472,7 @@ function capsuleResultFrom(
   }
   const projection = capsuleProjectionFrom(payload.capsule);
   if (projection === "oversized") return oversized();
+  if (projection === "unsafe") return capsuleErrorResult(requestId, "unsafe");
   if (projection) {
     const result: CapsuleControlResult<CapsuleProjection> = {
       operation: CAPSULE_OPERATION,
@@ -477,7 +485,7 @@ function capsuleResultFrom(
   return malformed();
 }
 
-function capsuleProjectionFrom(value: unknown): CapsuleProjection | "oversized" | null {
+function capsuleProjectionFrom(value: unknown): CapsuleProjection | "oversized" | "unsafe" | null {
   if (!isRecord(value)) return null;
   if (
     typeof value.capsuleId !== "string" ||
@@ -525,6 +533,28 @@ function capsuleProjectionFrom(value: unknown): CapsuleProjection | "oversized" 
     truncated: value.truncated,
     maxPayloadBytes: CAPSULE_MAX_BYTES,
   };
+  const validated = validateCapsule({
+    kind: "pi-context-capsule",
+    schemaVersion: 1,
+    capsuleId: projection.capsuleId,
+    revision: projection.revision,
+    ...CAPSULE_SYNTHETIC_LINEAGE,
+    objective: projection.objective,
+    constraints: projection.constraints,
+    decisions: projection.decisions,
+    resources: [],
+    observedChanges: [],
+    validation: projection.validation,
+    blockers: projection.blockers,
+    risks: projection.risks,
+    nextAction: projection.nextAction,
+    exclusions: projection.redactions,
+  });
+  if (!validated.ok) {
+    if ("error" in validated && validated.error.code === "oversized") return "oversized";
+    if ("error" in validated && validated.error.code === "unsafe") return "unsafe";
+    return null;
+  }
   return capsuleResultWithinLimit(projection) ? projection : "oversized";
 }
 
@@ -598,18 +628,15 @@ function capsuleErrorFrom(
     "unsafe",
     "unsupported-version",
   ];
+  if (!codes.includes(value.code as CapsuleControlError["code"])) return null;
   if (
-    !codes.includes(value.code as CapsuleControlError["code"]) ||
-    typeof value.message !== "string"
+    typeof value.message === "string" &&
+    Buffer.byteLength(value.message, "utf8") > CAPSULE_MAX_ERROR_BYTES
   ) {
-    return null;
+    return "oversized";
   }
-  if (Buffer.byteLength(value.message, "utf8") > CAPSULE_MAX_ERROR_BYTES) return "oversized";
-  return { code: value.code as CapsuleControlError["code"], message: value.message };
-}
-
-function boundedErrorMessage(message: string): string {
-  return Buffer.byteLength(message, "utf8") <= CAPSULE_MAX_ERROR_BYTES ? message : "Capsule error.";
+  const code = value.code as CapsuleControlError["code"];
+  return { code, message: CAPSULE_ERROR_MESSAGES[code] };
 }
 
 function capsuleResultWithinLimit(value: unknown): boolean {
