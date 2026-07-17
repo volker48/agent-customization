@@ -86,9 +86,17 @@ export interface FusionJudgeOutput {
   analysis: FusionAnalysis;
 }
 
+export interface FusionCapsuleProvenance {
+  capsuleId: string;
+  revision: number;
+}
+
 export interface FusionResult {
   status: FusionStatus;
   prompt: string;
+  /** A bounded label used by the panel card instead of the effective prompt. */
+  displayPrompt?: string;
+  capsule?: FusionCapsuleProvenance;
   judge: ModelRef;
   responses: AnyPanelResponse[];
   judgeOutput?: FusionJudgeOutput;

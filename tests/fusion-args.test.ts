@@ -28,6 +28,32 @@ describe("parseFusionArgs", () => {
   it("leaves filePath undefined when --file has no path", () => {
     expect(parseFusionArgs("--file")).toEqual({ filePath: undefined, text: "" });
   });
+
+  it("parses current-session capsule input with optional task text", () => {
+    expect(parseFusionArgs("--capsule current compare the two approaches")).toEqual({
+      capsuleReference: "current",
+      text: "compare the two approaches",
+    });
+  });
+
+  it("parses a saved capsule id or path without requiring task text", () => {
+    expect(parseFusionArgs("--capsule /tmp/capsule.json")).toEqual({
+      capsuleReference: "/tmp/capsule.json",
+      text: "",
+    });
+  });
+
+  it("rejects --file and --capsule together", () => {
+    expect(parseFusionArgs("--file bundle.md --capsule current task")).toMatchObject({
+      error: { code: "conflicting-inputs" },
+    });
+  });
+
+  it("reports a missing capsule reference", () => {
+    expect(parseFusionArgs("--capsule")).toMatchObject({
+      error: { code: "missing-capsule-reference" },
+    });
+  });
 });
 
 describe("readBundleFile", () => {

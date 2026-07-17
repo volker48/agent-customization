@@ -6,6 +6,7 @@ export const FUSION_MESSAGE_TYPE = "fusion-panel";
 export interface FusionPanelDetails {
   status: FusionResult["status"];
   prompt: string;
+  capsuleRevision?: string;
   judge: string;
   models: string[];
   analysis?: FusionAnalysis;
@@ -47,7 +48,10 @@ export function toFusionPanelMessage(result: FusionResult) {
 export function toFusionDetails(result: FusionResult): FusionPanelDetails {
   return {
     status: result.status,
-    prompt: result.prompt,
+    prompt: result.displayPrompt ?? result.prompt,
+    capsuleRevision: result.capsule
+      ? `${result.capsule.capsuleId}@${result.capsule.revision}`
+      : undefined,
     judge: result.judge,
     models: result.responses.map((response) => response.model),
     analysis: result.judgeOutput?.analysis,
@@ -77,6 +81,7 @@ export function renderFusionPanelMarkdown(
     "🔀 **Fusion panel**",
     `${okCount}/${details.panelResponses.length} models`,
     `judge ${details.judge}`,
+    ...(details.capsuleRevision ? [`capsule ${details.capsuleRevision}`] : []),
     details.status === "error" ? "judge failed" : `confidence ${details.confidence ?? "unknown"}`,
   ].join(" · ");
 
@@ -96,6 +101,7 @@ export function renderFusionPanelMarkdown(
     "**Fusion details**",
     "",
     `- Elapsed: ${details.elapsedMs}ms`,
+    ...(details.capsuleRevision ? [`- Capsule: ${details.capsuleRevision}`] : []),
     ...renderErrorLines(details),
     "- Panel:",
     ...panelLines,
