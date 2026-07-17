@@ -129,6 +129,40 @@ describe("remote daemon", () => {
         },
       ]);
 
+      // Only the exact streaming attach control envelope may establish attachment
+      // authorization. A stream flag on another list operation must not do so.
+      await expect(
+        exchange(client, daemon.ticket, [
+          {
+            sessionId: null,
+            type: "list",
+            payload: { operation: "list", sessionId: "session-1", stream: true },
+          },
+        ]),
+      ).resolves.toMatchObject([{ type: "list", payload: expect.any(Array) }]);
+      await expect(
+        exchange(client, daemon.ticket, [
+          {
+            sessionId: null,
+            type: "list",
+            payload: { operation: "capsule", sessionId: "session-1", stream: true },
+          },
+        ]),
+      ).resolves.toMatchObject([
+        { payload: { operation: "capsule", error: { code: "not-attached" } } },
+      ]);
+      await expect(
+        exchange(client, daemon.ticket, [
+          {
+            sessionId: null,
+            type: "list",
+            payload: { operation: "capsule", sessionId: "session-1" },
+          },
+        ]),
+      ).resolves.toMatchObject([
+        { payload: { operation: "capsule", error: { code: "not-attached" } } },
+      ]);
+
       const addr = EndpointTicket.fromString(daemon.ticket).endpointAddr();
       attachConnection = await connectEndpoint(client, addr);
       const attachStream = await openStream(attachConnection);
@@ -160,20 +194,32 @@ describe("remote daemon", () => {
         payload: {
           requestId,
           supported: true,
+          responseSecret: "do-not-relay",
           capsule: {
             capsuleId: "capsule-1",
             schemaVersion: 1,
             revision: 1,
             objective: "Host-generated brief",
             constraints: [],
-            decisions: [],
-            validation: [],
+            decisions: [
+              { statement: "Keep it bounded", status: "confirmed", secret: "do-not-relay" },
+            ],
+            validation: [
+              {
+                command: "pnpm test",
+                outcome: "passed",
+                evidence: "focused",
+                observedAt: "now",
+                secret: "do-not-relay",
+              },
+            ],
             blockers: [],
             risks: [],
             nextAction: "Review the brief",
-            redactions: [],
+            redactions: [{ category: "secret", count: 1, secret: "do-not-relay" }],
             truncated: false,
             maxPayloadBytes: 32 * 1024,
+            secret: "do-not-relay",
           },
         },
       });
@@ -184,7 +230,110 @@ describe("remote daemon", () => {
             operation: "capsule",
             requestId,
             supported: true,
-            capsule: { objective: "Host-generated brief" },
+            capsule: {
+              objective: "Host-generated brief",
+              decisions: [{ statement: "Keep it bounded", status: "confirmed" }],
+              validation: [
+                { command: "pnpm test", outcome: "passed", evidence: "focused", observedAt: "now" },
+              ],
+              redactions: [{ category: "secret", count: 1 }],
+            },
+          },
+        },
+      ]);
+      const canonicalPayload = (await capsuleRequest)[0]?.payload;
+      expect(canonicalPayload).not.toHaveProperty("responseSecret");
+      expect(canonicalPayload).not.toHaveProperty("capsule.secret");
+      expect(JSON.stringify(canonicalPayload)).not.toContain("do-not-relay");
+
+      const malformedRequest = exchange(client, daemon.ticket, [
+        {
+          sessionId: null,
+          type: "list",
+          payload: { operation: "capsule", sessionId: "session-1" },
+        },
+      ]);
+      const malformedIpcRequest = await extension.readNext();
+      const malformedRequestId = (malformedIpcRequest.payload as { requestId: string }).requestId;
+      await extension.send({
+        sessionId: "session-1",
+        type: "capsule",
+        payload: {
+          requestId: malformedRequestId,
+          supported: true,
+          capsule: { objective: "missing required fields", secret: "do-not-relay" },
+          secret: "do-not-relay",
+        },
+      });
+      await expect(malformedRequest).resolves.toMatchObject([
+        {
+          payload: {
+            operation: "capsule",
+            requestId: malformedRequestId,
+            supported: true,
+            error: { code: "malformed", message: "Invalid capsule response." },
+          },
+        },
+      ]);
+
+      const errorRequest = exchange(client, daemon.ticket, [
+        {
+          sessionId: null,
+          type: "list",
+          payload: { operation: "capsule", sessionId: "session-1" },
+        },
+      ]);
+      const errorIpcRequest = await extension.readNext();
+      const errorRequestId = (errorIpcRequest.payload as { requestId: string }).requestId;
+      await extension.send({
+        sessionId: "session-1",
+        type: "capsule",
+        payload: {
+          requestId: errorRequestId,
+          supported: true,
+          error: { code: "io", message: "safe error", secret: "do-not-relay" },
+          secret: "do-not-relay",
+        },
+      });
+      await expect(errorRequest).resolves.toMatchObject([
+        {
+          payload: {
+            operation: "capsule",
+            requestId: errorRequestId,
+            supported: true,
+            error: { code: "io", message: "safe error" },
+          },
+        },
+      ]);
+      const errorPayload = (await errorRequest)[0]?.payload;
+      expect(errorPayload).not.toHaveProperty("error.secret");
+      expect(JSON.stringify(errorPayload)).not.toContain("do-not-relay");
+
+      const oversizedRequest = exchange(client, daemon.ticket, [
+        {
+          sessionId: null,
+          type: "list",
+          payload: { operation: "capsule", sessionId: "session-1" },
+        },
+      ]);
+      const oversizedIpcRequest = await extension.readNext();
+      const oversizedRequestId = (oversizedIpcRequest.payload as { requestId: string }).requestId;
+      await extension.send({
+        sessionId: "session-1",
+        type: "capsule",
+        payload: {
+          requestId: oversizedRequestId,
+          supported: true,
+          error: { code: "io", message: "x".repeat(32 * 1024) },
+        },
+      });
+      await expect(oversizedRequest).resolves.toMatchObject([
+        {
+          payload: {
+            operation: "capsule",
+            requestId: oversizedRequestId,
+            supported: true,
+            error: { code: "oversized", message: "Capsule response is too large." },
           },
         },
       ]);

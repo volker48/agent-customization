@@ -48,6 +48,7 @@ const OWNER_ONLY_DIRECTORY_MODE = 0o700;
 const OWNER_ONLY_FILE_MODE = 0o600;
 const UNAUTHENTICATED_READ_TIMEOUT_MS = 30_000;
 const CAPSULE_REQUEST_TIMEOUT_MS = 10_000;
+const CAPSULE_MAX_ERROR_BYTES = 2_000;
 const REMOTE_CLOSE_ERROR_CODE = 0n;
 const READ_TIMEOUT_CLOSE_REASON = Array.from(Buffer.from("read timeout", "utf8"));
 
@@ -397,15 +398,30 @@ async function retrieveCapsule(
   }
 }
 
-function capsuleErrorResponse(requestId: string, code: string, message: string): Envelope {
+function capsuleErrorResponse(
+  requestId: string,
+  code: CapsuleControlError["code"],
+  message: string,
+): Envelope {
   return {
     sessionId: null,
     type: "list",
-    payload: {
-      operation: CAPSULE_OPERATION,
-      requestId,
-      supported: true,
-      error: { code, message },
+    payload: capsuleErrorResult(requestId, code, message),
+  };
+}
+
+function capsuleErrorResult(
+  requestId: string,
+  code: CapsuleControlError["code"],
+  message: string,
+): CapsuleControlResult<CapsuleProjection> {
+  return {
+    operation: CAPSULE_OPERATION,
+    requestId,
+    supported: true,
+    error: {
+      code,
+      message: boundedErrorMessage(message),
     },
   };
 }
@@ -414,136 +430,203 @@ function capsuleResultFrom(
   payload: unknown,
   requestId: string,
 ): CapsuleControlResult<CapsuleProjection> {
-  const malformed = (): CapsuleControlResult<CapsuleProjection> => ({
-    operation: CAPSULE_OPERATION,
-    requestId,
-    supported: true,
-    error: { code: "malformed", message: "Invalid capsule response." },
-  });
+  const malformed = (): CapsuleControlResult<CapsuleProjection> =>
+    capsuleErrorResult(requestId, "malformed", "Invalid capsule response.");
+  const oversized = (): CapsuleControlResult<CapsuleProjection> =>
+    capsuleErrorResult(requestId, "oversized", "Capsule response is too large.");
+
   if (
     !isRecord(payload) ||
     (payload.operation !== undefined && payload.operation !== CAPSULE_OPERATION)
   )
     return malformed();
   if (payload.supported === false && payload.capability === CAPSULE_CAPABILITY) {
-    return {
+    const result: CapsuleControlResult<CapsuleProjection> = {
       operation: CAPSULE_OPERATION,
       requestId,
       supported: false,
       capability: CAPSULE_CAPABILITY,
     };
+    return capsuleResultWithinLimit(result) ? result : oversized();
   }
   if (payload.supported !== true) return malformed();
-  if (isRecord(payload.error) && isCapsuleError(payload.error)) {
-    return { operation: CAPSULE_OPERATION, requestId, supported: true, error: payload.error };
+  if (isRecord(payload.error)) {
+    const error = capsuleErrorFrom(payload.error);
+    if (error === "oversized") return oversized();
+    if (error) {
+      const result: CapsuleControlResult<CapsuleProjection> = {
+        operation: CAPSULE_OPERATION,
+        requestId,
+        supported: true,
+        error,
+      };
+      return capsuleResultWithinLimit(result) ? result : oversized();
+    }
   }
-  if (isCapsuleProjection(payload.capsule)) {
-    return { operation: CAPSULE_OPERATION, requestId, supported: true, capsule: payload.capsule };
+  const projection = capsuleProjectionFrom(payload.capsule);
+  if (projection === "oversized") return oversized();
+  if (projection) {
+    const result: CapsuleControlResult<CapsuleProjection> = {
+      operation: CAPSULE_OPERATION,
+      requestId,
+      supported: true,
+      capsule: projection,
+    };
+    return capsuleResultWithinLimit(result) ? result : oversized();
   }
   return malformed();
 }
 
-function isCapsuleProjection(value: unknown): value is CapsuleProjection {
-  if (!isRecord(value)) return false;
+function capsuleProjectionFrom(value: unknown): CapsuleProjection | "oversized" | null {
+  if (!isRecord(value)) return null;
   if (
-    !(
-      typeof value.capsuleId === "string" &&
-      typeof value.objective === "string" &&
-      typeof value.nextAction === "string"
-    )
+    typeof value.capsuleId !== "string" ||
+    typeof value.objective !== "string" ||
+    typeof value.nextAction !== "string" ||
+    value.schemaVersion !== 1 ||
+    !isNonNegativeInt(value.revision)
   )
-    return false;
-  if (value.schemaVersion !== 1 || !isNonNegativeInt(value.revision)) return false;
-  if (
-    !isStringList(value.constraints) ||
-    !isStringList(value.blockers) ||
-    !isStringList(value.risks)
-  )
-    return false;
-  if (
-    !Array.isArray(value.decisions) ||
-    value.decisions.length > CAPSULE_MAX_ENTRIES ||
-    !value.decisions.every(isDecision)
-  )
-    return false;
-  if (
-    !Array.isArray(value.validation) ||
-    value.validation.length > CAPSULE_MAX_ENTRIES ||
-    !value.validation.every(isValidation)
-  )
-    return false;
-  if (
-    !Array.isArray(value.redactions) ||
-    value.redactions.length > CAPSULE_MAX_ENTRIES ||
-    !value.redactions.every(isRedaction)
-  )
-    return false;
-  if (typeof value.truncated !== "boolean" || value.maxPayloadBytes !== CAPSULE_MAX_BYTES)
-    return false;
-  return Buffer.byteLength(JSON.stringify(value), "utf8") <= CAPSULE_MAX_BYTES;
+    return null;
+  const constraints = stringListFrom(value.constraints);
+  const blockers = stringListFrom(value.blockers);
+  const risks = stringListFrom(value.risks);
+  if (!constraints || !blockers || !risks) return null;
+  if (!Array.isArray(value.decisions) || value.decisions.length > CAPSULE_MAX_ENTRIES) {
+    return null;
+  }
+  const decisions = value.decisions.map(decisionFrom);
+  if (decisions.some((decision) => decision === null)) return null;
+  if (!Array.isArray(value.validation) || value.validation.length > CAPSULE_MAX_ENTRIES) {
+    return null;
+  }
+  const validation = value.validation.map(validationFrom);
+  if (validation.some((entry) => entry === null)) return null;
+  if (!Array.isArray(value.redactions) || value.redactions.length > CAPSULE_MAX_ENTRIES) {
+    return null;
+  }
+  const redactions = value.redactions.map(redactionFrom);
+  if (redactions.some((entry) => entry === null)) return null;
+  if (typeof value.truncated !== "boolean" || value.maxPayloadBytes !== CAPSULE_MAX_BYTES) {
+    return null;
+  }
+
+  const projection: CapsuleProjection = {
+    capsuleId: value.capsuleId,
+    schemaVersion: 1,
+    revision: value.revision,
+    objective: value.objective,
+    constraints,
+    decisions: decisions as CapsuleProjection["decisions"],
+    validation: validation as CapsuleProjection["validation"],
+    blockers,
+    risks,
+    nextAction: value.nextAction,
+    redactions: redactions as CapsuleProjection["redactions"],
+    truncated: value.truncated,
+    maxPayloadBytes: CAPSULE_MAX_BYTES,
+  };
+  return capsuleResultWithinLimit(projection) ? projection : "oversized";
 }
 
-function isDecision(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    typeof value.statement === "string" &&
-    (value.status === "confirmed" || value.status === "proposed" || value.status === "unknown")
-  );
+function decisionFrom(value: unknown): CapsuleProjection["decisions"][number] | null {
+  if (
+    !isRecord(value) ||
+    typeof value.statement !== "string" ||
+    (value.status !== "confirmed" && value.status !== "proposed" && value.status !== "unknown")
+  ) {
+    return null;
+  }
+  return { statement: value.statement, status: value.status };
 }
 
-function isValidation(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    typeof value.command === "string" &&
-    (value.outcome === "passed" ||
-      value.outcome === "failed" ||
-      value.outcome === "blocked" ||
-      value.outcome === "unknown") &&
-    typeof value.evidence === "string" &&
-    (value.observedAt === undefined || typeof value.observedAt === "string")
-  );
+function validationFrom(value: unknown): CapsuleProjection["validation"][number] | null {
+  if (
+    !isRecord(value) ||
+    typeof value.command !== "string" ||
+    (value.outcome !== "passed" &&
+      value.outcome !== "failed" &&
+      value.outcome !== "blocked" &&
+      value.outcome !== "unknown") ||
+    typeof value.evidence !== "string" ||
+    (value.observedAt !== undefined && typeof value.observedAt !== "string")
+  ) {
+    return null;
+  }
+  return {
+    command: value.command,
+    outcome: value.outcome,
+    evidence: value.evidence,
+    ...(value.observedAt === undefined ? {} : { observedAt: value.observedAt as string }),
+  };
 }
 
-function isRedaction(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    (value.category === "secret" ||
-      value.category === "raw-tool-output" ||
-      value.category === "ignored-path" ||
-      value.category === "oversized" ||
-      value.category === "unsupported" ||
-      value.category === "untrusted") &&
-    isNonNegativeInt(value.count)
-  );
+function redactionFrom(value: unknown): CapsuleProjection["redactions"][number] | null {
+  if (
+    !isRecord(value) ||
+    (value.category !== "secret" &&
+      value.category !== "raw-tool-output" &&
+      value.category !== "ignored-path" &&
+      value.category !== "oversized" &&
+      value.category !== "unsupported" &&
+      value.category !== "untrusted") ||
+    !isNonNegativeInt(value.count)
+  ) {
+    return null;
+  }
+  return { category: value.category, count: value.count };
 }
 
-function isStringList(value: unknown): value is string[] {
-  return (
-    Array.isArray(value) &&
+function stringListFrom(value: unknown): string[] | null {
+  return Array.isArray(value) &&
     value.length <= CAPSULE_MAX_ENTRIES &&
     value.every((item) => typeof item === "string")
-  );
+    ? value.map((item) => item as string)
+    : null;
+}
+
+function capsuleErrorFrom(
+  value: Record<string, unknown>,
+): CapsuleControlError | "oversized" | null {
+  const codes: CapsuleControlError["code"][] = [
+    "cancelled",
+    "io",
+    "malformed",
+    "not-attached",
+    "not-found",
+    "oversized",
+    "unavailable",
+    "unsafe",
+    "unsupported-version",
+  ];
+  if (
+    !codes.includes(value.code as CapsuleControlError["code"]) ||
+    typeof value.message !== "string"
+  ) {
+    return null;
+  }
+  if (Buffer.byteLength(value.message, "utf8") > CAPSULE_MAX_ERROR_BYTES) return "oversized";
+  return { code: value.code as CapsuleControlError["code"], message: value.message };
+}
+
+function boundedErrorMessage(message: string): string {
+  return Buffer.byteLength(message, "utf8") <= CAPSULE_MAX_ERROR_BYTES ? message : "Capsule error.";
+}
+
+function capsuleResultWithinLimit(value: unknown): boolean {
+  try {
+    return (
+      Buffer.byteLength(
+        JSON.stringify({ sessionId: null, type: "list", payload: value }),
+        "utf8",
+      ) <= CAPSULE_MAX_BYTES
+    );
+  } catch {
+    return false;
+  }
 }
 
 function isNonNegativeInt(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
-function isCapsuleError(value: Record<string, unknown>): value is CapsuleControlError {
-  return (
-    typeof value.message === "string" &&
-    [
-      "cancelled",
-      "io",
-      "malformed",
-      "not-attached",
-      "not-found",
-      "oversized",
-      "unavailable",
-      "unsafe",
-      "unsupported-version",
-    ].includes(String(value.code))
-  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -558,7 +641,8 @@ function sessionIdFromPayload(payload: unknown): string | null {
   return typeof payload === "object" &&
     payload !== null &&
     "sessionId" in payload &&
-    typeof payload.sessionId === "string"
+    typeof payload.sessionId === "string" &&
+    payload.sessionId.length > 0
     ? payload.sessionId
     : null;
 }
@@ -620,10 +704,13 @@ function streamingAttachSessionIdFrom(envelope: Envelope): string | null {
 
 function isStreamingAttach(envelope: Envelope): boolean {
   return (
+    envelope.sessionId === null &&
+    envelope.type === "attach" &&
     typeof envelope.payload === "object" &&
     envelope.payload !== null &&
     "stream" in envelope.payload &&
-    envelope.payload.stream === true
+    envelope.payload.stream === true &&
+    typeof sessionIdFromPayload(envelope.payload) === "string"
   );
 }
 
