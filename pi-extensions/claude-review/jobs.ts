@@ -3,7 +3,7 @@ import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import type { ClaudeReviewOptions, ReviewLevel } from "./args.js";
+import type { ClaudeReviewCapsuleProvenance, ClaudeReviewOptions, ReviewLevel } from "./args.js";
 
 export const JOB_STORE_ENV = "PI_CLAUDE_REVIEW_JOB_DIR";
 export const JOB_BACKEND = "claude-bg";
@@ -29,6 +29,7 @@ export interface ClaudeReviewJob {
   level: ReviewLevel;
   contextMessage: string;
   autoFix: boolean;
+  capsuleProvenance?: ClaudeReviewCapsuleProvenance;
   prompt: string;
   claudeSessionId?: string;
   claudeSessionName: string;
@@ -49,7 +50,7 @@ export interface ClaudeReviewJob {
 
 export interface CreateClaudeReviewJobInput {
   cwd: string;
-  options: Pick<ClaudeReviewOptions, "autoFix" | "contextMessage" | "level">;
+  options: Pick<ClaudeReviewOptions, "autoFix" | "contextMessage" | "level" | "capsuleProvenance">;
   prompt: string;
 }
 
@@ -102,6 +103,9 @@ export async function createJob(input: CreateClaudeReviewJobInput): Promise<Clau
     level: input.options.level,
     contextMessage: input.options.contextMessage,
     autoFix: input.options.autoFix,
+    ...(input.options.capsuleProvenance
+      ? { capsuleProvenance: input.options.capsuleProvenance }
+      : {}),
     prompt: input.prompt,
     claudeSessionName: createSessionName(id),
     status: "queued",

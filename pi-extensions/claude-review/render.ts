@@ -11,6 +11,7 @@ export interface ClaudeReviewDetails {
   level: ReviewLevel;
   contextMessage: string;
   autoFix: boolean;
+  capsuleProvenance?: ClaudeReviewJob["capsuleProvenance"];
   stdout: string;
   stderr: string;
   hasFindings?: boolean | null;
@@ -90,6 +91,11 @@ function renderSafeClaudeReviewMarkdown(safeDetails: ClaudeReviewDetails): strin
   if (safeDetails.contextMessage) {
     lines.push(`- Review context: ${safeDetails.contextMessage}`);
   }
+  if (safeDetails.capsuleProvenance) {
+    lines.push(
+      `- Context Capsule: \`${safeDetails.capsuleProvenance.capsuleId}@${safeDetails.capsuleProvenance.revision}\` (${safeDetails.capsuleProvenance.source})`,
+    );
+  }
   if (safeDetails.hasFindings !== undefined && safeDetails.hasFindings !== null) {
     lines.push(`- Findings: \`${safeDetails.hasFindings ? "yes" : "no"}\``);
   }
@@ -151,6 +157,7 @@ export function jobToClaudeReviewDetails(
     level: job.level,
     contextMessage: job.contextMessage,
     autoFix: job.autoFix,
+    capsuleProvenance: job.capsuleProvenance,
     stdout: output,
     stderr: job.stderr,
     hasFindings: job.hasFindings,
@@ -196,8 +203,11 @@ export function buildAutoFixPrompt(details: ClaudeReviewDetails): string {
   const review =
     sanitizeClaudeLog(details.stdout).trim() || "Claude Code review completed with no output.";
   const context = details.contextMessage ? `\nReview context: ${details.contextMessage}` : "";
+  const capsule = details.capsuleProvenance
+    ? `\nContext Capsule: ${details.capsuleProvenance.capsuleId}@${details.capsuleProvenance.revision} (${details.capsuleProvenance.source})`
+    : "";
   const job = details.jobId ? `\nClaude review job: ${details.jobId}` : "";
-  const header = `Claude Code review completed.\n\nReview level: ${details.level}${context}${job}`;
+  const header = `Claude Code review completed.\n\nReview level: ${details.level}${context}${capsule}${job}`;
 
   return [
     header,
