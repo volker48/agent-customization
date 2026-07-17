@@ -17,6 +17,8 @@ describe("remote capsule projection", () => {
       truncated: true,
       maxPayloadBytes: CAPSULE_MAX_BYTES,
     });
+    expect(projection).not.toHaveProperty("resources");
+    expect(projection).not.toHaveProperty("observedChanges");
     expect(projection).not.toHaveProperty("source");
     expect(projection).not.toHaveProperty("createdAt");
     expect(JSON.stringify(projection)).not.toContain("session-file.jsonl");

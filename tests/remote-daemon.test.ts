@@ -160,7 +160,21 @@ describe("remote daemon", () => {
         payload: {
           requestId,
           supported: true,
-          capsule: { objective: "Host-generated brief", maxPayloadBytes: 32 * 1024 },
+          capsule: {
+            capsuleId: "capsule-1",
+            schemaVersion: 1,
+            revision: 1,
+            objective: "Host-generated brief",
+            constraints: [],
+            decisions: [],
+            validation: [],
+            blockers: [],
+            risks: [],
+            nextAction: "Review the brief",
+            redactions: [],
+            truncated: false,
+            maxPayloadBytes: 32 * 1024,
+          },
         },
       });
 

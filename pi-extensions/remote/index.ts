@@ -14,7 +14,7 @@ import { projectCapsule } from "./capsule-projection.js";
 
 import { FileNodeAllowlist, defaultRemoteRoot, renderPairingTicket } from "./authorization.js";
 import { connectIpcExtension, type IpcEnvelope, type IpcExtensionClient } from "./ipc.js";
-import { CAPSULE_CAPABILITY } from "./protocol.js";
+import { CAPSULE_CAPABILITY, CAPSULE_OPERATION } from "./protocol.js";
 import { projectTranscriptEvent, projectTranscriptMessage } from "./transcript-projection.js";
 
 const DAEMON_SOCKET_FILE = "daemon.sock";
@@ -224,8 +224,13 @@ async function sendCapsule(state: RemoteState, requestId: string): Promise<void>
     type: "capsule",
     payload:
       "error" in capsule
-        ? { requestId, supported: true, error: capsule.error }
-        : { requestId, supported: true, capsule: projectCapsule(capsule.value) },
+        ? { operation: CAPSULE_OPERATION, requestId, supported: true, error: capsule.error }
+        : {
+            operation: CAPSULE_OPERATION,
+            requestId,
+            supported: true,
+            capsule: projectCapsule(capsule.value),
+          },
   });
 }
 

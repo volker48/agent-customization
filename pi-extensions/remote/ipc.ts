@@ -32,6 +32,7 @@ export type SessionRegistryEntry = {
   cwd: string;
   capabilities: string[];
   socket: Socket;
+  generation: number;
 };
 
 export type IpcRequestOptions = {
@@ -74,7 +75,11 @@ type DaemonState = {
   endWaiters: Map<string, Waiter<void>[]>;
   sockets: Set<Socket>;
   listeners: Set<(envelope: IpcEnvelope) => void>;
-  requestWaiters: Map<string, { socket: Socket; waiter: Waiter<IpcEnvelope>; cleanup(): void }>;
+  requestWaiters: Map<
+    string,
+    { socket: Socket; generation: number; waiter: Waiter<IpcEnvelope>; cleanup(): void }
+  >;
+  nextGeneration: number;
 };
 
 export async function startIpcDaemonServer(
@@ -88,6 +93,7 @@ export async function startIpcDaemonServer(
     sockets: new Set(),
     listeners: new Set(),
     requestWaiters: new Map(),
+    nextGeneration: 1,
   };
   const server = createServer((socket) => acceptDaemonSocket(socket, state, options));
 
@@ -193,6 +199,7 @@ function createDaemonFacade(server: Server, state: DaemonState): IpcDaemonServer
         };
         state.requestWaiters.set(key, {
           socket: entry.socket,
+          generation: entry.generation,
           waiter: { resolve, reject },
           cleanup,
         });
@@ -241,7 +248,7 @@ async function handleReceivedEnvelope(
   options: IpcDaemonOptions,
 ): Promise<void> {
   options.onFrame?.(envelope);
-  if (resolveRequestWaiter(state, envelope)) return;
+  if (resolveRequestWaiter(state, envelope, socket)) return;
   const emitted = await handleDaemonFrame(envelope, socket, state, options);
   state.listeners.forEach((listener) => listener(envelope));
   emitted.forEach((frame) => state.listeners.forEach((listener) => listener(frame)));
@@ -257,12 +264,21 @@ async function handleDaemonFrame(
 ): Promise<IpcEnvelope[]> {
   const emitted: IpcEnvelope[] = [];
   const registry = state.registry;
+  if (envelope.sessionId !== null) {
+    const entry = registry.get(envelope.sessionId);
+    if (!entry || entry.socket !== socket) return emitted;
+  }
   if (isRegisterEnvelope(envelope)) {
+    const existing = registry.get(envelope.payload.sessionId);
+    if (existing && existing.socket !== socket) {
+      return emitted;
+    }
     registry.set(envelope.payload.sessionId, {
       name: envelope.payload.name,
       cwd: envelope.payload.cwd,
       capabilities: envelope.payload.capabilities ?? [],
       socket,
+      generation: existing?.generation ?? state.nextGeneration++,
     });
   }
 
@@ -327,13 +343,16 @@ function requestKey(sessionId: string, requestId: string): string {
   return `${sessionId}:${requestId}`;
 }
 
-function resolveRequestWaiter(state: DaemonState, envelope: IpcEnvelope): boolean {
+function resolveRequestWaiter(state: DaemonState, envelope: IpcEnvelope, socket: Socket): boolean {
   if (envelope.type !== "capsule" || envelope.sessionId === null) return false;
   const requestId = requestIdFrom(envelope.payload);
   if (!requestId) return false;
   const key = requestKey(envelope.sessionId, requestId);
   const pending = state.requestWaiters.get(key);
-  if (!pending) return false;
+  const entry = state.registry.get(envelope.sessionId);
+  if (!pending || !entry || pending.socket !== socket || pending.generation !== entry.generation) {
+    return false;
+  }
   state.requestWaiters.delete(key);
   pending.cleanup();
   pending.waiter.resolve(envelope);
@@ -383,8 +402,10 @@ function abortError(): Error {
 }
 
 function removeSocketSessions(state: DaemonState, socket: Socket, options: IpcDaemonOptions): void {
-  for (const [sessionId, entry] of state.registry) {
-    if (entry.socket !== socket) continue;
+  const sessionIds = [...state.registry]
+    .filter(([, entry]) => entry.socket === socket)
+    .map(([sessionId]) => sessionId);
+  for (const sessionId of sessionIds) {
     state.registry.delete(sessionId);
     const frame: IpcEnvelope = {
       sessionId: null,

@@ -8,8 +8,6 @@ export type CapsuleProjection = {
   objective: string;
   constraints: string[];
   decisions: Capsule["decisions"];
-  resources: Capsule["resources"];
-  observedChanges: Capsule["observedChanges"];
   validation: Capsule["validation"];
   blockers: string[];
   risks: string[];
@@ -27,8 +25,6 @@ export function projectCapsule(capsule: Capsule): CapsuleProjection {
     objective: capsule.objective,
     constraints: capsule.constraints.map((value) => value),
     decisions: capsule.decisions.map((value) => ({ ...value })),
-    resources: capsule.resources.map((value) => ({ ...value })),
-    observedChanges: capsule.observedChanges.map((value) => ({ ...value })),
     validation: capsule.validation.map((value) => ({ ...value })),
     blockers: capsule.blockers.map((value) => value),
     risks: capsule.risks.map((value) => value),

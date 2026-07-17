@@ -46,6 +46,33 @@ describe("remote Unix-socket IPC", () => {
     }
   });
 
+  it("rejects duplicate registrations from another socket", async () => {
+    const socketPath = await tempSocketPath();
+    const daemon = await startIpcDaemonServer(socketPath);
+
+    try {
+      const first = await connectIpcExtension(socketPath, {
+        sessionId: "session-1",
+        name: "First",
+        cwd: "/repo/one",
+      });
+      await daemon.waitForSession("session-1");
+      const originalSocket = daemon.registry.get("session-1")?.socket;
+      const second = await connectIpcExtension(socketPath, {
+        sessionId: "session-1",
+        name: "Impostor",
+        cwd: "/repo/two",
+      });
+
+      expect(daemon.registry.get("session-1")).toMatchObject({ name: "First", cwd: "/repo/one" });
+      expect(daemon.registry.get("session-1")?.socket).toBe(originalSocket);
+      await second.close();
+      await first.close();
+    } finally {
+      await daemon.close();
+    }
+  });
+
   it("routes per-session frames to the matching extension socket", async () => {
     const socketPath = await tempSocketPath();
     const daemon = await startIpcDaemonServer(socketPath);

@@ -3,6 +3,9 @@ import { randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
+import { CAPSULE_MAX_BYTES, CAPSULE_MAX_ENTRIES } from "../lib/context-capsule.js";
+import type { CapsuleProjection } from "./capsule-projection.js";
+
 import {
   CachedNodeAllowlist,
   FileNodeAllowlist,
@@ -32,6 +35,8 @@ import {
   isCapsuleControlRequest,
   parseCapsuleControlRequest,
   routeEnvelope,
+  type CapsuleControlError,
+  type CapsuleControlResult,
   type ControlEnvelope,
   type Envelope,
   type RoutedEnvelope,
@@ -152,7 +157,7 @@ async function handleConnection(
   const writer = new StreamWriter(stream);
   const attached = new Set<string>();
   const attaching = new Set<string>();
-  const retained = new Set<string>();
+  const retained = new Map<string, number>();
   const pending: IpcEnvelope[] = [];
   const nodeId = connection.remoteId().toString();
   const requestAbort = new AbortController();
@@ -182,9 +187,12 @@ async function handleConnection(
         signal: requestAbort.signal,
       });
       if (streamingAttachSessionId && response && !retained.has(streamingAttachSessionId)) {
-        retainStreamingAttach(streamingAttachCounts, streamingAttachSessionId);
-        retainNodeAttach(nodeAttachCounts, nodeId, streamingAttachSessionId);
-        retained.add(streamingAttachSessionId);
+        const generation = ipc.registry.get(streamingAttachSessionId)?.generation;
+        if (generation !== undefined) {
+          retainStreamingAttach(streamingAttachCounts, streamingAttachSessionId);
+          retainNodeAttach(nodeAttachCounts, nodeId, streamingAttachSessionId, generation);
+          retained.set(streamingAttachSessionId, generation);
+        }
       }
       if (response) await writer.send(response);
       if (!response && isPairingEnvelope(envelope)) break;
@@ -215,7 +223,10 @@ async function handleConnection(
     requestAbort.abort();
     releaseNodeAttaches(nodeAttachCounts, nodeId, retained);
     try {
-      await detachAttachedSessions(ipc, releaseStreamingAttaches(streamingAttachCounts, retained));
+      await detachAttachedSessions(
+        ipc,
+        releaseStreamingAttaches(streamingAttachCounts, retained.keys()),
+      );
     } finally {
       unsubscribe();
     }
@@ -355,7 +366,11 @@ async function retrieveCapsule(
       },
     };
   }
-  if (!isNodeAttached(context.nodeAttachCounts, context.nodeId, sessionId)) {
+  const generation = context.ipc.registry.get(sessionId)?.generation;
+  if (
+    generation === undefined ||
+    !isNodeAttached(context.nodeAttachCounts, context.nodeId, sessionId, generation)
+  ) {
     return capsuleErrorResponse(
       requestId,
       "not-attached",
@@ -371,7 +386,7 @@ async function retrieveCapsule(
     return {
       sessionId: null,
       type: "list",
-      payload: { operation: CAPSULE_OPERATION, requestId, ...capsuleResultFrom(response.payload) },
+      payload: capsuleResultFrom(response.payload, requestId),
     };
   } catch (error) {
     return capsuleErrorResponse(
@@ -395,14 +410,144 @@ function capsuleErrorResponse(requestId: string, code: string, message: string):
   };
 }
 
-function capsuleResultFrom(payload: unknown): Record<string, unknown> {
-  if (typeof payload === "object" && payload !== null && !Array.isArray(payload)) {
-    return payload as Record<string, unknown>;
-  }
-  return {
+function capsuleResultFrom(
+  payload: unknown,
+  requestId: string,
+): CapsuleControlResult<CapsuleProjection> {
+  const malformed = (): CapsuleControlResult<CapsuleProjection> => ({
+    operation: CAPSULE_OPERATION,
+    requestId,
     supported: true,
     error: { code: "malformed", message: "Invalid capsule response." },
-  };
+  });
+  if (
+    !isRecord(payload) ||
+    (payload.operation !== undefined && payload.operation !== CAPSULE_OPERATION)
+  )
+    return malformed();
+  if (payload.supported === false && payload.capability === CAPSULE_CAPABILITY) {
+    return {
+      operation: CAPSULE_OPERATION,
+      requestId,
+      supported: false,
+      capability: CAPSULE_CAPABILITY,
+    };
+  }
+  if (payload.supported !== true) return malformed();
+  if (isRecord(payload.error) && isCapsuleError(payload.error)) {
+    return { operation: CAPSULE_OPERATION, requestId, supported: true, error: payload.error };
+  }
+  if (isCapsuleProjection(payload.capsule)) {
+    return { operation: CAPSULE_OPERATION, requestId, supported: true, capsule: payload.capsule };
+  }
+  return malformed();
+}
+
+function isCapsuleProjection(value: unknown): value is CapsuleProjection {
+  if (!isRecord(value)) return false;
+  if (
+    !(
+      typeof value.capsuleId === "string" &&
+      typeof value.objective === "string" &&
+      typeof value.nextAction === "string"
+    )
+  )
+    return false;
+  if (value.schemaVersion !== 1 || !isNonNegativeInt(value.revision)) return false;
+  if (
+    !isStringList(value.constraints) ||
+    !isStringList(value.blockers) ||
+    !isStringList(value.risks)
+  )
+    return false;
+  if (
+    !Array.isArray(value.decisions) ||
+    value.decisions.length > CAPSULE_MAX_ENTRIES ||
+    !value.decisions.every(isDecision)
+  )
+    return false;
+  if (
+    !Array.isArray(value.validation) ||
+    value.validation.length > CAPSULE_MAX_ENTRIES ||
+    !value.validation.every(isValidation)
+  )
+    return false;
+  if (
+    !Array.isArray(value.redactions) ||
+    value.redactions.length > CAPSULE_MAX_ENTRIES ||
+    !value.redactions.every(isRedaction)
+  )
+    return false;
+  if (typeof value.truncated !== "boolean" || value.maxPayloadBytes !== CAPSULE_MAX_BYTES)
+    return false;
+  return Buffer.byteLength(JSON.stringify(value), "utf8") <= CAPSULE_MAX_BYTES;
+}
+
+function isDecision(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.statement === "string" &&
+    (value.status === "confirmed" || value.status === "proposed" || value.status === "unknown")
+  );
+}
+
+function isValidation(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value.command === "string" &&
+    (value.outcome === "passed" ||
+      value.outcome === "failed" ||
+      value.outcome === "blocked" ||
+      value.outcome === "unknown") &&
+    typeof value.evidence === "string" &&
+    (value.observedAt === undefined || typeof value.observedAt === "string")
+  );
+}
+
+function isRedaction(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    (value.category === "secret" ||
+      value.category === "raw-tool-output" ||
+      value.category === "ignored-path" ||
+      value.category === "oversized" ||
+      value.category === "unsupported" ||
+      value.category === "untrusted") &&
+    isNonNegativeInt(value.count)
+  );
+}
+
+function isStringList(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= CAPSULE_MAX_ENTRIES &&
+    value.every((item) => typeof item === "string")
+  );
+}
+
+function isNonNegativeInt(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isCapsuleError(value: Record<string, unknown>): value is CapsuleControlError {
+  return (
+    typeof value.message === "string" &&
+    [
+      "cancelled",
+      "io",
+      "malformed",
+      "not-attached",
+      "not-found",
+      "oversized",
+      "unavailable",
+      "unsafe",
+      "unsupported-version",
+    ].includes(String(value.code))
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isAbortError(error: unknown): boolean {
@@ -536,26 +681,36 @@ function retainStreamingAttach(counts: Map<string, number>, sessionId: string): 
   counts.set(sessionId, (counts.get(sessionId) ?? 0) + 1);
 }
 
-function nodeAttachKey(nodeId: string, sessionId: string): string {
-  return `${nodeId}:${sessionId}`;
+function nodeAttachKey(nodeId: string, sessionId: string, generation: number): string {
+  return `${nodeId}:${sessionId}:${generation}`;
 }
 
-function retainNodeAttach(counts: Map<string, number>, nodeId: string, sessionId: string): void {
-  const key = nodeAttachKey(nodeId, sessionId);
+function retainNodeAttach(
+  counts: Map<string, number>,
+  nodeId: string,
+  sessionId: string,
+  generation: number,
+): void {
+  const key = nodeAttachKey(nodeId, sessionId, generation);
   counts.set(key, (counts.get(key) ?? 0) + 1);
 }
 
-function isNodeAttached(counts: Map<string, number>, nodeId: string, sessionId: string): boolean {
-  return (counts.get(nodeAttachKey(nodeId, sessionId)) ?? 0) > 0;
+function isNodeAttached(
+  counts: Map<string, number>,
+  nodeId: string,
+  sessionId: string,
+  generation: number,
+): boolean {
+  return (counts.get(nodeAttachKey(nodeId, sessionId, generation)) ?? 0) > 0;
 }
 
 function releaseNodeAttaches(
   counts: Map<string, number>,
   nodeId: string,
-  sessionIds: Set<string>,
+  sessionIds: Map<string, number>,
 ): void {
-  for (const sessionId of sessionIds) {
-    const key = nodeAttachKey(nodeId, sessionId);
+  for (const [sessionId, generation] of sessionIds) {
+    const key = nodeAttachKey(nodeId, sessionId, generation);
     const count = counts.get(key) ?? 0;
     if (count <= 1) counts.delete(key);
     else counts.set(key, count - 1);
@@ -564,7 +719,7 @@ function releaseNodeAttaches(
 
 function releaseStreamingAttaches(
   counts: Map<string, number>,
-  sessionIds: Set<string>,
+  sessionIds: Iterable<string>,
 ): Set<string> {
   const lastReleased = new Set<string>();
   for (const sessionId of sessionIds) {

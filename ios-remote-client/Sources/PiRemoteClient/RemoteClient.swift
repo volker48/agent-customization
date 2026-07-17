@@ -164,16 +164,6 @@ public struct CapsuleBrief: Codable, Equatable, Sendable {
     public let statement: String
     public let status: String
   }
-  public struct Resource: Codable, Equatable, Sendable {
-    public let kind: String
-    public let value: String
-    public let detail: String?
-  }
-  public struct ObservedChange: Codable, Equatable, Sendable {
-    public let path: String
-    public let status: String
-    public let provenance: String
-  }
   public struct Validation: Codable, Equatable, Sendable {
     public let command: String
     public let outcome: String
@@ -191,8 +181,6 @@ public struct CapsuleBrief: Codable, Equatable, Sendable {
   public let objective: String
   public let constraints: [String]
   public let decisions: [Decision]
-  public let resources: [Resource]
-  public let observedChanges: [ObservedChange]
   public let validation: [Validation]
   public let blockers: [String]
   public let risks: [String]
