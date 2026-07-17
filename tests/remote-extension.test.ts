@@ -330,7 +330,10 @@ describe("remote extension", () => {
           capsule: {
             objective: "Finish capsule retrieval with token=[REDACTED]",
             maxPayloadBytes: 32 * 1024,
-            redactions: [{ category: "secret", count: 1 }],
+            redactions: [
+              { category: "secret", count: 1 },
+              { category: "untrusted", count: 2 },
+            ],
           },
         },
       });
