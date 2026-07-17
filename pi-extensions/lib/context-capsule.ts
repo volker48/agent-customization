@@ -1312,36 +1312,104 @@ function compareObservedChanges(
   return { status: changes.length ? "changed" : "unchanged", unchangedCount, changes };
 }
 
-function latestValidationByCommand(
+function validationsByCommand(
   values: readonly CapsuleValidation[],
-): Map<string, CapsuleValidation> {
-  const output = new Map<string, CapsuleValidation>();
-  for (const value of values) output.set(semanticCommand(value.command), value);
+): Map<string, CapsuleValidation[]> {
+  const output = new Map<string, CapsuleValidation[]>();
+  for (const value of values) {
+    const command = semanticCommand(value.command);
+    const entries = output.get(command);
+    if (entries) entries.push(value);
+    else output.set(command, [value]);
+  }
   return output;
+}
+
+function sameValidationEvidence(before: CapsuleValidation, after: CapsuleValidation): boolean {
+  return (
+    before.outcome === after.outcome &&
+    semanticText(before.evidence) === semanticText(after.evidence) &&
+    before.observedAt === after.observedAt
+  );
 }
 
 function compareValidation(
   before: readonly CapsuleValidation[],
   after: readonly CapsuleValidation[],
 ): CapsuleDrift["sections"]["validation"] {
-  const beforeByCommand = latestValidationByCommand(before);
-  const afterByCommand = latestValidationByCommand(after);
+  const beforeByCommand = validationsByCommand(before);
+  const afterByCommand = validationsByCommand(after);
   const changes: ValidationDriftChange[] = [];
   let unchangedCount = 0;
-  for (const [command, value] of beforeByCommand) {
-    const current = afterByCommand.get(command);
-    if (!current) changes.push({ kind: "removed", before: value });
-    else if (current.outcome !== value.outcome) {
-      changes.push({ kind: "outcome-changed", before: value, after: current });
-    } else if (
-      semanticText(current.evidence) !== semanticText(value.evidence) ||
-      current.observedAt !== value.observedAt
-    ) {
-      changes.push({ kind: "evidence-updated", before: value, after: current });
-    } else unchangedCount += 1;
-  }
-  for (const [command, value] of afterByCommand) {
-    if (!beforeByCommand.has(command)) changes.push({ kind: "introduced", after: value });
+  const commands = new Set([...beforeByCommand.keys(), ...afterByCommand.keys()]);
+
+  for (const command of commands) {
+    const beforeValues = beforeByCommand.get(command) ?? [];
+    const afterValues = afterByCommand.get(command) ?? [];
+    const matchedBefore = new Set<number>();
+    const matchedAfter = new Set<number>();
+    const changesByBefore = new Map<number, ValidationDriftChange>();
+
+    // Match exact repeated runs first, so removing an older failed run while
+    // retaining a later passed run is reported as a removal, not a no-op.
+    for (let beforeIndex = 0; beforeIndex < beforeValues.length; beforeIndex += 1) {
+      const value = beforeValues[beforeIndex];
+      const match = afterValues.findIndex(
+        (current, afterIndex) =>
+          !matchedAfter.has(afterIndex) && sameValidationEvidence(value, current),
+      );
+      if (match < 0) continue;
+      matchedBefore.add(beforeIndex);
+      matchedAfter.add(match);
+      unchangedCount += 1;
+    }
+
+    // Pair remaining entries with the same outcome before comparing outcomes;
+    // this keeps duplicate command runs as distinct evidence records.
+    for (let beforeIndex = 0; beforeIndex < beforeValues.length; beforeIndex += 1) {
+      if (matchedBefore.has(beforeIndex) || changesByBefore.has(beforeIndex)) continue;
+      const value = beforeValues[beforeIndex];
+      const match = afterValues.findIndex(
+        (current, afterIndex) => !matchedAfter.has(afterIndex) && current.outcome === value.outcome,
+      );
+      if (match < 0) continue;
+      matchedAfter.add(match);
+      changesByBefore.set(beforeIndex, {
+        kind: "evidence-updated",
+        before: value,
+        after: afterValues[match],
+      });
+    }
+
+    const unmatchedBeforeIndices = beforeValues.flatMap((_value, index) =>
+      matchedBefore.has(index) || changesByBefore.has(index) ? [] : [index],
+    );
+    const unmatchedBefore = unmatchedBeforeIndices.map((index) => beforeValues[index]);
+    const unmatchedAfter = afterValues.filter((_value, index) => !matchedAfter.has(index));
+    const pairedCount = Math.min(unmatchedBefore.length, unmatchedAfter.length);
+    for (let index = 0; index < pairedCount; index += 1) {
+      const beforeIndex = unmatchedBeforeIndices[index];
+      const value = unmatchedBefore[index];
+      const current = unmatchedAfter[index];
+      changesByBefore.set(beforeIndex, {
+        kind: current.outcome === value.outcome ? "evidence-updated" : "outcome-changed",
+        before: value,
+        after: current,
+      });
+    }
+    for (let index = pairedCount; index < unmatchedBefore.length; index += 1) {
+      changesByBefore.set(unmatchedBeforeIndices[index], {
+        kind: "removed",
+        before: unmatchedBefore[index],
+      });
+    }
+    for (let index = 0; index < beforeValues.length; index += 1) {
+      const change = changesByBefore.get(index);
+      if (change) changes.push(change);
+    }
+    for (const value of unmatchedAfter.slice(pairedCount)) {
+      changes.push({ kind: "introduced", after: value });
+    }
   }
   return { status: changes.length ? "changed" : "unchanged", unchangedCount, changes };
 }

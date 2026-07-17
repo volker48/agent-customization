@@ -1013,6 +1013,46 @@ describe("Context Capsule application service", () => {
     expect(rendered.match(/Unchanged/g)).toHaveLength(10);
   });
 
+  it("reports removed repeated validation runs instead of collapsing them by command", async () => {
+    const base = await createCapsule({ capsuleId: "repeated-validation-source" });
+    const failed = {
+      ...base.validation[0],
+      outcome: "failed" as const,
+      evidence: "Observed tool result: failed.",
+      observedAt: "2026-07-17T09:00:00.000Z",
+    };
+    const passed = {
+      ...base.validation[0],
+      outcome: "passed" as const,
+      evidence: "Observed tool result: passed.",
+      observedAt: "2026-07-17T10:00:00.000Z",
+    };
+    const predecessor: Capsule = {
+      ...base,
+      validation: [failed, passed],
+    };
+    const successor: Capsule = {
+      ...predecessor,
+      capsuleId: "repeated-validation-successor",
+      revision: 2,
+      predecessor: { capsuleId: predecessor.capsuleId, revision: predecessor.revision },
+      validation: [passed],
+    };
+
+    const drift = compareCapsules(predecessor, successor);
+    expect(drift.noOp).toBe(false);
+    expect(drift.sections.validation).toMatchObject({
+      status: "changed",
+      unchangedCount: 1,
+      changes: [
+        {
+          kind: "removed",
+          before: failed,
+        },
+      ],
+    });
+  });
+
   it("preserves terminal modality and exact command identity in refresh drift", async () => {
     const base = await createCapsule({ capsuleId: "punctuation-and-command-source" });
     const predecessor: Capsule = {
