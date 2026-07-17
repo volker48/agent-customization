@@ -6,7 +6,8 @@ import {
   type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 import { readFile } from "node:fs/promises";
-import { basename, extname, normalize } from "node:path";
+import { basename } from "node:path";
+import { extractSafeResourceFacts } from "./lib/context-capsule.js";
 
 export const DEFAULT_AUTONAME_MODEL = "openai-codex/gpt-5.6-luna";
 export const DEFAULT_AUTONAME_FALLBACK_MODEL = "anthropic/claude-haiku-4-5";
@@ -14,8 +15,6 @@ export const MAX_NAME_LENGTH = 60;
 const MAX_TRANSCRIPT_LENGTH = 30_000;
 const MAX_SECTION_LENGTH = 4_000;
 const MAX_RESOURCE_FACTS = 30;
-const MAX_HEADING_SCAN_LENGTH = 8_000;
-const MAX_GITHUB_JSON_LENGTH = 100_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 80;
 const MODEL_ENV = "PI_AUTONAME_MODEL";
 const FALLBACK_MODEL_ENV = "PI_AUTONAME_FALLBACK_MODEL";
@@ -53,12 +52,6 @@ type SessionEntry = {
   message?: SessionMessage;
   summary?: string;
   firstKeptEntryId?: string;
-};
-
-type ToolCall = {
-  id: string;
-  name: string;
-  arguments?: Record<string, unknown>;
 };
 
 type NamingSection = {
@@ -103,10 +96,6 @@ function normalizeString(value: unknown): string | undefined {
     return undefined;
   }
   return value.trim() || undefined;
-}
-
-function normalizeInline(value: unknown): string | undefined {
-  return normalizeString(value)?.replace(/\s+/g, " ");
 }
 
 function errorMessage(error: unknown): string {
@@ -188,123 +177,8 @@ function selectNamingEntries(entries: SessionEntry[]): SessionEntry[] {
   return [...kept, compaction, ...entries.slice(compactionIndex + 1)];
 }
 
-function extractToolCalls(content: unknown): ToolCall[] {
-  if (!Array.isArray(content)) {
-    return [];
-  }
-
-  return content.flatMap((part) => {
-    if (!part || typeof part !== "object") {
-      return [];
-    }
-    const block = part as Record<string, unknown>;
-    if (
-      block.type !== "toolCall" ||
-      typeof block.id !== "string" ||
-      typeof block.name !== "string"
-    ) {
-      return [];
-    }
-    const args = block.arguments;
-    return [
-      {
-        id: block.id,
-        name: block.name,
-        arguments: args && typeof args === "object" ? (args as Record<string, unknown>) : undefined,
-      },
-    ];
-  });
-}
-
-function normalizedToolPath(value: unknown): string | undefined {
-  const path = normalizeInline(value)?.replace(/^@/, "");
-  return path ? normalize(path) : undefined;
-}
-
-function firstMarkdownHeading(content: unknown): string | undefined {
-  const text = extractTextParts(content).join("\n").slice(0, MAX_HEADING_SCAN_LENGTH);
-  return normalizeInline(text.match(/^#\s+(.+)$/m)?.[1]);
-}
-
-function sanitizedWebUrl(value: unknown): string | undefined {
-  const text = normalizeString(value);
-  if (!text) {
-    return undefined;
-  }
-  try {
-    const url = new URL(text);
-    if (url.protocol !== "http:" && url.protocol !== "https:") {
-      return undefined;
-    }
-    url.username = "";
-    url.password = "";
-    url.search = "";
-    url.hash = "";
-    return url.toString();
-  } catch {
-    return undefined;
-  }
-}
-
-function githubFact(call: ToolCall, result: SessionMessage | undefined): string | undefined {
-  const command = normalizeString(call.arguments?.command);
-  const match = command?.match(/\bgh\s+(issue|pr)\s+view\b[^\n;]*--json\b/);
-  const text = result ? extractTextParts(result.content).join("\n").trim() : "";
-  if (!match || !text || text.length > MAX_GITHUB_JSON_LENGTH) {
-    return undefined;
-  }
-
-  try {
-    const data = JSON.parse(text) as Record<string, unknown>;
-    const title = normalizeInline(data.title);
-    const number = typeof data.number === "number" ? data.number : undefined;
-    if (!title) {
-      return undefined;
-    }
-    const kind = match[1] === "issue" ? "Issue" : "PR";
-    const url = sanitizedWebUrl(data.url);
-    return `${kind}${number === undefined ? "" : ` #${number}`}: ${title}${url ? ` (${url})` : ""}`;
-  } catch {
-    return undefined;
-  }
-}
-
-function resourceFact(call: ToolCall, result: SessionMessage | undefined): string | undefined {
-  if (call.name === "read" || call.name === "edit" || call.name === "write") {
-    const path = normalizedToolPath(call.arguments?.path);
-    if (!path) {
-      return undefined;
-    }
-    const heading =
-      call.name === "read" && [".md", ".mdx"].includes(extname(path).toLowerCase())
-        ? firstMarkdownHeading(result?.content)
-        : undefined;
-    return `${call.name}: ${path}${heading ? ` — ${heading}` : ""}`;
-  }
-  if (call.name === "webfetch") {
-    const url = sanitizedWebUrl(call.arguments?.url);
-    const heading = firstMarkdownHeading(result?.content);
-    return url ? `webfetch: ${url}${heading ? ` — ${heading}` : ""}` : undefined;
-  }
-  return call.name === "bash" ? githubFact(call, result) : undefined;
-}
-
-function collectToolEvidence(entries: SessionEntry[]): string[] {
-  const calls = entries.flatMap((entry) =>
-    entry.type === "message" && entry.message?.role === "assistant"
-      ? extractToolCalls(entry.message.content)
-      : [],
-  );
-  const results = new Map<string, SessionMessage>();
-  for (const entry of entries) {
-    const id = entry.message?.toolCallId;
-    if (entry.type === "message" && entry.message?.role === "toolResult" && id) {
-      results.set(id, entry.message);
-    }
-  }
-
-  const facts = calls.flatMap((call) => resourceFact(call, results.get(call.id)) ?? []);
-  return [...new Set(facts)].slice(0, MAX_RESOURCE_FACTS);
+function collectToolEvidence(entries: SessionEntry[], cwd: string): string[] {
+  return extractSafeResourceFacts(entries, cwd).slice(0, MAX_RESOURCE_FACTS);
 }
 
 function summaryText(entries: SessionEntry[]): string | undefined {
@@ -365,7 +239,7 @@ export function buildAutonameTranscript(entries: SessionEntry[], cwd: string): s
   const excludedIds = new Set(
     [firstTaskEntry?.id, outcomeEntry?.id].filter((id): id is string => Boolean(id)),
   );
-  const resources = collectToolEvidence(selected);
+  const resources = collectToolEvidence(selected, cwd);
   const sections: NamingSection[] = [
     { content: `Project: ${basename(cwd)}\nWorking directory: ${cwd}`, priority: 0 },
     {
