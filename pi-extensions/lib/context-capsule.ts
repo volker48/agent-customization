@@ -208,7 +208,7 @@ function hasControl(value: string): boolean {
 // carrying a credential into a portable artifact. PEMs and URLs are matched across
 // lines before whitespace normalization so no fragment can survive redaction.
 const SECRET_ASSIGNMENT =
-  /(?:\b(?:api[_-]?key|access[_-]?(?:key|token)|refresh[_-]?token|id[_-]?token|token|password|passwd|secret|credential|client[_-]?secret|aws[_-]?(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key)|google[_-]?application[_-]?credentials|azure[_-]?(?:client[_-]?secret|tenant[_-]?id))\b|--(?:token|password|api-key|secret)\b)\s*(?:=|:)??\s+((?:"[^"]*"|'[^']*'|[^\s,;]+))|(?:\b(?:api[_-]?key|access[_-]?(?:key|token)|refresh[_-]?token|id[_-]?token|token|password|passwd|secret|credential|client[_-]?secret|aws[_-]?(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key))\b)\s*=\s*((?:"[^"]*"|'[^']*'|[^\s,;]+))/gi;
+  /(?:\b(?:api[_-]?key|access[_-]?(?:key|token)|refresh[_-]?token|id[_-]?token|token|password|passwd|secret|credential|client[_-]?secret|aws[_-]?(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key)|google[_-]?application[_-]?credentials|azure[_-]?(?:client[_-]?secret|tenant[_-]?id)|[a-z][a-z0-9]*(?:_[a-z0-9]+)*_(?:token|secret|password|api[_-]?key|access[_-]?key|credential))\b|--(?:token|password|api-key|secret)\b)\s*(?:=|:)?\s+((?:\[REDACTED(?: SECRET)?\]|"[^"]*"|'[^']*'|(?!\[REDACTED(?: SECRET)?\])[^\s,;]+))|(?:\b(?:api[_-]?key|access[_-]?(?:key|token)|refresh[_-]?token|id[_-]?token|token|password|passwd|secret|credential|client[_-]?secret|aws[_-]?(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key)|[a-z][a-z0-9]*(?:_[a-z0-9]+)*_(?:token|secret|password|api[_-]?key|access[_-]?key|credential))\b)\s*(?:=|:)\s*((?:\[REDACTED(?: SECRET)?\]|"[^"]*"|'[^']*'|(?!\[REDACTED(?: SECRET)?\])[^\s,;]+))/gi;
 const PEM_PRIVATE_KEY =
   /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/gi;
 const PEM_REMAINDER = /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*$/i;
@@ -607,19 +607,23 @@ function isValidationCommand(command: string): boolean {
 }
 
 function repositoryStateCommand(command: string): boolean {
-  return /(?:^|[;&|]\s*)git\s+(?:status(?:\s+(?:--short|--porcelain|-s))?|diff\s+--name-only(?:\s+[^;&|]+)?)\s*$/i.test(
+  return /(?:^|[;&|]\s*)git\s+(?:(?:status\s+(?:--short|--porcelain(?:=v[12])?|-s)(?:\s+[^;&|]+)?)|(?:diff\s+--name-only(?:\s+[^;&|]+)?))\s*$/i.test(
     command.trim(),
   );
 }
 
-function observedRepositoryPaths(output: string, cwd: string): string[] {
+function observedRepositoryPaths(output: string, cwd: string, machineReadable: boolean): string[] {
   const paths: string[] = [];
   for (const line of output.split("\n").slice(0, CAPSULE_MAX_ENTRIES * 2)) {
-    // `git status --short` prefixes paths with a two-column status. Rename
-    // records are intentionally omitted because parsing their two paths is
-    // ambiguous and omission is safer than an incorrect path.
-    const candidate = line.match(/^\s?(?:[ MADRCU?!]{2})\s+(.+)$/)?.[1] ?? line.trim();
-    if (!candidate || candidate.includes(" -> ")) continue;
+    // `git status --short` prefixes paths with a two-column status. Porcelain
+    // v2 uses record types and fixed fields; rename records are intentionally
+    // omitted because parsing their two paths is ambiguous.
+    const statusPath =
+      line.match(/^\s?(?:[ MADRCU?!]{2})\s+(.+)$/)?.[1] ??
+      line.match(/^(?:1\s+\S{2}(?:\s+\S+){6}|u\s+\S{2}(?:\s+\S+){8})\s+(.+)$/)?.[1] ??
+      line.match(/^(?:\?|!)\s+(.+)$/)?.[1];
+    const candidate = machineReadable ? statusPath : line.trim();
+    if (!candidate || candidate.includes(" -> ") || candidate.includes("\t")) continue;
     const path = capsulePath(candidate.replace(/^"|"$/g, ""), cwd);
     if (path && !paths.includes(path)) paths.push(path);
   }
@@ -733,6 +737,7 @@ export function extractSessionEvidence(
     for (const path of observedRepositoryPaths(
       textParts(result.message?.content).join("\n"),
       cwd,
+      !/\bgit\s+diff\s+--name-only\b/i.test(call.arguments.command),
     )) {
       if (!observedChanges.some((item) => item.path === path)) {
         observedChanges.push({ path, status: "observed", provenance: "none" });
