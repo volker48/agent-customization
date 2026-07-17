@@ -17,8 +17,8 @@ export interface FusionArgs {
 
 export function parseFusionArgs(raw: string): FusionArgs {
   const text = raw.trim();
-  const fileMatch = text.match(/(?:^|\s)--file(?:=(\S+)|\s+(\S+))?/);
-  const capsuleMatch = text.match(/(?:^|\s)--capsule(?:=(\S+)|\s+(\S+))?/);
+  const fileMatch = text.match(/(?:^|\s)--file(?=\s|=|$)(?:=(\S+)|\s+(\S+))?/);
+  const capsuleMatch = text.match(/(?:^|\s)--capsule(?=\s|=|$)(?:=(\S+)|\s+(\S+))?/);
   const filePath = fileMatch?.[1] ?? fileMatch?.[2];
   const capsuleReference = capsuleMatch?.[1] ?? capsuleMatch?.[2];
 
