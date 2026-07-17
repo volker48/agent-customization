@@ -294,6 +294,65 @@ describe("Context Capsule application service", () => {
     expect(parseCapsule(json)).toMatchObject({ ok: true });
   });
 
+  it("redacts prefixed environment credentials and rejects them in every capsule boundary", async () => {
+    const assignments = [
+      "OPENAI_API_KEY=openai-secret",
+      "GH_TOKEN : github-secret",
+      "NPM_TOKEN = npm-secret",
+      "AWS_SESSION_TOKEN: aws-session-secret",
+      "SERVICE_SECRET = service-secret",
+      "DB_PASSWORD: database-secret",
+      "BUILD_ACCESS_KEY = access-secret",
+      "CI_CREDENTIAL: credential-secret",
+    ];
+    const snapshot = extractSessionEvidence(
+      [{ type: "message", message: { role: "user", content: assignments.join("\n") } }],
+      "/work/project",
+    );
+    const generated = await generateCapsule(snapshot, {
+      sessionId: "session-1",
+      cwd: "/work/project",
+    });
+    expect(generated.ok).toBe(true);
+    if (!generated.ok) return;
+    const generatedJson = serializeCapsule(generated.value);
+    for (const assignment of assignments) {
+      expect(generatedJson).not.toContain(assignment.split(/[=:]/, 2)[1].trim());
+    }
+    expect(generated.value.objective).toContain("OPENAI_API_KEY=[REDACTED]");
+    expect(generated.value.objective).toContain("AWS_SESSION_TOKEN: [REDACTED]");
+
+    const unsafeCapsules: Capsule[] = [
+      { ...generated.value, objective: "OPENAI_API_KEY=unredacted" },
+      { ...generated.value, constraints: ["GH_TOKEN: unredacted"] },
+      {
+        ...generated.value,
+        decisions: [{ statement: "NPM_TOKEN = unredacted", status: "unknown" }],
+      },
+      {
+        ...generated.value,
+        resources: [{ kind: "github", value: "AWS_SESSION_TOKEN: unredacted" }],
+      },
+      {
+        ...generated.value,
+        validation: [
+          { command: "pnpm test", outcome: "unknown", evidence: "CI_SECRET=unredacted" },
+        ],
+      },
+      { ...generated.value, blockers: ["DB_PASSWORD=unredacted"] },
+      { ...generated.value, risks: ["BUILD_ACCESS_KEY: unredacted"] },
+      { ...generated.value, nextAction: "CI_CREDENTIAL = unredacted" },
+    ];
+    for (const unsafe of unsafeCapsules) {
+      expect(validateCapsule(unsafe)).toMatchObject({ ok: false });
+      expect(parseCapsule(JSON.stringify(unsafe))).toMatchObject({ ok: false });
+      expect(() => previewCapsule(unsafe)).toThrow();
+      await expect(
+        loadCapsule("unsafe", { readFile: async () => JSON.stringify(unsafe) }),
+      ).resolves.toMatchObject({ ok: false });
+    }
+  });
+
   it("extracts bounded direct conversation evidence as unknown context", () => {
     const snapshot = extractSessionEvidence(
       [
@@ -359,6 +418,83 @@ describe("Context Capsule application service", () => {
       { path: "src/existing.ts", status: "observed", provenance: "none" },
       { path: "src/new.ts", status: "observed", provenance: "none" },
     ]);
+  });
+
+  it("ignores long-form git status prose and parses machine-readable status formats", () => {
+    const cases = [
+      { command: "git status --short", output: " M src/short.ts" },
+      { command: "git status -s", output: "?? src/short-flag.ts" },
+      { command: "git status --porcelain", output: " M src/porcelain.ts" },
+      { command: "git status --porcelain=v1", output: "?? src/porcelain-v1.ts" },
+      {
+        command: "git status --porcelain=v2",
+        output: "1 .M N... 100644 100644 100644 abc abc src/porcelain-v2.ts",
+      },
+      { command: "git diff --name-only", output: "src/diff.ts" },
+    ];
+    const toolCalls = cases.flatMap(({ command }, index) => [
+      {
+        type: "message" as const,
+        message: {
+          role: "assistant" as const,
+          content: [
+            {
+              type: "toolCall" as const,
+              id: `status-${index}`,
+              name: "bash",
+              arguments: { command },
+            },
+          ],
+        },
+      },
+      {
+        type: "message" as const,
+        message: {
+          role: "toolResult" as const,
+          toolCallId: `status-${index}`,
+          content: cases[index].output,
+          isError: false,
+        },
+      },
+    ]);
+    const prose = [
+      {
+        type: "message" as const,
+        message: {
+          role: "assistant" as const,
+          content: [
+            {
+              type: "toolCall" as const,
+              id: "status-prose",
+              name: "bash",
+              arguments: { command: "git status" },
+            },
+          ],
+        },
+      },
+      {
+        type: "message" as const,
+        message: {
+          role: "toolResult" as const,
+          toolCallId: "status-prose",
+          content:
+            "On branch main\nChanges not staged for commit:\n\tmodified: src/prose-is-not-a-path.ts",
+          isError: false,
+        },
+      },
+    ];
+
+    const snapshot = extractSessionEvidence([...toolCalls, ...prose], "/work/project");
+    expect(snapshot.observedChanges).toEqual(
+      [
+        "src/short.ts",
+        "src/short-flag.ts",
+        "src/porcelain.ts",
+        "src/porcelain-v1.ts",
+        "src/porcelain-v2.ts",
+        "src/diff.ts",
+      ].map((path) => ({ path, status: "observed", provenance: "none" })),
+    );
   });
 
   it("never reports ambiguous or interrupted validation as passed", () => {
