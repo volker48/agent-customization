@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -27,7 +27,7 @@ import {
   refreshClaudeBackgroundJob,
   startClaudeBackgroundReview,
 } from "../pi-extensions/claude-review/claude-bg.js";
-import { readJob, writeJob } from "../pi-extensions/claude-review/jobs.js";
+import { listJobs, readJob, writeJob } from "../pi-extensions/claude-review/jobs.js";
 import type { ClaudeReviewJob } from "../pi-extensions/claude-review/jobs.js";
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
@@ -702,6 +702,49 @@ describe("claude review command", () => {
     expect(started.claudeSessionId).toBeUndefined();
     expect(started.errorMessage).toBe("Claude background session did not report a session id");
     expect(started.rawStartOutput).toBe("background session started");
+  });
+
+  it("repairs permissive env-overridden job stores and files before persistence", async () => {
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(jobDir);
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    await chmod(jobDir, 0o755);
+
+    const job = createBackgroundJob();
+    await writeJob(job);
+    const [jobFile] = await readdir(jobDir);
+    const jobPath = join(jobDir, jobFile);
+    expect((await stat(jobDir)).mode & 0o777).toBe(0o700);
+    expect((await stat(jobPath)).mode & 0o777).toBe(0o600);
+
+    await chmod(jobPath, 0o644);
+    await expect(readJob(job.id)).resolves.toMatchObject({ id: job.id });
+    expect((await stat(jobPath)).mode & 0o777).toBe(0o600);
+  });
+
+  it("fails closed for an env-overridden store that is not a directory", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(rootDir);
+    const storePath = join(rootDir, "not-a-directory");
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = storePath;
+    await writeFile(storePath, "not a store", "utf8");
+
+    await expect(writeJob(createBackgroundJob())).rejects.toThrow(/EEXIST|job store/);
+    await expect(listJobs()).rejects.toThrow(/EEXIST|job store/);
+  });
+
+  it("fails closed instead of reading a job file through a symlink", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(rootDir);
+    const jobDir = join(rootDir, "jobs");
+    const outsidePath = join(rootDir, "outside.json");
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    await mkdir(jobDir);
+    await writeFile(outsidePath, JSON.stringify(createBackgroundJob()), "utf8");
+    const jobPath = join(jobDir, "claude-review-20260101000000-abcdef12.json");
+    await symlink(outsidePath, jobPath);
+
+    await expect(listJobs()).rejects.toThrow(/regular file/);
   });
 
   it("rejects job ids that resolve outside the job store", async () => {
