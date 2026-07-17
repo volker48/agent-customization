@@ -1,4 +1,6 @@
 export const REMOTE_CONTROL_ALPN = "pi/remote/1";
+export const CAPSULE_CAPABILITY = "context-capsule-v1";
+export const CAPSULE_OPERATION = "capsule";
 
 export const CONTROL_MESSAGE_TYPES = ["pair", "list", "attach", "detach", "session_ended"] as const;
 export const PER_SESSION_MESSAGE_TYPES = ["event", "prompt", "abort"] as const;
@@ -29,6 +31,60 @@ export type RoutedEnvelope =
   | { channel: "control"; envelope: ControlEnvelope }
   | { channel: "session"; envelope: PerSessionEnvelope };
 
+export type CapsuleControlRequest = {
+  operation: typeof CAPSULE_OPERATION;
+  sessionId: string;
+};
+
+export type CapsuleControlError = {
+  code:
+    | "cancelled"
+    | "io"
+    | "malformed"
+    | "not-attached"
+    | "not-found"
+    | "oversized"
+    | "unavailable"
+    | "unsafe"
+    | "unsupported-version";
+  message: string;
+};
+
+export type CapsuleControlResult<T = unknown> =
+  | {
+      operation: typeof CAPSULE_OPERATION;
+      requestId: string;
+      supported: true;
+      capsule: T;
+    }
+  | {
+      operation: typeof CAPSULE_OPERATION;
+      requestId: string;
+      supported: true;
+      error: CapsuleControlError;
+    }
+  | {
+      operation: typeof CAPSULE_OPERATION;
+      requestId: string;
+      supported: false;
+      capability: typeof CAPSULE_CAPABILITY;
+    };
+
+export function capsuleControlRequest(sessionId: string): CapsuleControlRequest {
+  return { operation: CAPSULE_OPERATION, sessionId };
+}
+
+export function parseCapsuleControlRequest(payload: unknown): CapsuleControlRequest | null {
+  if (!isRecord(payload) || payload.operation !== CAPSULE_OPERATION) return null;
+  return typeof payload.sessionId === "string" && payload.sessionId.length > 0
+    ? { operation: CAPSULE_OPERATION, sessionId: payload.sessionId }
+    : null;
+}
+
+export function isCapsuleControlRequest(payload: unknown): boolean {
+  return isRecord(payload) && payload.operation === CAPSULE_OPERATION;
+}
+
 export function encodeFrame(envelope: Envelope): string {
   return `${JSON.stringify(envelope)}\n`;
 }
@@ -43,6 +99,10 @@ export function decodeFrames(input: string): Envelope[] {
     .split("\n")
     .filter((line) => line.length > 0)
     .map((line) => JSON.parse(line) as Envelope);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function routeEnvelope(envelope: Envelope): RoutedEnvelope {

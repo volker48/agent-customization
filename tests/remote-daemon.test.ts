@@ -83,6 +83,145 @@ describe("remote daemon", () => {
     }
   }, 30_000);
 
+  it("returns capsules only to the same authorized node while it is attached", async () => {
+    const root = await tempRoot();
+    const daemon = await startRemoteDaemon({ remoteRoot: root, pairingCode: "123-456" });
+    const extension = await connectIpcExtension(daemon.socketPath, {
+      sessionId: "session-1",
+      name: "Work session",
+      cwd: "/repo",
+      capabilities: ["context-capsule-v1"],
+    });
+    const client = await bindEndpoint();
+    let attachConnection: Awaited<ReturnType<typeof connectEndpoint>> | undefined;
+
+    try {
+      await daemon.ipc.waitForSession("session-1");
+      await expect(
+        exchange(client, daemon.ticket, [
+          {
+            sessionId: null,
+            type: "list",
+            payload: { operation: "capsule", sessionId: "session-1" },
+          },
+        ]),
+      ).resolves.toEqual([]);
+      await armPairing(daemon.socketPath);
+      await exchange(client, daemon.ticket, [
+        { sessionId: null, type: "pair", payload: { code: "123-456" } },
+      ]);
+
+      await expect(
+        exchange(client, daemon.ticket, [
+          {
+            sessionId: null,
+            type: "list",
+            payload: { operation: "capsule", sessionId: "session-1" },
+          },
+        ]),
+      ).resolves.toMatchObject([
+        {
+          payload: {
+            operation: "capsule",
+            supported: true,
+            error: { code: "not-attached" },
+          },
+        },
+      ]);
+
+      const addr = EndpointTicket.fromString(daemon.ticket).endpointAddr();
+      attachConnection = await connectEndpoint(client, addr);
+      const attachStream = await openStream(attachConnection);
+      await sendEnvelope(attachStream, {
+        sessionId: null,
+        type: "attach",
+        payload: { sessionId: "session-1", stream: true },
+      });
+      await finishSending(attachStream);
+      await expect(extension.readNext()).resolves.toMatchObject({ type: "attach" });
+
+      const capsuleRequest = exchange(client, daemon.ticket, [
+        {
+          sessionId: null,
+          type: "list",
+          payload: { operation: "capsule", sessionId: "session-1" },
+        },
+      ]);
+      const ipcRequest = await extension.readNext();
+      expect(ipcRequest).toMatchObject({
+        sessionId: "session-1",
+        type: "capsule",
+        payload: { requestId: expect.any(String) },
+      });
+      const requestId = (ipcRequest.payload as { requestId: string }).requestId;
+      await extension.send({
+        sessionId: "session-1",
+        type: "capsule",
+        payload: {
+          requestId,
+          supported: true,
+          capsule: { objective: "Host-generated brief", maxPayloadBytes: 32 * 1024 },
+        },
+      });
+
+      await expect(capsuleRequest).resolves.toMatchObject([
+        {
+          payload: {
+            operation: "capsule",
+            requestId,
+            supported: true,
+            capsule: { objective: "Host-generated brief" },
+          },
+        },
+      ]);
+    } finally {
+      attachConnection?.close(0n, []);
+      await closeEndpoint(client);
+      await extension.close();
+      await daemon.close();
+    }
+  }, 30_000);
+
+  it("reports capsule support explicitly when the session extension is older", async () => {
+    const root = await tempRoot();
+    const daemon = await startRemoteDaemon({ remoteRoot: root, pairingCode: "123-456" });
+    const extension = await connectIpcExtension(daemon.socketPath, {
+      sessionId: "session-1",
+      name: "Older session",
+      cwd: "/repo",
+    });
+    const client = await bindEndpoint();
+
+    try {
+      await daemon.ipc.waitForSession("session-1");
+      await armPairing(daemon.socketPath);
+      const responses = await exchange(client, daemon.ticket, [
+        { sessionId: null, type: "pair", payload: { code: "123-456" } },
+        {
+          sessionId: null,
+          type: "list",
+          payload: { operation: "capsule", sessionId: "session-1" },
+        },
+      ]);
+
+      expect(responses).toMatchObject([
+        { payload: { paired: true } },
+        {
+          payload: {
+            operation: "capsule",
+            supported: false,
+            capability: "context-capsule-v1",
+          },
+        },
+      ]);
+      expect(extension.receivedCount()).toBe(0);
+    } finally {
+      await closeEndpoint(client);
+      await extension.close();
+      await daemon.close();
+    }
+  }, 30_000);
+
   it("rejects pairing unless the window is armed and limits attempts per connection", async () => {
     const root = await tempRoot();
     const daemon = await startRemoteDaemon({ remoteRoot: root, pairingCode: "123-456" });

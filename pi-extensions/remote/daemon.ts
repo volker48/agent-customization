@@ -1,4 +1,5 @@
 import { SecretKey } from "@number0/iroh/index.js";
+import { randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -24,8 +25,12 @@ import {
   type RemoteEndpoint,
 } from "./iroh-transport.js";
 import {
+  CAPSULE_CAPABILITY,
+  CAPSULE_OPERATION,
   CONTROL_MESSAGE_TYPES,
   PER_SESSION_MESSAGE_TYPES,
+  isCapsuleControlRequest,
+  parseCapsuleControlRequest,
   routeEnvelope,
   type ControlEnvelope,
   type Envelope,
@@ -37,6 +42,7 @@ const DAEMON_SOCKET_FILE = "daemon.sock";
 const OWNER_ONLY_DIRECTORY_MODE = 0o700;
 const OWNER_ONLY_FILE_MODE = 0o600;
 const UNAUTHENTICATED_READ_TIMEOUT_MS = 30_000;
+const CAPSULE_REQUEST_TIMEOUT_MS = 10_000;
 const REMOTE_CLOSE_ERROR_CODE = 0n;
 const READ_TIMEOUT_CLOSE_REASON = Array.from(Buffer.from("read timeout", "utf8"));
 
@@ -68,6 +74,7 @@ export async function startRemoteDaemon(options: RemoteDaemonOptions): Promise<R
   const ticket = endpointTicket(endpoint);
   const pairingWindow = new PairingWindow(pairingCodeFactory(options));
   const streamingAttachCounts = new Map<string, number>();
+  const nodeAttachCounts = new Map<string, number>();
   let daemon: RemoteDaemon;
   let ipc: IpcDaemonServer;
   try {
@@ -87,6 +94,7 @@ export async function startRemoteDaemon(options: RemoteDaemonOptions): Promise<R
     allowlist,
     pairingWindow,
     streamingAttachCounts,
+    nodeAttachCounts,
     () => closed,
   );
 
@@ -112,14 +120,20 @@ async function acceptConnections(
   allowlist: FileNodeAllowlist,
   pairingWindow: PairingWindow,
   streamingAttachCounts: Map<string, number>,
+  nodeAttachCounts: Map<string, number>,
   isClosed: () => boolean,
 ): Promise<void> {
   while (!isClosed()) {
     try {
       const connection = await acceptConnection(endpoint);
-      void handleConnection(connection, ipc, allowlist, pairingWindow, streamingAttachCounts).catch(
-        () => undefined,
-      );
+      void handleConnection(
+        connection,
+        ipc,
+        allowlist,
+        pairingWindow,
+        streamingAttachCounts,
+        nodeAttachCounts,
+      ).catch(() => undefined);
     } catch {
       if (isClosed()) return;
     }
@@ -132,6 +146,7 @@ async function handleConnection(
   allowlist: FileNodeAllowlist,
   pairingWindow: PairingWindow,
   streamingAttachCounts: Map<string, number>,
+  nodeAttachCounts: Map<string, number>,
 ): Promise<void> {
   const stream = await acceptStream(connection);
   const writer = new StreamWriter(stream);
@@ -139,6 +154,12 @@ async function handleConnection(
   const attaching = new Set<string>();
   const retained = new Set<string>();
   const pending: IpcEnvelope[] = [];
+  const nodeId = connection.remoteId().toString();
+  const requestAbort = new AbortController();
+  void connection.closed().then(
+    () => requestAbort.abort(),
+    () => requestAbort.abort(),
+  );
   const unsubscribe = ipc.subscribe((frame) =>
     routeAttachedFrame(frame, { writer, attached, attaching, pending }),
   );
@@ -156,10 +177,13 @@ async function handleConnection(
         ipc,
         allowlist: connectionAllowlist,
         pairingWindow,
-        nodeId: connection.remoteId().toString(),
+        nodeId,
+        nodeAttachCounts,
+        signal: requestAbort.signal,
       });
       if (streamingAttachSessionId && response && !retained.has(streamingAttachSessionId)) {
         retainStreamingAttach(streamingAttachCounts, streamingAttachSessionId);
+        retainNodeAttach(nodeAttachCounts, nodeId, streamingAttachSessionId);
         retained.add(streamingAttachSessionId);
       }
       if (response) await writer.send(response);
@@ -188,6 +212,8 @@ async function handleConnection(
     closeRemoteConnection(connection);
     await writer.close();
   } finally {
+    requestAbort.abort();
+    releaseNodeAttaches(nodeAttachCounts, nodeId, retained);
     try {
       await detachAttachedSessions(ipc, releaseStreamingAttaches(streamingAttachCounts, retained));
     } finally {
@@ -202,6 +228,8 @@ type RemoteEnvelopeContext = {
   allowlist: NodeAllowlist;
   pairingWindow: PairingWindow;
   nodeId: string;
+  nodeAttachCounts: Map<string, number>;
+  signal: AbortSignal;
 };
 
 async function handleRemoteEnvelope(context: RemoteEnvelopeContext): Promise<Envelope | null> {
@@ -221,19 +249,25 @@ async function handleRemoteEnvelope(context: RemoteEnvelopeContext): Promise<Env
   }
 
   return routed.channel === "control"
-    ? handleControlEnvelope(routed.envelope, context.ipc)
+    ? handleControlEnvelope(routed.envelope, context)
     : routeSessionEnvelope(routed.envelope, context.ipc);
 }
 
 async function handleControlEnvelope(
   envelope: ControlEnvelope,
-  ipc: IpcDaemonServer,
+  context: RemoteEnvelopeContext,
 ): Promise<Envelope | null> {
+  const { ipc } = context;
   if (envelope.type === "pair") {
     return { sessionId: null, type: "pair", payload: { paired: true } };
   }
 
   if (envelope.type === "list") {
+    const request = parseCapsuleControlRequest(envelope.payload);
+    if (request) return retrieveCapsule(request.sessionId, context);
+    if (isCapsuleControlRequest(envelope.payload)) {
+      return capsuleErrorResponse(randomUUID(), "malformed", "Invalid capsule request.");
+    }
     return { sessionId: null, type: "list", payload: listSessions(ipc) };
   }
 
@@ -300,6 +334,79 @@ function pairingCodeFactory(options: RemoteDaemonOptions): () => string {
     return () => pairingCode;
   }
   return createPairingCode;
+}
+
+async function retrieveCapsule(
+  sessionId: string,
+  context: RemoteEnvelopeContext,
+): Promise<Envelope> {
+  const requestId = randomUUID();
+  const entry = context.ipc.registry.get(sessionId);
+  if (!entry) return capsuleErrorResponse(requestId, "unavailable", "Capsule is unavailable.");
+  if (!entry.capabilities.includes(CAPSULE_CAPABILITY)) {
+    return {
+      sessionId: null,
+      type: "list",
+      payload: {
+        operation: CAPSULE_OPERATION,
+        requestId,
+        supported: false,
+        capability: CAPSULE_CAPABILITY,
+      },
+    };
+  }
+  if (!isNodeAttached(context.nodeAttachCounts, context.nodeId, sessionId)) {
+    return capsuleErrorResponse(
+      requestId,
+      "not-attached",
+      "Attach to the session before requesting its capsule.",
+    );
+  }
+
+  try {
+    const response = await context.ipc.requestFromSession(
+      { sessionId, type: "capsule", payload: { requestId } },
+      { signal: context.signal, timeoutMs: CAPSULE_REQUEST_TIMEOUT_MS },
+    );
+    return {
+      sessionId: null,
+      type: "list",
+      payload: { operation: CAPSULE_OPERATION, requestId, ...capsuleResultFrom(response.payload) },
+    };
+  } catch (error) {
+    return capsuleErrorResponse(
+      requestId,
+      isAbortError(error) ? "cancelled" : "unavailable",
+      isAbortError(error) ? "Capsule request was cancelled." : "Capsule is unavailable.",
+    );
+  }
+}
+
+function capsuleErrorResponse(requestId: string, code: string, message: string): Envelope {
+  return {
+    sessionId: null,
+    type: "list",
+    payload: {
+      operation: CAPSULE_OPERATION,
+      requestId,
+      supported: true,
+      error: { code, message },
+    },
+  };
+}
+
+function capsuleResultFrom(payload: unknown): Record<string, unknown> {
+  if (typeof payload === "object" && payload !== null && !Array.isArray(payload)) {
+    return payload as Record<string, unknown>;
+  }
+  return {
+    supported: true,
+    error: { code: "malformed", message: "Invalid capsule response." },
+  };
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }
 
 function sessionIdFromPayload(payload: unknown): string | null {
@@ -427,6 +534,32 @@ async function detachAttachedSessions(
 
 function retainStreamingAttach(counts: Map<string, number>, sessionId: string): void {
   counts.set(sessionId, (counts.get(sessionId) ?? 0) + 1);
+}
+
+function nodeAttachKey(nodeId: string, sessionId: string): string {
+  return `${nodeId}:${sessionId}`;
+}
+
+function retainNodeAttach(counts: Map<string, number>, nodeId: string, sessionId: string): void {
+  const key = nodeAttachKey(nodeId, sessionId);
+  counts.set(key, (counts.get(key) ?? 0) + 1);
+}
+
+function isNodeAttached(counts: Map<string, number>, nodeId: string, sessionId: string): boolean {
+  return (counts.get(nodeAttachKey(nodeId, sessionId)) ?? 0) > 0;
+}
+
+function releaseNodeAttaches(
+  counts: Map<string, number>,
+  nodeId: string,
+  sessionIds: Set<string>,
+): void {
+  for (const sessionId of sessionIds) {
+    const key = nodeAttachKey(nodeId, sessionId);
+    const count = counts.get(key) ?? 0;
+    if (count <= 1) counts.delete(key);
+    else counts.set(key, count - 1);
+  }
 }
 
 function releaseStreamingAttaches(

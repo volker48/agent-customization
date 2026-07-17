@@ -246,6 +246,119 @@ describe("remote Unix-socket IPC", () => {
     }
   });
 
+  it("correlates capsule request responses and removes completed waiters", async () => {
+    const socketPath = await tempSocketPath();
+    const daemon = await startIpcDaemonServer(socketPath);
+
+    try {
+      const extension = await connectIpcExtension(socketPath, {
+        sessionId: "session-1",
+        name: "Work session",
+        cwd: "/repo",
+        capabilities: ["context-capsule-v1"],
+      });
+      await daemon.waitForSession("session-1");
+      const response = daemon.requestFromSession({
+        sessionId: "session-1",
+        type: "capsule",
+        payload: { requestId: "request-1" },
+      });
+
+      await expect(extension.readNext()).resolves.toEqual({
+        sessionId: "session-1",
+        type: "capsule",
+        payload: { requestId: "request-1" },
+      });
+      await extension.send({
+        sessionId: "session-1",
+        type: "capsule",
+        payload: { requestId: "request-1", supported: true, capsule: { objective: "Ship it" } },
+      });
+
+      await expect(response).resolves.toMatchObject({
+        payload: { requestId: "request-1", supported: true },
+      });
+      await extension.close();
+    } finally {
+      await daemon.close();
+    }
+  });
+
+  it("cancels capsule request waiters without affecting the session", async () => {
+    const socketPath = await tempSocketPath();
+    const daemon = await startIpcDaemonServer(socketPath);
+
+    try {
+      const extension = await connectIpcExtension(socketPath, {
+        sessionId: "session-1",
+        name: "Work session",
+        cwd: "/repo",
+      });
+      await daemon.waitForSession("session-1");
+      const controller = new AbortController();
+      const response = daemon.requestFromSession(
+        { sessionId: "session-1", type: "capsule", payload: { requestId: "cancel-me" } },
+        { signal: controller.signal },
+      );
+      await extension.readNext();
+
+      controller.abort();
+
+      await expect(response).rejects.toMatchObject({ name: "AbortError" });
+      expect(daemon.registry.has("session-1")).toBe(true);
+      await extension.close();
+    } finally {
+      await daemon.close();
+    }
+  });
+
+  it("rejects capsule requests on session shutdown and socket disconnect", async () => {
+    const socketPath = await tempSocketPath();
+    const daemon = await startIpcDaemonServer(socketPath);
+
+    try {
+      const first = await connectIpcExtension(socketPath, {
+        sessionId: "session-1",
+        name: "First",
+        cwd: "/repo/one",
+      });
+      await daemon.waitForSession("session-1");
+      const shutdownRequest = daemon.requestFromSession({
+        sessionId: "session-1",
+        type: "capsule",
+        payload: { requestId: "shutdown" },
+      });
+      const shutdownRejection = expect(shutdownRequest).rejects.toThrow("IPC session shut down");
+      await first.readNext();
+      await first.send({ sessionId: "session-1", type: "session_shutdown", payload: {} });
+      await shutdownRejection;
+      await first.close();
+
+      const second = await connectIpcExtension(socketPath, {
+        sessionId: "session-2",
+        name: "Second",
+        cwd: "/repo/two",
+      });
+      await daemon.waitForSession("session-2");
+      const disconnectRequest = daemon.requestFromSession({
+        sessionId: "session-2",
+        type: "capsule",
+        payload: { requestId: "disconnect" },
+      });
+      const disconnectRejection = expect(disconnectRequest).rejects.toThrow(
+        "IPC session socket closed",
+      );
+      await second.readNext();
+      await second.close();
+
+      await disconnectRejection;
+      await expect(daemon.waitForSessionEnd("session-2")).resolves.toBeUndefined();
+      expect(daemon.registry.has("session-2")).toBe(false);
+    } finally {
+      await daemon.close();
+    }
+  });
+
   it("keeps multiple concurrent sessions in the registry", async () => {
     const socketPath = await tempSocketPath();
     const daemon = await startIpcDaemonServer(socketPath);

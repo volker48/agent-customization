@@ -45,6 +45,7 @@ function createContext() {
     sessionManager: {
       getSessionId: vi.fn(() => "session-1"),
       getSessionName: vi.fn(() => undefined),
+      getSessionFile: vi.fn(() => "/tmp/project/session.jsonl"),
       getBranch: vi.fn(() => [
         entry("1", { role: "user", content: "hello" }),
         entry("2", { role: "assistant", content: [{ type: "text", text: "hi" }] }),
@@ -291,6 +292,52 @@ describe("remote extension", () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
 
       expect(eventTexts(frames)).toEqual(["hello", "hi"]);
+    } finally {
+      await daemon.close();
+    }
+  });
+
+  it("generates and redacts a bounded capsule projection on the execution host", async () => {
+    const daemon = await startIpcDaemonServer(join(root, "daemon.sock"), {
+      getPairingInfo: () => ({ ticket: "ticket-stub", code: "123-456" }),
+    });
+    const { pi, command } = createPi();
+    const ctx = createContext();
+    ctx.sessionManager.getBranch.mockReturnValue([
+      entry("1", { role: "user", content: "Finish capsule retrieval with token=supersecret" }),
+      entry("2", {
+        role: "assistant",
+        content: [{ type: "text", text: "Next action: run the tests" }],
+      }),
+    ]);
+
+    try {
+      remoteExtension(pi as never);
+      await command("remote").handler("", ctx);
+      await daemon.waitForSession("session-1");
+      const response = daemon.requestFromSession({
+        sessionId: "session-1",
+        type: "capsule",
+        payload: { requestId: "request-1" },
+      });
+
+      await expect(response).resolves.toMatchObject({
+        sessionId: "session-1",
+        type: "capsule",
+        payload: {
+          requestId: "request-1",
+          supported: true,
+          capsule: {
+            objective: "Finish capsule retrieval with token=[REDACTED]",
+            maxPayloadBytes: 32 * 1024,
+            redactions: [{ category: "secret", count: 1 }],
+          },
+        },
+      });
+      const payload = (await response).payload;
+      expect(payload).not.toHaveProperty("capsule.source");
+      expect(JSON.stringify(payload)).not.toContain("supersecret");
+      expect(Buffer.byteLength(JSON.stringify(payload), "utf8")).toBeLessThanOrEqual(32 * 1024);
     } finally {
       await daemon.close();
     }

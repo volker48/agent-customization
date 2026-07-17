@@ -9,7 +9,8 @@ export type IpcMessageType =
   | "session_shutdown"
   | "daemon_stop"
   | "sync"
-  | "pairing_info";
+  | "pairing_info"
+  | "capsule";
 
 export type PairingInfo = { ticket: string; code: string };
 
@@ -23,17 +24,25 @@ export type SessionRegistration = {
   sessionId: string;
   name: string;
   cwd: string;
+  capabilities?: string[];
 };
 
 export type SessionRegistryEntry = {
   name: string;
   cwd: string;
+  capabilities: string[];
   socket: Socket;
+};
+
+export type IpcRequestOptions = {
+  signal?: AbortSignal;
+  timeoutMs?: number;
 };
 
 export type IpcDaemonServer = {
   registry: Map<string, SessionRegistryEntry>;
   sendToSession(envelope: IpcEnvelope): Promise<void>;
+  requestFromSession(envelope: IpcEnvelope, options?: IpcRequestOptions): Promise<IpcEnvelope>;
   subscribe(listener: (envelope: IpcEnvelope) => void): () => void;
   waitForSession(sessionId: string): Promise<SessionRegistryEntry>;
   waitForSessionEnd(sessionId: string): Promise<void>;
@@ -65,6 +74,7 @@ type DaemonState = {
   endWaiters: Map<string, Waiter<void>[]>;
   sockets: Set<Socket>;
   listeners: Set<(envelope: IpcEnvelope) => void>;
+  requestWaiters: Map<string, { socket: Socket; waiter: Waiter<IpcEnvelope>; cleanup(): void }>;
 };
 
 export async function startIpcDaemonServer(
@@ -77,6 +87,7 @@ export async function startIpcDaemonServer(
     endWaiters: new Map(),
     sockets: new Set(),
     listeners: new Set(),
+    requestWaiters: new Map(),
   };
   const server = createServer((socket) => acceptDaemonSocket(socket, state, options));
 
@@ -143,7 +154,11 @@ function acceptDaemonSocket(socket: Socket, state: DaemonState, options: IpcDaem
     }
   });
   socket.on("error", () => socket.destroy());
-  socket.on("close", () => state.sockets.delete(socket));
+  socket.on("close", () => {
+    state.sockets.delete(socket);
+    rejectSocketRequests(state, socket, new Error("IPC session socket closed"));
+    removeSocketSessions(state, socket, options);
+  });
 }
 
 function createDaemonFacade(server: Server, state: DaemonState): IpcDaemonServer {
@@ -155,6 +170,43 @@ function createDaemonFacade(server: Server, state: DaemonState): IpcDaemonServer
         return Promise.reject(new Error(`IPC session is not registered: ${envelope.sessionId}`));
       }
       return writeEnvelope(entry.socket, envelope);
+    },
+    requestFromSession(envelope, options = {}) {
+      const sessionId = requireSessionId(envelope);
+      const requestId = requestIdFrom(envelope.payload);
+      if (!requestId) return Promise.reject(new Error("IPC request is missing requestId"));
+      const entry = state.registry.get(sessionId);
+      if (!entry) {
+        return Promise.reject(new Error(`IPC session is not registered: ${envelope.sessionId}`));
+      }
+      const key = requestKey(sessionId, requestId);
+      if (state.requestWaiters.has(key)) {
+        return Promise.reject(new Error(`IPC request is already pending: ${key}`));
+      }
+      if (options.signal?.aborted) return Promise.reject(abortError());
+      return new Promise((resolve, reject) => {
+        let timeout: NodeJS.Timeout | undefined;
+        const onAbort = () => rejectPendingRequest(state, key, abortError());
+        const cleanup = () => {
+          if (timeout) clearTimeout(timeout);
+          options.signal?.removeEventListener("abort", onAbort);
+        };
+        state.requestWaiters.set(key, {
+          socket: entry.socket,
+          waiter: { resolve, reject },
+          cleanup,
+        });
+        options.signal?.addEventListener("abort", onAbort, { once: true });
+        if (options.timeoutMs !== undefined) {
+          timeout = setTimeout(
+            () => rejectPendingRequest(state, key, new Error("IPC session request timed out")),
+            options.timeoutMs,
+          );
+        }
+        void writeEnvelope(entry.socket, envelope).catch((error) => {
+          rejectPendingRequest(state, key, error);
+        });
+      });
     },
     subscribe(listener) {
       state.listeners.add(listener);
@@ -173,6 +225,7 @@ function createDaemonFacade(server: Server, state: DaemonState): IpcDaemonServer
       const error = new Error("IPC daemon closed before session registered");
       rejectWaiterMap(state.sessionWaiters, error);
       rejectWaiterMap(state.endWaiters, error);
+      rejectRequestWaiters(state, error);
       for (const socket of state.sockets) {
         socket.destroy();
       }
@@ -188,7 +241,8 @@ async function handleReceivedEnvelope(
   options: IpcDaemonOptions,
 ): Promise<void> {
   options.onFrame?.(envelope);
-  const emitted = await handleDaemonFrame(envelope, socket, state.registry, options);
+  if (resolveRequestWaiter(state, envelope)) return;
+  const emitted = await handleDaemonFrame(envelope, socket, state, options);
   state.listeners.forEach((listener) => listener(envelope));
   emitted.forEach((frame) => state.listeners.forEach((listener) => listener(frame)));
   resolveSessionWaiters(envelope, state.registry, state.sessionWaiters);
@@ -198,14 +252,16 @@ async function handleReceivedEnvelope(
 async function handleDaemonFrame(
   envelope: IpcEnvelope,
   socket: Socket,
-  registry: Map<string, SessionRegistryEntry>,
+  state: DaemonState,
   options: IpcDaemonOptions,
 ): Promise<IpcEnvelope[]> {
   const emitted: IpcEnvelope[] = [];
+  const registry = state.registry;
   if (isRegisterEnvelope(envelope)) {
     registry.set(envelope.payload.sessionId, {
       name: envelope.payload.name,
       cwd: envelope.payload.cwd,
+      capabilities: envelope.payload.capabilities ?? [],
       socket,
     });
   }
@@ -223,6 +279,7 @@ async function handleDaemonFrame(
   }
 
   if (envelope.type === "session_shutdown" && envelope.sessionId !== null) {
+    rejectSessionRequests(state, envelope.sessionId, new Error("IPC session shut down"));
     registry.delete(envelope.sessionId);
     const frame: IpcEnvelope = {
       sessionId: null,
@@ -255,6 +312,91 @@ async function handleDaemonFrame(
   }
 
   return emitted;
+}
+
+function requestIdFrom(payload: unknown): string | null {
+  return typeof payload === "object" &&
+    payload !== null &&
+    "requestId" in payload &&
+    typeof payload.requestId === "string"
+    ? payload.requestId
+    : null;
+}
+
+function requestKey(sessionId: string, requestId: string): string {
+  return `${sessionId}:${requestId}`;
+}
+
+function resolveRequestWaiter(state: DaemonState, envelope: IpcEnvelope): boolean {
+  if (envelope.type !== "capsule" || envelope.sessionId === null) return false;
+  const requestId = requestIdFrom(envelope.payload);
+  if (!requestId) return false;
+  const key = requestKey(envelope.sessionId, requestId);
+  const pending = state.requestWaiters.get(key);
+  if (!pending) return false;
+  state.requestWaiters.delete(key);
+  pending.cleanup();
+  pending.waiter.resolve(envelope);
+  return true;
+}
+
+function rejectSocketRequests(state: DaemonState, socket: Socket, error: Error): void {
+  for (const [key, pending] of state.requestWaiters) {
+    if (pending.socket === socket) {
+      state.requestWaiters.delete(key);
+      pending.cleanup();
+      pending.waiter.reject(error);
+    }
+  }
+}
+
+function rejectSessionRequests(state: DaemonState, sessionId: string, error: Error): void {
+  for (const [key, pending] of state.requestWaiters) {
+    if (key.startsWith(`${sessionId}:`)) {
+      state.requestWaiters.delete(key);
+      pending.cleanup();
+      pending.waiter.reject(error);
+    }
+  }
+}
+
+function rejectRequestWaiters(state: DaemonState, error: Error): void {
+  for (const pending of state.requestWaiters.values()) {
+    pending.cleanup();
+    pending.waiter.reject(error);
+  }
+  state.requestWaiters.clear();
+}
+
+function rejectPendingRequest(state: DaemonState, key: string, error: Error): void {
+  const pending = state.requestWaiters.get(key);
+  if (!pending) return;
+  state.requestWaiters.delete(key);
+  pending.cleanup();
+  pending.waiter.reject(error);
+}
+
+function abortError(): Error {
+  const error = new Error("IPC session request cancelled");
+  error.name = "AbortError";
+  return error;
+}
+
+function removeSocketSessions(state: DaemonState, socket: Socket, options: IpcDaemonOptions): void {
+  for (const [sessionId, entry] of state.registry) {
+    if (entry.socket !== socket) continue;
+    state.registry.delete(sessionId);
+    const frame: IpcEnvelope = {
+      sessionId: null,
+      type: "session_ended",
+      payload: { sessionId },
+    };
+    options.onControlFrame?.(frame);
+    state.listeners.forEach((listener) => listener(frame));
+    const waiters = state.endWaiters.get(sessionId) ?? [];
+    waiters.forEach((waiter) => waiter.resolve());
+    state.endWaiters.delete(sessionId);
+  }
 }
 
 function parseBufferedFrames(input: string): { envelopes: IpcEnvelope[]; remaining: string } {
@@ -319,7 +461,10 @@ function isRegisterEnvelope(
     "cwd" in payload &&
     typeof payload.sessionId === "string" &&
     typeof payload.name === "string" &&
-    typeof payload.cwd === "string"
+    typeof payload.cwd === "string" &&
+    (!("capabilities" in payload) ||
+      (Array.isArray(payload.capabilities) &&
+        payload.capabilities.every((capability) => typeof capability === "string")))
   );
 }
 
