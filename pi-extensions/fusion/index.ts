@@ -245,8 +245,14 @@ export default function fusionExtension(pi: ExtensionAPI) {
             updateProgress(formatProgress(progressState));
           },
         });
+        if (controller.signal.aborted) {
+          throw new FusionInputError("cancelled", "Fusion cancelled.");
+        }
         debugLogger?.log("result", resultLogDetails(result));
         await debugLogger?.flush();
+        if (controller.signal.aborted) {
+          throw new FusionInputError("cancelled", "Fusion cancelled.");
+        }
 
         if (result.status === "error" && !hasSuccessfulPanelResponse(result)) {
           ctx.ui.notify(result.error ?? "Fusion failed", "error");
@@ -264,6 +270,9 @@ export default function fusionExtension(pi: ExtensionAPI) {
           recovery: result.status === "error",
         });
         await debugLogger?.flush();
+        if (controller.signal.aborted) {
+          throw new FusionInputError("cancelled", "Fusion cancelled.");
+        }
         pi.sendMessage(toFusionPanelMessage(result), { triggerTurn: true });
       } catch (error) {
         if (
