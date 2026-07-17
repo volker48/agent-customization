@@ -1,5 +1,5 @@
-import { randomBytes, timingSafeEqual } from "node:crypto";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -33,6 +33,7 @@ const PAIRING_CODE_SAMPLE_SPACE = 0x1_00_00_00;
 const PAIRING_CODE_UNBIASED_LIMIT =
   Math.floor(PAIRING_CODE_SAMPLE_SPACE / PAIRING_CODE_MODULUS) * PAIRING_CODE_MODULUS;
 export const DEFAULT_PAIRING_WINDOW_MS = 5 * 60 * 1000;
+const MAX_PAIRING_ATTEMPTS = 5;
 
 const ALLOWLIST_FILE = "allowed-node-ids.json";
 const require = createRequire(import.meta.url);
@@ -60,6 +61,7 @@ export function verifyPairingCode(expected: string, received: string): boolean {
 export class PairingWindow {
   #code: string | undefined;
   #expiresAt = 0;
+  #failures = 0;
 
   constructor(
     readonly createCode: () => string = createPairingCode,
@@ -70,12 +72,19 @@ export class PairingWindow {
   arm(): string {
     this.#code = this.createCode();
     this.#expiresAt = this.now() + this.ttlMs;
+    this.#failures = 0;
     return this.#code;
   }
 
   verify(receivedCode: string): boolean {
     const code = this.currentCode();
     if (!code || !verifyPairingCode(code, receivedCode)) {
+      if (code) {
+        this.#failures += 1;
+        if (this.#failures >= MAX_PAIRING_ATTEMPTS) {
+          this.close();
+        }
+      }
       return false;
     }
     this.close();
@@ -93,11 +102,13 @@ export class PairingWindow {
   close(): void {
     this.#code = undefined;
     this.#expiresAt = 0;
+    this.#failures = 0;
   }
 }
 
 export class FileNodeAllowlist implements NodeAllowlist {
   readonly #filePath: string;
+  #writeChain: Promise<void> = Promise.resolve();
 
   constructor(remoteRoot = defaultRemoteRoot()) {
     this.#filePath = join(remoteRoot, ALLOWLIST_FILE);
@@ -107,13 +118,20 @@ export class FileNodeAllowlist implements NodeAllowlist {
     return (await this.#read()).includes(nodeId);
   }
 
-  async add(nodeId: string): Promise<void> {
+  add(nodeId: string): Promise<void> {
+    const next = this.#writeChain.then(() => this.#addLocked(nodeId));
+    this.#writeChain = next.catch(() => undefined);
+    return next;
+  }
+
+  async #addLocked(nodeId: string): Promise<void> {
     const nodeIds = new Set(await this.#read());
     nodeIds.add(nodeId);
     await mkdir(dirname(this.#filePath), { recursive: true });
-    await writeFile(this.#filePath, `${JSON.stringify([...nodeIds].sort(), null, 2)}\n`, {
-      mode: 0o600,
-    });
+    const tmpPath = `${this.#filePath}.${randomUUID()}.tmp`;
+    const contents = `${JSON.stringify([...nodeIds].sort(), null, 2)}\n`;
+    await writeFile(tmpPath, contents, { mode: 0o600 });
+    await rename(tmpPath, this.#filePath);
     await chmod(this.#filePath, 0o600);
   }
 
