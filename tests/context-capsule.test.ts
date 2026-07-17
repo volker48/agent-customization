@@ -2,18 +2,31 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { compact } from "@earendil-works/pi-coding-agent";
 import {
   CAPSULE_MAX_BYTES,
   CAPSULE_MAX_ENTRIES,
+  CAPSULE_PIN_MAX_BYTES,
+  CAPSULE_PIN_MAX_COUNT,
+  CONTEXT_CAPSULE_PINS_ENTRY,
+  capsulePinsPrompt,
   capsulePrompt,
   compareCapsules,
+  composePinnedCompactionSummary,
+  stripPinnedCompactionSummary,
   extractSessionEvidence,
   generateCapsule,
   loadCapsule,
   parseCapsule,
+  pinCapsuleFacts,
+  readCapsulePinState,
+  removeCapsulePins,
   previewCapsule,
   proposeCapsuleRefresh,
   renderCapsuleDrift,
+  selectCapsuleFacts,
+  serializeCapsulePinState,
+  validateCapsulePinState,
   resolveCapsuleReference,
   saveCapsule,
   serializeCapsule,
@@ -21,10 +34,15 @@ import {
   type Capsule,
   type SessionEntryLike,
 } from "../pi-extensions/lib/context-capsule.js";
-import {
+import contextCapsuleExtension, {
   handleCapsuleCommand,
   type CapsuleCommandContext,
 } from "../pi-extensions/context-capsule.js";
+
+vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@earendil-works/pi-coding-agent")>();
+  return { ...original, compact: vi.fn() };
+});
 
 const temporaryDirectories: string[] = [];
 afterEach(async () => {
@@ -139,7 +157,9 @@ async function createCapsule(overrides: Partial<Parameters<typeof generateCapsul
   return result.value;
 }
 
-function commandContext(options: { confirm?: boolean; hasUI?: boolean } = {}) {
+function commandContext(
+  options: { confirm?: boolean; hasUI?: boolean; branch?: SessionEntryLike[] } = {},
+) {
   const notifications: Array<{ message: string; level?: string }> = [];
   const appended: Array<{
     customType: string;
@@ -148,15 +168,20 @@ function commandContext(options: { confirm?: boolean; hasUI?: boolean } = {}) {
     details?: unknown;
   }> = [];
   const sent: string[] = [];
+  const branch = options.branch ?? [...entries];
   let newSessionOptions: Parameters<CapsuleCommandContext["newSession"]>[0] | undefined;
   const context: CapsuleCommandContext = {
     cwd: "/work/project",
     hasUI: options.hasUI ?? true,
     waitForIdle: vi.fn(async () => undefined),
     sessionManager: {
-      getBranch: () => entries,
+      getBranch: () => branch,
       getSessionId: () => "session-1",
       getSessionFile: () => "/sessions/session-1.jsonl",
+      appendCustomEntry: (customType, data) => {
+        branch.push({ type: "custom", customType, data });
+        return "pin-entry";
+      },
     },
     ui: {
       notify: (message, level) => notifications.push({ message, level }),
@@ -185,6 +210,7 @@ function commandContext(options: { confirm?: boolean; hasUI?: boolean } = {}) {
     appended,
     sent,
     getNewSessionOptions: () => newSessionOptions,
+    branch,
   };
 }
 
@@ -229,6 +255,147 @@ describe("Context Capsule application service", () => {
     expect(serialized).not.toContain("PRIVATE BODY");
     expect(serialized).not.toContain("must never be copied");
     expect(serialized).not.toContain("350 tests passed");
+  });
+
+  it("redacts adversarial credentials from every capsule field", async () => {
+    const pem = [
+      "-----BEGIN PRIVATE KEY-----",
+      "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC",
+      "-----END PRIVATE KEY-----",
+    ].join("\\n");
+    const secret = "api_key=super-secret";
+    const snapshot = extractSessionEvidence(
+      [{ type: "message", message: { role: "user", content: `${pem} ${secret}` } }],
+      "/work/project",
+    );
+    const result = await generateCapsule(
+      {
+        ...snapshot,
+        constraints: [`Authorization: Bearer bearer-secret`, `JWT eyJheader.payload.signature`],
+        decisions: [{ statement: "https://user:password@example.test/path", status: "unknown" }],
+        resources: [{ kind: "github", value: "AWS_SECRET_ACCESS_KEY=cloud-secret" }],
+        observedChanges: [{ path: "src/safe.ts", status: "observed", provenance: "none" }],
+        validation: [
+          { command: "pnpm test --token cli-secret", outcome: "unknown", evidence: "interrupted" },
+        ],
+      },
+      { sessionId: "session-1", cwd: "/work/project" },
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const json = serializeCapsule(result.value);
+    expect(json).not.toContain("MIIEvQ");
+    expect(json).not.toContain("super-secret");
+    expect(json).not.toContain("bearer-secret");
+    expect(json).not.toContain("password@example");
+    expect(json).not.toContain("cloud-secret");
+    expect(json).not.toContain("cli-secret");
+    expect(() => previewCapsule(result.value)).not.toThrow();
+    expect(parseCapsule(json)).toMatchObject({ ok: true });
+  });
+
+  it("extracts bounded direct conversation evidence as unknown context", () => {
+    const snapshot = extractSessionEvidence(
+      [
+        {
+          type: "message",
+          message: { role: "user", content: "Constraint: do not change the API" },
+        },
+        {
+          type: "message",
+          message: { role: "assistant", content: "Decision: use the existing cache" },
+        },
+        {
+          type: "message",
+          message: {
+            role: "user",
+            content: "Risk: stale data; Blocker: waiting for CI; Next action: add tests",
+          },
+        },
+      ],
+      "/work/project",
+    );
+    expect(snapshot.constraints).toContain("do not change the API");
+    expect(snapshot.decisions).toContainEqual({
+      statement: "use the existing cache",
+      status: "unknown",
+    });
+    expect(snapshot.risks).toContain("stale data");
+    expect(snapshot.blockers).toContain("waiting for CI");
+    expect(snapshot.nextAction).toBe("add tests");
+    expect(snapshot.exclusions).toContainEqual(expect.objectContaining({ category: "untrusted" }));
+  });
+
+  it("records repository-state paths without attributing authorship", () => {
+    const snapshot = extractSessionEvidence(
+      [
+        {
+          type: "message",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "status",
+                name: "bash",
+                arguments: { command: "git status --short" },
+              },
+            ],
+          },
+        },
+        {
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolCallId: "status",
+            content: " M src/existing.ts\n?? src/new.ts",
+            isError: false,
+          },
+        },
+      ],
+      "/work/project",
+    );
+    expect(snapshot.observedChanges).toEqual([
+      { path: "src/existing.ts", status: "observed", provenance: "none" },
+      { path: "src/new.ts", status: "observed", provenance: "none" },
+    ]);
+  });
+
+  it("never reports ambiguous or interrupted validation as passed", () => {
+    const snapshot = extractSessionEvidence(
+      [
+        {
+          type: "message",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "ambiguous",
+                name: "bash",
+                arguments: { command: "pnpm test" },
+              },
+              { type: "toolCall", id: "killed", name: "bash", arguments: { command: "pnpm lint" } },
+            ],
+          },
+        },
+        {
+          type: "message",
+          message: { role: "toolResult", toolCallId: "ambiguous", content: "command completed" },
+        },
+        {
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolCallId: "killed",
+            content: "process killed",
+            isError: true,
+          },
+        },
+      ],
+      "/work/project",
+    );
+    expect(snapshot.validation.map((item) => item.outcome)).toEqual(["unknown", "blocked"]);
   });
 
   it("requires successful tool results before reporting a tool-recorded change", () => {
@@ -323,6 +490,218 @@ describe("Context Capsule application service", () => {
         expect.objectContaining({ category: "oversized" }),
       );
     }
+  });
+
+  it("selects only explicit facts and persists bounded state across branch reloads", async () => {
+    const capsule = await createCapsule({ capsuleId: "pin-capsule" });
+    const facts = selectCapsuleFacts(capsule);
+    expect(facts.map((fact) => fact.category)).toEqual([
+      "objective",
+      "constraint",
+      "decision",
+      "blocker",
+      "next-action",
+    ]);
+    const pinned = pinCapsuleFacts({ version: 1, pins: [] }, [facts[0], facts[2]]);
+    expect(pinned).toEqual({
+      ok: true,
+      value: {
+        version: 1,
+        pins: [facts[0], facts[2]],
+      },
+    });
+    if (!pinned.ok) return;
+    const branch: SessionEntryLike[] = [
+      { type: "custom", customType: CONTEXT_CAPSULE_PINS_ENTRY, data: pinned.value },
+    ];
+    expect(readCapsulePinState(branch)).toEqual(pinned.value);
+    expect(
+      readCapsulePinState([...branch, { type: "custom", customType: "other", data: {} }]),
+    ).toEqual(pinned.value);
+    expect(
+      readCapsulePinState([
+        ...branch,
+        { type: "custom", customType: CONTEXT_CAPSULE_PINS_ENTRY, data: { version: 99 } },
+      ]),
+    ).toEqual({ version: 1, pins: [] });
+    const removed = removeCapsulePins(pinned.value, [1]);
+    expect(removed.pins).toEqual([facts[2]]);
+    expect(validateCapsulePinState(JSON.parse(serializeCapsulePinState(removed)))).toEqual({
+      ok: true,
+      value: removed,
+    });
+  });
+
+  it("rejects pin count and serialized-size limits with actionable errors", async () => {
+    const facts = Array.from({ length: CAPSULE_PIN_MAX_COUNT + 1 }, (_, index) => ({
+      category: "constraint" as const,
+      statement: `constraint-${index}`,
+    }));
+    expect(pinCapsuleFacts({ version: 1, pins: [] }, facts)).toMatchObject({
+      ok: false,
+      error: { code: "oversized" },
+    });
+    const largeFacts = Array.from({ length: CAPSULE_PIN_MAX_COUNT }, (_, index) => ({
+      category: "constraint" as const,
+      statement: `${index}-${"x".repeat(900)}`,
+    }));
+    const largeResult = pinCapsuleFacts({ version: 1, pins: [] }, largeFacts);
+    expect(largeResult).toMatchObject({ ok: false, error: { code: "oversized" } });
+    expect(CAPSULE_PIN_MAX_BYTES).toBeGreaterThan(0);
+  });
+
+  it("requires confirmation for pin selection, supports removal, and reload inspection", async () => {
+    const capsule = await createCapsule({ capsuleId: "command-pins" });
+    const first = commandContext({ confirm: true });
+    const state = { lastPreview: capsule };
+    await handleCapsuleCommand("pins select", first.context, state, {
+      load: vi.fn(),
+      save: vi.fn(),
+    });
+    await handleCapsuleCommand("pins confirm 1,2", first.context, state, {
+      load: vi.fn(),
+      save: vi.fn(),
+    });
+    expect(first.branch).toContainEqual(
+      expect.objectContaining({
+        type: "custom",
+        customType: CONTEXT_CAPSULE_PINS_ENTRY,
+      }),
+    );
+    const reloaded = commandContext({ confirm: true, branch: first.branch });
+    await handleCapsuleCommand(
+      "pins inspect",
+      reloaded.context,
+      {},
+      { load: vi.fn(), save: vi.fn() },
+    );
+    expect(reloaded.notifications.at(-1)?.message).toContain("[objective]");
+    await handleCapsuleCommand(
+      "pins remove 1",
+      reloaded.context,
+      {},
+      { load: vi.fn(), save: vi.fn() },
+    );
+    expect(readCapsulePinState(reloaded.branch).pins).toHaveLength(1);
+    const cancelled = commandContext({ confirm: false, branch: reloaded.branch });
+    await handleCapsuleCommand(
+      "pins remove all",
+      cancelled.context,
+      {},
+      { load: vi.fn(), save: vi.fn() },
+    );
+    expect(readCapsulePinState(cancelled.branch).pins).toHaveLength(1);
+  });
+
+  it("uses the latest pin state for every compaction and revokes removed projections", async () => {
+    const capsule = await createCapsule({ capsuleId: "compaction-pins" });
+    const facts = selectCapsuleFacts(capsule);
+    const first = pinCapsuleFacts({ version: 1, pins: [] }, [facts[0]]);
+    if (!first.ok) throw new Error("pin setup failed");
+    const second = pinCapsuleFacts({ version: 1, pins: [] }, [facts[4]]);
+    if (!second.ok) throw new Error("pin setup failed");
+    const branch: SessionEntryLike[] = [
+      { type: "custom", customType: CONTEXT_CAPSULE_PINS_ENTRY, data: first.value },
+    ];
+    const handlers: Array<(event: unknown, context: unknown) => Promise<unknown>> = [];
+    const pi = {
+      registerCommand: vi.fn(),
+      on: vi.fn(
+        (event: string, handler: (event: unknown, context: unknown) => Promise<unknown>) => {
+          if (event === "session_before_compact") handlers.push(handler);
+        },
+      ),
+    };
+    contextCapsuleExtension(pi as never);
+    vi.mocked(compact).mockImplementation(async (preparation) => ({
+      summary: "normal summary",
+      firstKeptEntryId: preparation.firstKeptEntryId,
+      tokensBefore: preparation.tokensBefore,
+      details: preparation.fileOps,
+    }));
+    const context = {
+      model: { id: "test-model" },
+      modelRegistry: { getApiKeyAndHeaders: vi.fn(async () => ({ ok: true as const })) },
+      sessionManager: { getBranch: () => branch },
+    };
+    const preparation = {
+      firstKeptEntryId: "kept",
+      messagesToSummarize: [
+        { role: "user", content: capsulePinsPrompt(first.value) },
+        { role: "user", content: "ordinary history" },
+      ],
+      turnPrefixMessages: [],
+      isSplitTurn: false,
+      tokensBefore: 123,
+      previousSummary: `old summary\n${composePinnedCompactionSummary("", first.value)}`,
+      fileOps: { readFiles: [], modifiedFiles: [] },
+      settings: {},
+    };
+    const compactEvent = {
+      preparation,
+      customInstructions: undefined,
+      signal: new AbortController().signal,
+    };
+    const firstResult = await handlers[0](compactEvent, context);
+    expect(firstResult).toMatchObject({
+      compaction: {
+        firstKeptEntryId: "kept",
+        tokensBefore: 123,
+        summary: expect.stringContaining(facts[0].statement),
+      },
+    });
+    expect(vi.mocked(compact).mock.calls[0][0].messagesToSummarize).toHaveLength(1);
+
+    branch.push({
+      type: "custom",
+      customType: CONTEXT_CAPSULE_PINS_ENTRY,
+      data: { version: 1, pins: [] },
+    });
+    const removedResult = await handlers[0](
+      {
+        ...compactEvent,
+        preparation: { ...preparation, previousSummary: (firstResult as any).compaction.summary },
+      },
+      context,
+    );
+    expect((removedResult as any).compaction.summary).not.toContain(facts[0].statement);
+
+    branch.push({ type: "custom", customType: CONTEXT_CAPSULE_PINS_ENTRY, data: second.value });
+    const replacedResult = await handlers[0](
+      {
+        ...compactEvent,
+        reason: "overflow",
+        willRetry: true,
+        preparation: { ...preparation, previousSummary: (removedResult as any).compaction.summary },
+      },
+      context,
+    );
+    expect((replacedResult as any).compaction.summary).toContain(facts[4].statement);
+    expect((replacedResult as any).compaction.summary).not.toContain(facts[0].statement);
+    expect(stripPinnedCompactionSummary((replacedResult as any).compaction.summary)).toBe(
+      "normal summary",
+    );
+
+    const repeatedResult = await handlers[0](
+      {
+        ...compactEvent,
+        reason: "threshold",
+        preparation: {
+          ...preparation,
+          previousSummary: (replacedResult as any).compaction.summary,
+        },
+      },
+      context,
+    );
+    expect((repeatedResult as any).compaction.summary).toBe(
+      (replacedResult as any).compaction.summary,
+    );
+    expect(
+      readCapsulePinState([
+        ...branch,
+        { type: "compaction", summary: (repeatedResult as any).compaction.summary },
+      ]),
+    ).toEqual(second.value);
   });
 
   it("round trips through deterministic canonical JSON and renders every section", async () => {

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmod, link, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 
@@ -7,6 +7,11 @@ export const CONTEXT_CAPSULE_SCHEMA = 1 as const;
 export const CAPSULE_MAX_BYTES = 32 * 1024;
 export const CAPSULE_MAX_ENTRIES = 20;
 export const CAPSULE_STORE_DIRECTORY = "context-capsules";
+/** Maximum number of facts that can be confirmed for compaction persistence. */
+export const CAPSULE_PIN_MAX_COUNT = 20;
+/** Maximum UTF-8 size of the persisted pin state and compaction projection. */
+export const CAPSULE_PIN_MAX_BYTES = 8 * 1024;
+export const CONTEXT_CAPSULE_PINS_ENTRY = "context-capsule-pins";
 
 const MAX_TEXT = 2_000;
 const MAX_ENTRY = 1_000;
@@ -22,6 +27,21 @@ export type CapsuleId = string;
 export type CapsuleDecision = {
   statement: string;
   status: "confirmed" | "proposed" | "unknown";
+};
+export type CapsulePinCategory =
+  | "objective"
+  | "constraint"
+  | "decision"
+  | "blocker"
+  | "next-action";
+export type CapsuleFact = {
+  category: CapsulePinCategory;
+  statement: string;
+};
+export type CapsulePin = CapsuleFact;
+export type CapsulePinState = {
+  version: 1;
+  pins: CapsulePin[];
 };
 export type CapsuleResource = {
   kind: "path" | "url" | "github";
@@ -123,6 +143,10 @@ export type SessionEntryLike = {
   timestamp?: string;
   summary?: unknown;
   firstKeptEntryId?: string;
+  customType?: string;
+  data?: unknown;
+  content?: unknown;
+  display?: boolean;
   message?: {
     role?: string;
     content?: unknown;
@@ -180,35 +204,105 @@ function hasControl(value: string): boolean {
   });
 }
 
+// These patterns are deliberately conservative: a false positive is preferable to
+// carrying a credential into a portable artifact. PEMs and URLs are matched across
+// lines before whitespace normalization so no fragment can survive redaction.
 const SECRET_ASSIGNMENT =
-  /\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|passwd|secret)\s*[:=]\s*([^\s,;]+)/gi;
+  /(?:\b(?:api[_-]?key|access[_-]?(?:key|token)|refresh[_-]?token|id[_-]?token|token|password|passwd|secret|credential|client[_-]?secret|aws[_-]?(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key)|google[_-]?application[_-]?credentials|azure[_-]?(?:client[_-]?secret|tenant[_-]?id))\b|--(?:token|password|api-key|secret)\b)\s*(?:=|:)??\s+((?:"[^"]*"|'[^']*'|[^\s,;]+))|(?:\b(?:api[_-]?key|access[_-]?(?:key|token)|refresh[_-]?token|id[_-]?token|token|password|passwd|secret|credential|client[_-]?secret|aws[_-]?(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key))\b)\s*=\s*((?:"[^"]*"|'[^']*'|[^\s,;]+))/gi;
+const PEM_PRIVATE_KEY =
+  /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/gi;
+const PEM_REMAINDER = /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*$/i;
+const AUTHORIZATION_CREDENTIAL = /\b(?:authorization\s*:\s*|bearer\s+)(?:bearer\s+)?[^\s,;]+/gi;
+const CREDENTIAL_URL = /([a-z][a-z\d+.-]*:\/\/)([^\s/@:]+):([^\s/@]+)@/gi;
+const JWT = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
 const SECRET_MARKERS = [
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/i,
-  /\bgh[opusr]_[A-Za-z0-9_]{20,}\b/,
-  /\bsk-[A-Za-z0-9_-]{20,}\b/,
+  /\bgh[opusr]_[A-Za-z0-9_]{20,}\b/g,
+  /\bsk-[A-Za-z0-9_-]{20,}\b/g,
+  /\bAKIA[0-9A-Z]{16}\b/g,
 ];
 
 function containsSensitiveValue(value: string): boolean {
+  if (PEM_PRIVATE_KEY.test(value) || PEM_REMAINDER.test(value) || JWT.test(value)) {
+    PEM_PRIVATE_KEY.lastIndex =
+      AUTHORIZATION_CREDENTIAL.lastIndex =
+      CREDENTIAL_URL.lastIndex =
+      JWT.lastIndex =
+        0;
+    return true;
+  }
+  AUTHORIZATION_CREDENTIAL.lastIndex = 0;
+  if (
+    [...value.matchAll(AUTHORIZATION_CREDENTIAL)].some(
+      (match) => !/\[REDACTED(?: [^\]]+)?\]/i.test(match[0]),
+    )
+  ) {
+    AUTHORIZATION_CREDENTIAL.lastIndex = 0;
+    return true;
+  }
+  CREDENTIAL_URL.lastIndex = 0;
+  if (
+    [...value.matchAll(CREDENTIAL_URL)].some(
+      (match) => match[2] !== "[REDACTED]" || match[3] !== "[REDACTED]",
+    )
+  ) {
+    CREDENTIAL_URL.lastIndex = 0;
+    return true;
+  }
+  PEM_PRIVATE_KEY.lastIndex =
+    AUTHORIZATION_CREDENTIAL.lastIndex =
+    CREDENTIAL_URL.lastIndex =
+    JWT.lastIndex =
+      0;
   SECRET_ASSIGNMENT.lastIndex = 0;
   for (const match of value.matchAll(SECRET_ASSIGNMENT)) {
-    if (match[2] !== "[REDACTED]") return true;
+    const secretValue = match[1] ?? match[2];
+    if (secretValue !== "[REDACTED]" && secretValue !== "[REDACTED SECRET]") return true;
   }
-  return SECRET_MARKERS.some((pattern) => pattern.test(value));
+  return SECRET_MARKERS.some((pattern) => {
+    pattern.lastIndex = 0;
+    return pattern.test(value);
+  });
 }
 
 function redactSensitive(value: string): { value: string; count: number } {
   let count = 0;
-  SECRET_ASSIGNMENT.lastIndex = 0;
-  let redacted = value.replace(SECRET_ASSIGNMENT, (_match, name: string, secretValue: string) => {
-    if (secretValue === "[REDACTED]") return `${name}=[REDACTED]`;
+  let redacted = value.replace(PEM_PRIVATE_KEY, () => {
     count += 1;
-    return `${name}=[REDACTED]`;
+    return "[REDACTED PRIVATE KEY]";
+  });
+  redacted = redacted.replace(PEM_REMAINDER, () => {
+    count += 1;
+    return "[REDACTED PRIVATE KEY]";
+  });
+  redacted = redacted.replace(CREDENTIAL_URL, (_match, scheme: string) => {
+    count += 1;
+    return `${scheme}[REDACTED]@`;
+  });
+  redacted = redacted.replace(AUTHORIZATION_CREDENTIAL, (match) => {
+    if (/\[REDACTED\]/i.test(match)) return match;
+    count += 1;
+    const prefix = /^(authorization\s*:\s*)/i.exec(match)?.[1] ?? "Bearer ";
+    return `${prefix}[REDACTED]`;
+  });
+  redacted = redacted.replace(JWT, () => {
+    count += 1;
+    return "[REDACTED JWT]";
+  });
+  SECRET_ASSIGNMENT.lastIndex = 0;
+  redacted = redacted.replace(SECRET_ASSIGNMENT, (match, first: string, second: string) => {
+    const secretValue = first ?? second;
+    if (secretValue === "[REDACTED]" || secretValue === "[REDACTED SECRET]") return match;
+    count += 1;
+    // Preserve the option/name while replacing only its value.
+    const index = match.lastIndexOf(secretValue);
+    return `${match.slice(0, index)}[REDACTED]`;
   });
   for (const pattern of SECRET_MARKERS) {
-    if (pattern.test(redacted)) {
+    pattern.lastIndex = 0;
+    redacted = redacted.replace(pattern, () => {
       count += 1;
-      redacted = redacted.replace(pattern, "[REDACTED SECRET]");
-    }
+      return "[REDACTED SECRET]";
+    });
   }
   return { value: redacted, count };
 }
@@ -218,14 +312,16 @@ function sanitizeText(
   max: number,
 ): { value?: string; redactions: number; truncated: boolean } {
   if (typeof value !== "string") return { redactions: 0, truncated: false };
-  const withoutControls = [...value]
+  // Redact before removing newlines: complete multiline PEM blocks must be
+  // consumed as one value, not reduced to a fragment that evades detection.
+  const redacted = redactSensitive(value);
+  const withoutControls = [...redacted.value]
     .filter((character) => {
       const code = character.charCodeAt(0);
       return code > 31 && code !== 127;
     })
     .join("");
-  const redacted = redactSensitive(withoutControls);
-  const normalized = redacted.value.trim().replace(/\s+/g, " ");
+  const normalized = withoutControls.trim().replace(/\s+/g, " ");
   return {
     value: normalized ? normalized.slice(0, max) : undefined,
     redactions: redacted.count,
@@ -287,18 +383,8 @@ function capsulePath(value: unknown, cwd: string): string | undefined {
   return normalize(normalized);
 }
 
-function resourcePath(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const candidate = value.trim().replace(/^@/, "");
-  if (
-    !candidate ||
-    candidate.length > MAX_PATH ||
-    hasControl(candidate) ||
-    isIgnoredCapsulePath(candidate)
-  ) {
-    return undefined;
-  }
-  return normalize(candidate);
+function resourcePath(value: unknown, cwd: string): string | undefined {
+  return capsulePath(value, cwd);
 }
 
 function firstMarkdownHeading(content: unknown): string | undefined {
@@ -356,7 +442,7 @@ export function extractSafeResourceFacts(
   for (const call of toolCalls(entries)) {
     let fact: string | undefined;
     if (call.name === "read" || call.name === "edit" || call.name === "write") {
-      const path = resourcePath(call.arguments?.path);
+      const path = resourcePath(call.arguments?.path, _cwd);
       const heading =
         call.name === "read" && path && [".md", ".mdx"].includes(extname(path).toLowerCase())
           ? firstMarkdownHeading(results.get(call.id)?.message?.content)
@@ -421,6 +507,33 @@ function summaryTexts(entries: readonly SessionEntryLike[]): string[] {
   });
 }
 
+const RECENT_DIRECT_MESSAGES = 40;
+
+function recentDirectTexts(entries: readonly SessionEntryLike[]): string[] {
+  const latestCompaction = entries.findLastIndex((entry) => entry.type === "compaction");
+  const currentEntries = latestCompaction >= 0 ? entries.slice(latestCompaction) : entries;
+  return currentEntries
+    .filter(
+      (entry) =>
+        entry.type === "message" &&
+        (entry.message?.role === "user" || entry.message?.role === "assistant"),
+    )
+    .slice(-RECENT_DIRECT_MESSAGES)
+    .flatMap((entry) => {
+      const text = textParts(entry.message?.content).join("\n").trim();
+      return text ? [text.slice(0, MAX_HEADING_SCAN_LENGTH)] : [];
+    });
+}
+
+function directLabeledItems(texts: readonly string[], labels: readonly string[]): string[] {
+  const names = labels.join("|");
+  const pattern = new RegExp(
+    `(?:^|[;\\n])\\s*(?:[-*]\\s*)?(?:${names})\\s*[:—-]\\s*([^;\\n]+)`,
+    "gim",
+  );
+  return texts.flatMap((text) => [...text.matchAll(pattern)].map((match) => match[1]));
+}
+
 function firstUserObjective(
   entries: readonly SessionEntryLike[],
   exclusions: CapsuleExclusion[],
@@ -454,15 +567,37 @@ function safeSummaryItems(
 
 function validationOutcome(result: SessionEntryLike | undefined): CapsuleValidation["outcome"] {
   if (!result) return "unknown";
-  if (result.message?.isError) return "failed";
   const details = result.message?.details;
-  if (isRecord(details) && typeof details.exitCode === "number") {
-    return details.exitCode === 0 ? "passed" : "failed";
-  }
   const output = textParts(result.message?.content).join("\n");
-  if (/command (?:timed out|cancelled)|\bcancelled\b/i.test(output)) return "blocked";
-  if (/command exited with code [1-9]\d*/i.test(output)) return "failed";
-  return "passed";
+  if (isRecord(details)) {
+    if (details.killed === true || details.interrupted === true || details.signal !== undefined) {
+      return "blocked";
+    }
+    if (typeof details.exitCode === "number") return details.exitCode === 0 ? "passed" : "failed";
+  }
+  if (
+    /\b(?:killed|interrupted|terminated|timed out|timeout|cancelled|canceled|aborted)\b/i.test(
+      output,
+    )
+  ) {
+    return "blocked";
+  }
+  if (result.message?.isError) return "failed";
+  if (
+    /command exited with code [1-9]\d*/i.test(output) ||
+    /\b(?:failed|failure|error)\b/i.test(output)
+  ) {
+    return "failed";
+  }
+  // A successful result must carry explicit zero/success evidence. An empty
+  // or otherwise ambiguous tool result is never promoted to passed.
+  if (
+    /\b(?:exit(?:ed)?|status|code)\s*[:=]?\s*0\b/i.test(output) ||
+    /\b(?:passed|pass|success(?:ful)?|completed successfully|all tests? passed|ok)\b/i.test(output)
+  ) {
+    return "passed";
+  }
+  return "unknown";
 }
 
 function isValidationCommand(command: string): boolean {
@@ -471,32 +606,70 @@ function isValidationCommand(command: string): boolean {
   );
 }
 
+function repositoryStateCommand(command: string): boolean {
+  return /(?:^|[;&|]\s*)git\s+(?:status(?:\s+(?:--short|--porcelain|-s))?|diff\s+--name-only(?:\s+[^;&|]+)?)\s*$/i.test(
+    command.trim(),
+  );
+}
+
+function observedRepositoryPaths(output: string, cwd: string): string[] {
+  const paths: string[] = [];
+  for (const line of output.split("\n").slice(0, CAPSULE_MAX_ENTRIES * 2)) {
+    // `git status --short` prefixes paths with a two-column status. Rename
+    // records are intentionally omitted because parsing their two paths is
+    // ambiguous and omission is safer than an incorrect path.
+    const candidate = line.match(/^\s?(?:[ MADRCU?!]{2})\s+(.+)$/)?.[1] ?? line.trim();
+    if (!candidate || candidate.includes(" -> ")) continue;
+    const path = capsulePath(candidate.replace(/^"|"$/g, ""), cwd);
+    if (path && !paths.includes(path)) paths.push(path);
+  }
+  return paths;
+}
+
 export function extractSessionEvidence(
   entries: readonly SessionEntryLike[],
   cwd: string,
 ): EvidenceSnapshot {
   const exclusions: CapsuleExclusion[] = [];
   const summaries = summaryTexts(entries);
+  const direct = recentDirectTexts(entries);
+  // Direct conversation is bounded evidence, never authoritative confirmation.
+  addExclusion(exclusions, "untrusted", direct.length);
+  const directSections = (headings: string[]) =>
+    direct.flatMap((value) => section(value, headings));
   const constraints = safeSummaryItems(
-    summaries.flatMap((value) => section(value, ["Constraints & Preferences", "Constraints"])),
+    summaries
+      .flatMap((value) => section(value, ["Constraints & Preferences", "Constraints"]))
+      .concat(directSections(["Constraints & Preferences", "Constraints"]))
+      .concat(directLabeledItems(direct, ["constraint", "preference"])),
     exclusions,
   );
   const decisionStatements = safeSummaryItems(
-    summaries.flatMap((value) => section(value, ["Key Decisions", "Decisions"])),
+    summaries
+      .flatMap((value) => section(value, ["Key Decisions", "Decisions"]))
+      .concat(directSections(["Key Decisions", "Decisions"]))
+      .concat(directLabeledItems(direct, ["decision", "decided"])),
     exclusions,
   );
   const blockers = safeSummaryItems(
-    summaries.flatMap((value) => section(value, ["Blocked", "Blockers"])),
+    summaries
+      .flatMap((value) => section(value, ["Blocked", "Blockers"]))
+      .concat(directSections(["Blocked", "Blockers"]))
+      .concat(directLabeledItems(direct, ["blocker", "blocked"])),
     exclusions,
   );
   const risks = safeSummaryItems(
     summaries
       .flatMap((value) => section(value, ["Risks", "Critical Context"]))
-      .filter((value) => /\brisk|danger|concern|caution/i.test(value)),
+      .concat(directSections(["Risks", "Critical Context"]))
+      .concat(directLabeledItems(direct, ["risk", "concern"])),
     exclusions,
   );
   const nextSteps = safeSummaryItems(
-    summaries.flatMap((value) => section(value, ["Next Steps", "Next Action"])),
+    summaries
+      .flatMap((value) => section(value, ["Next Steps", "Next Action"]))
+      .concat(directSections(["Next Steps", "Next Action"]))
+      .concat(directLabeledItems(direct, ["next action", "next step"])),
     exclusions,
   );
 
@@ -541,6 +714,29 @@ export function extractSessionEvidence(
     if (!path || result?.message?.isError !== false) continue;
     if (!observedChanges.some((item) => item.path === path)) {
       observedChanges.push({ path, status: "observed", provenance: "tool-recorded" });
+    }
+  }
+  // A recorded `git status`/`git diff --name-only` is repository observation,
+  // not authorship provenance. No subprocess is started by capsule generation.
+  for (const call of toolCalls(entries)) {
+    if (call.name !== "bash" || typeof call.arguments?.command !== "string") continue;
+    if (!repositoryStateCommand(call.arguments.command)) continue;
+    const result = results.get(call.id);
+    if (
+      !result ||
+      result.message?.isError ||
+      (result.message?.details &&
+        isRecord(result.message.details) &&
+        result.message.details.exitCode !== 0)
+    )
+      continue;
+    for (const path of observedRepositoryPaths(
+      textParts(result.message?.content).join("\n"),
+      cwd,
+    )) {
+      if (!observedChanges.some((item) => item.path === path)) {
+        observedChanges.push({ path, status: "observed", provenance: "none" });
+      }
     }
   }
 
@@ -621,6 +817,93 @@ function fitCapsuleToByteLimit(capsule: Capsule): void {
   }
 }
 
+function sanitizeResources(
+  values: readonly CapsuleResource[],
+  exclusions: CapsuleExclusion[],
+  cwd: string,
+): CapsuleResource[] {
+  const output: CapsuleResource[] = [];
+  for (const value of values) {
+    if (!value || !["path", "url", "github"].includes(value.kind)) {
+      addExclusion(exclusions, "unsupported");
+      continue;
+    }
+    let resourceValue: string | undefined;
+    if (value.kind === "url") resourceValue = safeUrl(value.value);
+    else if (value.kind === "path") resourceValue = capsulePath(value.value, cwd);
+    else {
+      const sanitizedValue = sanitizeText(value.value, MAX_PATH);
+      addExclusion(exclusions, "secret", sanitizedValue.redactions);
+      addExclusion(exclusions, "oversized", Number(sanitizedValue.truncated));
+      resourceValue = sanitizedValue.value;
+    }
+    const detail = sanitizeText(value.detail, MAX_ENTRY);
+    addExclusion(exclusions, "secret", detail.redactions);
+    addExclusion(exclusions, "oversized", Number(detail.truncated));
+    if (!resourceValue) {
+      addExclusion(exclusions, value.kind === "url" ? "secret" : "unsupported");
+      continue;
+    }
+    output.push({
+      kind: value.kind,
+      value: resourceValue,
+      ...(detail.value ? { detail: detail.value } : {}),
+    });
+  }
+  return output.slice(0, CAPSULE_MAX_ENTRIES);
+}
+
+function sanitizeObservedChanges(
+  values: readonly CapsuleObservedChange[],
+  exclusions: CapsuleExclusion[],
+  cwd: string,
+): CapsuleObservedChange[] {
+  return values
+    .flatMap((value) => {
+      const path = capsulePath(value?.path, cwd);
+      if (
+        !path ||
+        !["observed", "unknown"].includes(value?.status) ||
+        !["none", "tool-recorded"].includes(value?.provenance)
+      ) {
+        addExclusion(exclusions, "unsupported");
+        return [];
+      }
+      return [{ path, status: value.status, provenance: value.provenance }];
+    })
+    .slice(0, CAPSULE_MAX_ENTRIES);
+}
+
+function sanitizeValidation(
+  values: readonly CapsuleValidation[],
+  exclusions: CapsuleExclusion[],
+): CapsuleValidation[] {
+  return values
+    .flatMap((value) => {
+      const command = sanitizeText(value?.command, MAX_COMMAND);
+      const evidence = sanitizeText(value?.evidence, MAX_ENTRY);
+      addExclusion(exclusions, "secret", command.redactions + evidence.redactions);
+      addExclusion(exclusions, "oversized", Number(command.truncated) + Number(evidence.truncated));
+      if (
+        !command.value ||
+        !evidence.value ||
+        !["passed", "failed", "blocked", "unknown"].includes(value?.outcome)
+      ) {
+        addExclusion(exclusions, "unsupported");
+        return [];
+      }
+      return [
+        {
+          command: command.value,
+          outcome: value.outcome,
+          evidence: evidence.value,
+          ...(value.observedAt ? { observedAt: value.observedAt } : {}),
+        },
+      ];
+    })
+    .slice(0, CAPSULE_MAX_ENTRIES);
+}
+
 function sanitizeDecisions(
   values: readonly CapsuleDecision[],
   exclusions: CapsuleExclusion[],
@@ -638,6 +921,160 @@ function sanitizeDecisions(
     addExclusion(exclusions, "oversized", output.length - CAPSULE_MAX_ENTRIES);
   }
   return output.slice(0, CAPSULE_MAX_ENTRIES);
+}
+
+function pinStateJson(state: CapsulePinState): string {
+  return JSON.stringify({ version: 1, pins: state.pins.map((pin) => ({ ...pin })) });
+}
+
+function pinStateSize(state: CapsulePinState): number {
+  return Buffer.byteLength(pinStateJson(state), "utf8");
+}
+
+function validPinCategory(value: unknown): value is CapsulePinCategory {
+  return ["objective", "constraint", "decision", "blocker", "next-action"].includes(
+    value as string,
+  );
+}
+
+function normalizePin(value: unknown): CapsulePin | undefined {
+  if (!isRecord(value) || !validPinCategory(value.category)) return undefined;
+  const statement = sanitizeText(value.statement, MAX_ENTRY).value;
+  return statement ? { category: value.category, statement } : undefined;
+}
+
+/** Return the explicitly selectable facts in stable, user-facing order. */
+export function selectCapsuleFacts(capsule: Capsule): CapsuleFact[] {
+  return [
+    { category: "objective", statement: capsule.objective },
+    ...capsule.constraints.map((statement) => ({ category: "constraint" as const, statement })),
+    ...capsule.decisions.map(({ statement }) => ({ category: "decision" as const, statement })),
+    ...capsule.blockers.map((statement) => ({ category: "blocker" as const, statement })),
+    { category: "next-action", statement: capsule.nextAction },
+  ];
+}
+
+/** Validate persisted state; malformed custom entries are ignored, never promoted to context. */
+export function validateCapsulePinState(input: unknown): CapsuleResult<CapsulePinState> {
+  if (!isRecord(input) || input.version !== 1 || !Array.isArray(input.pins)) {
+    return fail("malformed", "Context Capsule pin state is malformed.");
+  }
+  if (input.pins.length > CAPSULE_PIN_MAX_COUNT) {
+    return fail("oversized", `At most ${CAPSULE_PIN_MAX_COUNT} facts may be pinned.`);
+  }
+  const pins: CapsulePin[] = [];
+  for (const value of input.pins) {
+    const pin = normalizePin(value);
+    if (!pin) return fail("unsafe", "Pinned facts must contain safe bounded text.");
+    if (!pins.some((item) => item.category === pin.category && item.statement === pin.statement)) {
+      pins.push(pin);
+    }
+  }
+  const state = { version: 1 as const, pins };
+  if (pinStateSize(state) > CAPSULE_PIN_MAX_BYTES) {
+    return fail("oversized", `Pinned facts exceed ${CAPSULE_PIN_MAX_BYTES} UTF-8 bytes.`);
+  }
+  return ok(state);
+}
+
+export function serializeCapsulePinState(state: CapsulePinState): string {
+  const validated = validateCapsulePinState(state);
+  if (!validated.ok) throw new Error(capsuleError(validated).message);
+  return pinStateJson(validated.value);
+}
+
+/** Recover only the latest state from the active branch, so old pins cannot resurrect. */
+export function readCapsulePinState(entries: readonly SessionEntryLike[]): CapsulePinState {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry.type !== "custom" || entry.customType !== CONTEXT_CAPSULE_PINS_ENTRY) continue;
+    const result = validateCapsulePinState(entry.data);
+    return result.ok ? result.value : { version: 1, pins: [] };
+  }
+  return { version: 1, pins: [] };
+}
+
+export function pinCapsuleFacts(
+  current: CapsulePinState,
+  facts: readonly CapsuleFact[],
+): CapsuleResult<CapsulePinState> {
+  const pins = [...current.pins];
+  for (const fact of facts) {
+    const pin = normalizePin(fact);
+    if (!pin) return fail("unsafe", "Selected fact is unsafe or empty.");
+    if (pins.some((item) => item.category === pin.category && item.statement === pin.statement))
+      continue;
+    if (pins.length >= CAPSULE_PIN_MAX_COUNT) {
+      return fail(
+        "oversized",
+        `Pin limit reached (${CAPSULE_PIN_MAX_COUNT} facts). Remove a pin first.`,
+      );
+    }
+    const candidate = { version: 1 as const, pins: [...pins, pin] };
+    if (pinStateSize(candidate) > CAPSULE_PIN_MAX_BYTES) {
+      return fail(
+        "oversized",
+        `Pin size limit reached (${CAPSULE_PIN_MAX_BYTES} bytes). Remove a pin first.`,
+      );
+    }
+    pins.push(pin);
+  }
+  return ok({ version: 1, pins });
+}
+
+export function removeCapsulePins(
+  current: CapsulePinState,
+  indices: readonly number[] | "all",
+): CapsulePinState {
+  if (indices === "all") return { version: 1, pins: [] };
+  const remove = new Set(indices);
+  return { version: 1, pins: current.pins.filter((_pin, index) => !remove.has(index + 1)) };
+}
+
+export function renderCapsulePins(state: CapsulePinState): string {
+  if (!state.pins.length) return "No confirmed Context Capsule facts are pinned.";
+  return state.pins
+    .map((pin, index) => `${index + 1}. [${pin.category}] ${pin.statement}`)
+    .join("\n");
+}
+
+/** A stable hidden projection used in the saved Pi compaction summary. */
+export function capsulePinsPrompt(state: CapsulePinState): string {
+  return [
+    "CONFIRMED CONTEXT CAPSULE FACTS (user-selected; bounded; authoritative only as stated):",
+    renderCapsulePins(state),
+    "Do not add, infer, or promote other capsule facts.",
+  ].join("\n");
+}
+
+const PINNED_SUMMARY_MARKER = "## Confirmed Context Capsule facts";
+const PINNED_PROMPT_END = "Do not add, infer, or promote other capsule facts.";
+
+/** Remove projections from older compactions before Pi summarizes again. */
+export function stripPinnedCompactionSummary(summary: string): string {
+  let cleaned = summary;
+  const headingStart = cleaned.indexOf(PINNED_SUMMARY_MARKER);
+  if (headingStart >= 0) cleaned = cleaned.slice(0, headingStart).trimEnd();
+  const promptStart = cleaned.indexOf("CONFIRMED CONTEXT CAPSULE FACTS (");
+  if (promptStart >= 0) {
+    const promptEnd = cleaned.indexOf(PINNED_PROMPT_END, promptStart);
+    cleaned = (
+      promptEnd < 0
+        ? cleaned.slice(0, promptStart)
+        : cleaned.slice(0, promptStart) + cleaned.slice(promptEnd + PINNED_PROMPT_END.length)
+    ).trim();
+  }
+  return cleaned;
+}
+
+/** Compose the current authoritative projection onto Pi's normal summary. */
+export function composePinnedCompactionSummary(
+  normalSummary: string,
+  state: CapsulePinState,
+): string {
+  const cleaned = stripPinnedCompactionSummary(normalSummary);
+  if (!state.pins.length) return cleaned;
+  return `${cleaned}\n\n${PINNED_SUMMARY_MARKER}\n${renderCapsulePins(state)}`;
 }
 
 export async function generateCapsule(
@@ -669,19 +1106,23 @@ export async function generateCapsule(
     revision: options.revision ?? 1,
     createdAt: (options.now?.() ?? new Date()).toISOString(),
     source: {
-      sessionId: options.sessionId,
-      ...(options.sessionFile ? { sessionFile: options.sessionFile } : {}),
-      cwd: options.cwd ?? process.cwd(),
+      sessionId: sanitizeText(options.sessionId, MAX_ENTRY).value ?? "unknown-session",
+      ...(options.sessionFile
+        ? { sessionFile: sanitizeText(options.sessionFile, MAX_SESSION_PATH).value }
+        : {}),
+      cwd: sanitizeText(options.cwd ?? process.cwd(), MAX_SESSION_PATH).value ?? process.cwd(),
     },
     ...(options.predecessor ? { predecessor: { ...options.predecessor } } : {}),
     objective: objective.value ?? "No objective recorded.",
     constraints: sanitizeGeneratedList(snapshot.constraints, exclusions),
     decisions: sanitizeDecisions(snapshot.decisions, exclusions),
-    resources: snapshot.resources.slice(0, CAPSULE_MAX_ENTRIES).map((item) => ({ ...item })),
-    observedChanges: snapshot.observedChanges
-      .slice(0, CAPSULE_MAX_ENTRIES)
-      .map((item) => ({ ...item })),
-    validation: snapshot.validation.slice(0, CAPSULE_MAX_ENTRIES).map((item) => ({ ...item })),
+    resources: sanitizeResources(snapshot.resources, exclusions, options.cwd ?? process.cwd()),
+    observedChanges: sanitizeObservedChanges(
+      snapshot.observedChanges,
+      exclusions,
+      options.cwd ?? process.cwd(),
+    ),
+    validation: sanitizeValidation(snapshot.validation, exclusions),
     blockers: sanitizeGeneratedList(snapshot.blockers, exclusions),
     risks: sanitizeGeneratedList(snapshot.risks, exclusions),
     nextAction: nextAction.value ?? "Review the objective and choose the next concrete action.",
@@ -1517,7 +1958,9 @@ export async function saveCapsule(
     try {
       await writeFile(temporary, serialized, { encoding: "utf8", mode: 0o600, flag: "wx" });
       await link(temporary, target);
-      await unlink(temporary);
+      // link() is the immutable commit boundary. Best-effort cleanup after it
+      // succeeds must not report a successful save as a failure.
+      await unlink(temporary).catch(() => undefined);
     } catch (error) {
       await unlink(temporary).catch(() => undefined);
       throw error;
@@ -1540,7 +1983,19 @@ export async function loadCapsule(
   }
   const target = resolveCapsuleReference(reference, store.rootDir ?? defaultCapsuleRoot());
   try {
-    const raw = store.readFile ? await store.readFile(target) : await readFile(target, "utf8");
+    if (!store.readFile) {
+      const metadata = await stat(target);
+      if (!metadata.isFile()) return fail("io", "Capsule reference is not a regular file.");
+      const raw = await readFile(target);
+      if (raw.byteLength > CAPSULE_MAX_BYTES) {
+        return fail("oversized", `Capsule exceeds ${CAPSULE_MAX_BYTES} UTF-8 bytes.`);
+      }
+      return parseCapsule(raw.toString("utf8"));
+    }
+    const raw = await store.readFile(target);
+    if (Buffer.byteLength(raw, "utf8") > CAPSULE_MAX_BYTES) {
+      return fail("oversized", `Capsule exceeds ${CAPSULE_MAX_BYTES} UTF-8 bytes.`);
+    }
     return parseCapsule(raw);
   } catch (error) {
     const code = isRecord(error) && error.code === "ENOENT" ? "not-found" : "io";
