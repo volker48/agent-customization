@@ -173,6 +173,12 @@ _Avoid_: rename, session title (as a verb)
 **Theme**:
 A Pi TUI color scheme (`obsec-dark`, `obsec-light`) in `pi-themes/`.
 
+## Context Capsules
+
+**Context Capsule**:
+A bounded, redacted, versioned context snapshot derived from one Pi session. It carries the session's objective, constraints, key decisions, relevant resources, observed changed paths, validation evidence, blockers, risks, and next action so a related session or workflow can continue without receiving the full transcript. A Context Capsule is portable context, not a session transcript or a claim that Pi caused every observed repository change. After the full term is introduced, **capsule** is the preferred shorthand.
+_Avoid_: memory (implies mutable long-term recall), session export (implies a transcript copy), handoff brief (only one use of a capsule), bundle (a file-content container that a capsule may reference or include)
+
 ## Remote control
 
 **Remote control**:
