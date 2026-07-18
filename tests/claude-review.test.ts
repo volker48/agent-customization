@@ -508,9 +508,9 @@ describe("claude review command", () => {
       "--model",
       "opus",
       "--tools",
-      "Bash,Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill",
+      "Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill",
       "--allowed-tools",
-      "Bash,Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill",
+      "Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill",
     ]);
     expect(pi.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -662,6 +662,13 @@ describe("claude review command", () => {
       revision: 2,
       source: "saved",
     });
+    const backgroundArgs = pi.exec.mock.calls[0][1] as string[];
+    expect(backgroundArgs[backgroundArgs.indexOf("--tools") + 1]).toBe(
+      "Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill",
+    );
+    expect(backgroundArgs[backgroundArgs.indexOf("--allowed-tools") + 1]).toBe(
+      "Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill",
+    );
     expect(pi.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringContaining("capsule-review-test@2"),

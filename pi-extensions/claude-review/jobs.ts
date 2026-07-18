@@ -199,11 +199,12 @@ export async function writeJob(job: ClaudeReviewJob): Promise<ClaudeReviewJob> {
     await chmod(temporary, JOB_FILE_MODE);
     await secureJobFile(temporary);
     await rename(temporary, target);
-    await secureJobFile(target);
   } catch (error) {
     await unlink(temporary).catch(() => undefined);
     throw error;
   }
+  // Rename is the atomic commit boundary. The same-directory temporary file
+  // was already secured, so no fallible verification follows the commit.
   return next;
 }
 

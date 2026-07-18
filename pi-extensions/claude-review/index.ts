@@ -49,21 +49,22 @@ const DEFAULT_CLAUDE_BIN = "claude";
 const LOADER_KEY = "claude-review";
 const REVIEW_TIMEOUT_MS = 20 * 60 * 1000;
 const REVIEW_TOOLS = "Bash,Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill";
+const CAPSULE_REVIEW_TOOLS = "Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill";
 
 function claudeBinary(): string {
   return process.env[CLAUDE_BIN_ENV]?.trim() || DEFAULT_CLAUDE_BIN;
 }
 
-function claudeArgs(prompt: string): string[] {
+function claudeArgs(prompt: string, reviewTools = REVIEW_TOOLS): string[] {
   return [
     "--permission-mode",
     "auto",
     "--model",
     DEFAULT_CLAUDE_MODEL,
     "--tools",
-    REVIEW_TOOLS,
+    reviewTools,
     "--allowed-tools",
-    REVIEW_TOOLS,
+    reviewTools,
     "-p",
     prompt,
   ];
@@ -241,7 +242,8 @@ async function handleWaitClaudeReviewCommand(
     if (capsule === null) return;
     const reviewPrompt = buildCodeReviewPrompt(options, { resultMarkers: true, capsule });
     updateLoader(ctx, `Claude review: running /code-review ${options.level}…`, controller);
-    const result = await pi.exec(claudeBinary(), claudeArgs(reviewPrompt), {
+    const reviewTools = capsule ? CAPSULE_REVIEW_TOOLS : REVIEW_TOOLS;
+    const result = await pi.exec(claudeBinary(), claudeArgs(reviewPrompt, reviewTools), {
       cwd: ctx.cwd,
       signal: controller.signal,
       timeout: REVIEW_TIMEOUT_MS,
@@ -285,7 +287,7 @@ async function handleBackgroundClaudeReviewCommand(
       pi,
       job,
       claudeBinary(),
-      REVIEW_TOOLS,
+      capsule ? CAPSULE_REVIEW_TOOLS : REVIEW_TOOLS,
       controller.signal,
     );
     sendReviewOnly(pi, jobToClaudeReviewDetails(job));

@@ -117,24 +117,43 @@ public actor RemoteClient {
       .list,
       payload: ["operation": .string("capsule"), "sessionId": .string(sessionID)]
     )
-    let payload = try requireControlPayload(responses.first, type: .list)
+    let responseEnvelope = responses.first
+    let payload = try requireControlPayload(responseEnvelope, type: .list)
     if isJSONArrayPayload(payload) {
       throw RemoteClientError.unsupportedCapability("context capsule")
     }
+    try requireBoundedCapsuleResponse(responseEnvelope)
     let result = try decodePayload(CapsuleResponse.self, from: payload)
     guard result.operation == "capsule" else {
       throw RemoteClientError.invalidPayload("capsule response used an unexpected operation")
     }
+    guard let requestID = result.requestId, !requestID.isEmpty else {
+      throw RemoteClientError.invalidPayload("capsule response did not include a request id")
+    }
+    if result.capsule != nil && result.error != nil {
+      throw RemoteClientError.invalidPayload(
+        "capsule response included both a projection and error")
+    }
     guard result.supported else {
-      throw RemoteClientError.unsupportedCapability(result.capability ?? "context capsule")
+      guard result.capsule == nil, result.error == nil else {
+        throw RemoteClientError.invalidPayload("unsupported capsule response included result data")
+      }
+      guard result.capability == "context-capsule-v1" else {
+        throw RemoteClientError.invalidPayload(
+          "unsupported capsule response used an invalid capability")
+      }
+      throw RemoteClientError.unsupportedCapability("context-capsule-v1")
     }
     if let error = result.error {
+      guard CapsuleResponseError.supportedCodes.contains(error.code) else {
+        throw RemoteClientError.invalidPayload("capsule response used an invalid error code")
+      }
       throw RemoteClientError.capsuleUnavailable(error.message)
     }
     guard let capsule = result.capsule else {
       throw RemoteClientError.invalidPayload("capsule response did not include a projection")
     }
-    return capsule
+    return try capsule.validated()
   }
 
   public func attachStream(sessionID: String) throws -> AsyncThrowingStream<Envelope, Error> {
@@ -160,6 +179,10 @@ public actor RemoteClient {
 }
 
 public struct CapsuleBrief: Codable, Equatable, Sendable {
+  public static let supportedSchemaVersion = 1
+  public static let maximumPayloadBytes = 32 * 1024
+  public static let maximumEntriesPerSection = 20
+
   public struct Decision: Codable, Equatable, Sendable {
     public let statement: String
     public let status: String
@@ -188,6 +211,45 @@ public struct CapsuleBrief: Codable, Equatable, Sendable {
   public let redactions: [Redaction]
   public let truncated: Bool
   public let maxPayloadBytes: Int
+
+  fileprivate func validated() throws -> CapsuleBrief {
+    guard schemaVersion == Self.supportedSchemaVersion else {
+      throw RemoteClientError.invalidPayload("capsule schema version is unsupported")
+    }
+    guard !capsuleId.isEmpty, revision > 0 else {
+      throw RemoteClientError.invalidPayload("capsule identity and revision must be positive")
+    }
+    guard maxPayloadBytes == Self.maximumPayloadBytes else {
+      throw RemoteClientError.invalidPayload("capsule payload bound is invalid")
+    }
+    let sectionCounts = [
+      constraints.count, decisions.count, validation.count, blockers.count, risks.count,
+      redactions.count,
+    ]
+    guard sectionCounts.allSatisfy({ $0 <= Self.maximumEntriesPerSection }) else {
+      throw RemoteClientError.invalidPayload("capsule section exceeds its entry bound")
+    }
+    guard decisions.allSatisfy({ ["confirmed", "proposed", "unknown"].contains($0.status) }) else {
+      throw RemoteClientError.invalidPayload("capsule decision status is invalid")
+    }
+    guard
+      validation.allSatisfy({ ["passed", "failed", "blocked", "unknown"].contains($0.outcome) })
+    else {
+      throw RemoteClientError.invalidPayload("capsule validation outcome is invalid")
+    }
+    let redactionCategories = [
+      "secret", "raw-tool-output", "ignored-path", "oversized", "unsupported", "untrusted",
+    ]
+    guard redactions.allSatisfy({ $0.count > 0 && redactionCategories.contains($0.category) })
+    else {
+      throw RemoteClientError.invalidPayload("capsule redaction metadata is invalid")
+    }
+    let hasOversizedRedaction = redactions.contains { $0.category == "oversized" }
+    guard truncated == hasOversizedRedaction else {
+      throw RemoteClientError.invalidPayload("capsule truncation metadata is inconsistent")
+    }
+    return self
+  }
 
   public var compactSections: [CapsuleBriefSection] {
     [
@@ -326,6 +388,7 @@ private struct PairResponse: Decodable {
 
 private struct CapsuleResponse: Decodable {
   let operation: String
+  let requestId: String?
   let supported: Bool
   let capability: String?
   let capsule: CapsuleBrief?
@@ -333,6 +396,12 @@ private struct CapsuleResponse: Decodable {
 }
 
 private struct CapsuleResponseError: Decodable {
+  static let supportedCodes = [
+    "cancelled", "io", "malformed", "not-attached", "not-found", "oversized", "unavailable",
+    "unsafe", "unsupported-version",
+  ]
+
+  let code: String
   let message: String
 }
 
@@ -384,6 +453,15 @@ private func requireControlPayload(
   }
 
   return control.payload
+}
+
+private func requireBoundedCapsuleResponse(_ envelope: Envelope?) throws {
+  guard let envelope else { throw RemoteClientError.emptyResponse }
+  let encoded = try encodeFrame(envelope)
+  let frameBytes = encoded.last == 0x0A ? encoded.count - 1 : encoded.count
+  guard frameBytes <= CapsuleBrief.maximumPayloadBytes else {
+    throw RemoteClientError.invalidPayload("capsule response exceeds its payload bound")
+  }
 }
 
 private func isJSONArrayPayload(_ payload: JSONValue) -> Bool {

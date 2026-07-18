@@ -1307,6 +1307,33 @@ describe("Context Capsule application service", () => {
     }));
     const largeResult = pinCapsuleFacts({ version: 1, pins: [] }, largeFacts);
     expect(largeResult).toMatchObject({ ok: false, error: { code: "oversized" } });
+
+    const envelopeHeavyState = {
+      version: 1 as const,
+      pins: Array.from({ length: 6 }, (_, index) => ({
+        category: "constraint" as const,
+        statement: `${index}-${"x".repeat(700)}`,
+      })),
+    };
+    expect(Buffer.byteLength(JSON.stringify(envelopeHeavyState), "utf8")).toBeLessThan(
+      CAPSULE_PIN_MAX_BYTES,
+    );
+    expect(validateCapsulePinState(envelopeHeavyState)).toMatchObject({
+      ok: false,
+      error: { code: "oversized" },
+    });
+
+    const separatorBoundaryState = {
+      version: 1 as const,
+      pins: Array.from({ length: 5 }, (_, index) => ({
+        category: "constraint" as const,
+        statement: `${index}-${"x".repeat(670)}`,
+      })),
+    };
+    expect(validateCapsulePinState(separatorBoundaryState)).toMatchObject({
+      ok: false,
+      error: { code: "oversized" },
+    });
     expect(CAPSULE_PIN_MAX_BYTES).toBeGreaterThan(0);
   });
 

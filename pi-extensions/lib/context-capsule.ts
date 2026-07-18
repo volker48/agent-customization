@@ -1039,10 +1039,6 @@ function pinStateJson(state: CapsulePinState): string {
   return JSON.stringify({ version: 1, pins: state.pins.map((pin) => ({ ...pin })) });
 }
 
-function pinStateSize(state: CapsulePinState): number {
-  return Buffer.byteLength(pinStateJson(state), "utf8");
-}
-
 function validPinCategory(value: unknown): value is CapsulePinCategory {
   return ["objective", "constraint", "decision", "blocker", "next-action"].includes(
     value as string,
@@ -1171,6 +1167,20 @@ function encodePinnedProjection(projection: string): string {
   return Buffer.from(projection, "utf8").toString("base64url");
 }
 
+function pinnedCompactionSuffix(state: CapsulePinState): string {
+  if (!state.pins.length) return "";
+  const projection = `${PINNED_SUMMARY_MARKER}\n${renderCapsulePins(state)}`;
+  const encoded = encodePinnedProjection(projection);
+  return `\n\n<!-- ${PINNED_SUMMARY_ENVELOPE}:v1:${encoded} -->\n${projection}\n${PINNED_SUMMARY_CLOSE}`;
+}
+
+function pinStateSize(state: CapsulePinState): number {
+  return Math.max(
+    Buffer.byteLength(pinStateJson(state), "utf8"),
+    Buffer.byteLength(pinnedCompactionSuffix(state), "utf8"),
+  );
+}
+
 function decodePinnedProjection(encoded: string): string | undefined {
   try {
     return Buffer.from(encoded, "base64url").toString("utf8");
@@ -1202,10 +1212,8 @@ export function composePinnedCompactionSummary(
   state: CapsulePinState,
 ): string {
   const cleaned = stripPinnedCompactionSummary(normalSummary);
-  if (!state.pins.length) return cleaned;
-  const projection = `${PINNED_SUMMARY_MARKER}\n${renderCapsulePins(state)}`;
-  const encoded = encodePinnedProjection(projection);
-  return `${cleaned}\n\n<!-- ${PINNED_SUMMARY_ENVELOPE}:v1:${encoded} -->\n${projection}\n${PINNED_SUMMARY_CLOSE}`;
+  const suffix = pinnedCompactionSuffix(state);
+  return suffix ? `${cleaned}${suffix}` : cleaned;
 }
 
 export async function generateCapsule(

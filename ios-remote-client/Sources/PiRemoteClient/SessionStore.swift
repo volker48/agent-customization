@@ -127,9 +127,14 @@ public final class SessionStore {
     } catch is CancellationError {
       return nil
     } catch {
+      guard !Task.isCancelled else { return nil }
       capsuleErrorMessages[sessionID] = String(describing: error)
       return nil
     }
+  }
+
+  public func isAttached(to sessionID: String) -> Bool {
+    attachedSessionID == sessionID && connectionState == .connected
   }
 
   public func capsule(for sessionID: String) -> CapsuleBrief? {
@@ -508,7 +513,7 @@ private struct CapsuleButton: View {
     } label: {
       Label("Capsule", systemImage: loading ? "hourglass" : "doc.text.magnifyingglass")
     }
-    .disabled(loading || store.connectionState != .connected)
+    .disabled(loading || !store.isAttached(to: session.sessionID))
     .onDisappear {
       requestTask?.cancel()
       requestTask = nil
