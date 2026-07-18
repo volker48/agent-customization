@@ -210,9 +210,9 @@ function hasControl(value: string): boolean {
 // carrying a credential into a portable artifact. PEMs and URLs are matched across
 // lines before whitespace normalization so no fragment can survive redaction.
 const SECRET_KEY_NAME = String.raw`(?:api[_-]?key|access[_-]?(?:key|token)|refresh[_-]?token|id[_-]?token|authorization|token|password|passwd|secret|credential|client[_-]?secret|aws[_-]?(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key)|google[_-]?application[_-]?credentials|azure[_-]?(?:client[_-]?secret|tenant[_-]?id)|[a-z][a-z0-9]*(?:_[a-z0-9]+)*_(?:token|secret|password|api[_-]?key|access[_-]?key|credential))`;
-const SECRET_VALUE = String.raw`(?:\[REDACTED(?: SECRET)?\]|"[^"]*"|'[^']*'|(?!\[REDACTED(?: SECRET)?\])[^\s,;]+)`;
+const SECRET_VALUE = String.raw`(?:\[REDACTED(?: SECRET)?\]|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|''|[^'\\])*'|(?!\[REDACTED(?: SECRET)?\])[^\s,;]+)`;
 const SECRET_ASSIGNMENT = new RegExp(
-  String.raw`(?:(?:["']?\b${SECRET_KEY_NAME}\b["']?)\s*(?:(?:=|:)\s*|\s+)|--(?:token|password|api-key|secret)\b\s*(?:(?:=|:)\s*|\s+))(${SECRET_VALUE})`,
+  String.raw`(?:(?:["']?\b${SECRET_KEY_NAME}\b["']?)\s*(?:(?:=|:)\s*|(?:is|are|was|were)\s+|\s+)|--(?:token|password|api-key|secret)\b\s*(?:(?:=|:)\s*|(?:is|are|was|were)\s+|\s+))(${SECRET_VALUE})`,
   "gi",
 );
 const PEM_PRIVATE_KEY =
@@ -249,7 +249,7 @@ function containsPercentEncodedSecretMarker(value: string): boolean {
   const decoded = value.replace(/%(?:25)*([0-9a-f]{2})/gi, (_match, hex: string) =>
     String.fromCharCode(Number.parseInt(hex, 16)),
   );
-  return decoded !== value && containsSecretMarker(decoded);
+  return decoded !== value && containsSensitiveValue(decoded);
 }
 
 function containsSensitiveValue(value: string): boolean {
@@ -319,9 +319,11 @@ function redactSensitive(value: string): { value: string; count: number } {
   redacted = redacted.replace(SECRET_ASSIGNMENT, (match, secretValue: string) => {
     if (secretValue === "[REDACTED]" || secretValue === "[REDACTED SECRET]") return match;
     count += 1;
-    // Preserve the option/name while replacing only its value.
+    // Preserve the option/name while replacing only its value. Normalize a
+    // prose copula so `password is value` becomes `password [REDACTED]`.
     const index = match.lastIndexOf(secretValue);
-    return `${match.slice(0, index)}[REDACTED]`;
+    const prefix = match.slice(0, index).replace(/\s+(?:is|are|was|were)\s+$/i, " ");
+    return `${prefix}[REDACTED]`;
   });
   for (const pattern of SECRET_MARKERS) {
     pattern.lastIndex = 0;
@@ -640,6 +642,7 @@ function safeSummaryItems(
 }
 
 function commandCanMaskValidationFailure(command: string): boolean {
+  if (/(?:^|&&)\s*!(?!=)/.test(command)) return true;
   const withoutSafeAnd = command.replaceAll("&&", "");
   return /[;|&\n\r`]/.test(withoutSafeAnd) || command.includes("$(");
 }
@@ -652,10 +655,20 @@ function validationOutcome(
   const details = result.message?.details;
   const output = textParts(result.message?.content).join("\n");
   if (
-    (isRecord(details) &&
-      (details.killed === true || details.interrupted === true || details.signal !== undefined)) ||
+    isRecord(details) &&
+    (details.killed === true || details.interrupted === true || details.signal !== undefined)
+  ) {
+    return "blocked";
+  }
+
+  const zeroCountStatus =
+    /\b(?:0\s+(?:failed|failures?|errors?|cancelled|canceled|aborted|killed|interrupted|terminated|timed\s+out|timeouts?)|(?:failed|failures?|errors?|cancelled|canceled|aborted|killed|interrupted|terminated|timed\s+out|timeouts?)\s*[:=]?\s*0)\b/gi;
+  const normalizedOutput = output
+    .replace(zeroCountStatus, "")
+    .replace(/\bno\s+(?:failures?|errors?)\b/gi, "");
+  if (
     /\b(?:killed|interrupted|terminated|timed out|timeout|cancelled|canceled|aborted)\b/i.test(
-      output,
+      normalizedOutput,
     )
   ) {
     return "blocked";
@@ -667,17 +680,16 @@ function validationOutcome(
       output,
     ) ||
     /\b\d+\s+passed\b/i.test(output) ||
-    /\b0\s+(?:failed|failures?|errors?)\b/i.test(output) ||
-    /\bno\s+failures?\b/i.test(output);
+    /\b(?:0\s+(?:failed|failures?|errors?)|(?:failed|failures?|errors?)\s*[:=]?\s*0)\b/i.test(
+      output,
+    ) ||
+    /\bno\s+(?:failures?|errors?)\b/i.test(output);
   const hasNonZeroFailure =
     /\bnot\s+ok\b/i.test(output) ||
     /command exited with code [1-9]\d*/i.test(output) ||
     /\b[1-9]\d*\s+(?:failed|failures?|errors?)\b/i.test(output) ||
     /\b(?:failed|failures?|errors?)\s*[:=]\s*[1-9]\d*\b/i.test(output);
-  const failureEvidence = output
-    .replace(/\b0\s+(?:failed|failures?|errors?)\b/gi, "")
-    .replace(/\bno\s+failures?\b/gi, "");
-  const hasFailure = hasNonZeroFailure || /\b(?:failed|failure|error)\b/i.test(failureEvidence);
+  const hasFailure = hasNonZeroFailure || /\b(?:failed|failure|error)\b/i.test(normalizedOutput);
   if (hasFailure || result.message?.isError) return "failed";
 
   if (isRecord(details) && typeof details.exitCode === "number") {

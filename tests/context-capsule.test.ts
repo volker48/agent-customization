@@ -428,6 +428,56 @@ describe("Context Capsule application service", () => {
     }
   });
 
+  it("redacts complete escaped JSON and YAML secrets", () => {
+    const cases = [
+      {
+        content: String.raw`{"token":"prefix\"json-secret-suffix"}`,
+        secret: "json-secret-suffix",
+        expected: `{"token":[REDACTED]}`,
+      },
+      {
+        content: String.raw`token: "prefix\\\"yaml-secret-suffix"`,
+        secret: "yaml-secret-suffix",
+        expected: "token: [REDACTED]",
+      },
+    ];
+
+    for (const testCase of cases) {
+      const snapshot = extractSessionEvidence(
+        [{ type: "message", message: { role: "user", content: testCase.content } }],
+        "/work/project",
+      );
+      expect(snapshot.objective).toBe(testCase.expected);
+      expect(snapshot.objective).not.toContain(testCase.secret);
+    }
+  });
+
+  it("redacts nested percent-encoded secret assignments", () => {
+    const encodedAssignment = "token%253Dnested-secret-suffix";
+    const snapshot = extractSessionEvidence(
+      [
+        {
+          type: "message",
+          message: { role: "user", content: `Encoded assignment: ${encodedAssignment}` },
+        },
+      ],
+      "/work/project",
+    );
+
+    expect(snapshot.objective).toBe("[REDACTED SECRET]");
+    expect(snapshot.objective).not.toContain("nested-secret-suffix");
+  });
+
+  it("redacts the value after a secret-key copula", () => {
+    const snapshot = extractSessionEvidence(
+      [{ type: "message", message: { role: "user", content: "password is hunter2" } }],
+      "/work/project",
+    );
+
+    expect(snapshot.objective).toBe("password [REDACTED]");
+    expect(snapshot.objective).not.toContain("hunter2");
+  });
+
   it("redacts prefixed environment credentials and rejects them in every capsule boundary", async () => {
     const assignments = [
       "OPENAI_API_KEY=openai-secret",
@@ -852,7 +902,14 @@ describe("Context Capsule application service", () => {
   });
 
   it("recognizes explicit zero-failure validation output as passed", () => {
-    const cases = ["10 passed, 0 failed", "Found 0 errors", "no failures"];
+    const cases = [
+      "10 passed, 0 failed",
+      "Found 0 errors",
+      "failed 0",
+      "errors: 0",
+      "no failures",
+      "no errors",
+    ];
     const entries = cases.flatMap((output, index) => [
       {
         type: "message" as const,
@@ -879,7 +936,7 @@ describe("Context Capsule application service", () => {
       },
     ]);
     const snapshot = extractSessionEvidence(entries, "/work/project");
-    expect(snapshot.validation.map((item) => item.outcome)).toEqual(["passed", "passed", "passed"]);
+    expect(snapshot.validation.map((item) => item.outcome)).toEqual(cases.map(() => "passed"));
 
     const mixed = extractSessionEvidence(
       [
@@ -956,6 +1013,20 @@ describe("Context Capsule application service", () => {
         details: { exitCode: 0 },
         outcome: "passed",
       },
+      {
+        id: "leading-negation",
+        command: "! pnpm test",
+        output: "completed",
+        details: { exitCode: 0 },
+        outcome: "unknown",
+      },
+      {
+        id: "chained-negation",
+        command: "pnpm lint && ! pnpm test",
+        output: "completed",
+        details: { exitCode: 0 },
+        outcome: "unknown",
+      },
     ] as const;
     const snapshot = extractSessionEvidence(
       cases.flatMap((testCase) => [
@@ -988,6 +1059,47 @@ describe("Context Capsule application service", () => {
     );
     expect(snapshot.validation.map((value) => value.outcome)).toEqual(
       cases.map((value) => value.outcome),
+    );
+  });
+
+  it("does not treat zero-count cancellation phrases as blocked", () => {
+    const cases = [
+      { output: "cancelled 0", outcome: "unknown" },
+      { output: "0 canceled", outcome: "unknown" },
+      { output: "cancelled 1", outcome: "blocked" },
+      { output: "1 canceled", outcome: "blocked" },
+    ] as const;
+    const snapshot = extractSessionEvidence(
+      cases.flatMap((testCase, index) => [
+        {
+          type: "message" as const,
+          message: {
+            role: "assistant" as const,
+            content: [
+              {
+                type: "toolCall" as const,
+                id: `cancel-count-${index}`,
+                name: "bash",
+                arguments: { command: "pnpm test" },
+              },
+            ],
+          },
+        },
+        {
+          type: "message" as const,
+          message: {
+            role: "toolResult" as const,
+            toolCallId: `cancel-count-${index}`,
+            content: testCase.output,
+            isError: false,
+          },
+        },
+      ]),
+      "/work/project",
+    );
+
+    expect(snapshot.validation.map((item) => item.outcome)).toEqual(
+      cases.map((testCase) => testCase.outcome),
     );
   });
 
@@ -1363,7 +1475,12 @@ describe("Context Capsule application service", () => {
     expect(handlers.has("session_before_compact")).toBe(false);
 
     const normalMessages = [{ role: "user", content: "ordinary history" }];
-    expect(await contextHandler?.({ messages: normalMessages }, { sessionManager: { getBranch: () => branch } })).toBeUndefined();
+    expect(
+      await contextHandler?.(
+        { messages: normalMessages },
+        { sessionManager: { getBranch: () => branch } },
+      ),
+    ).toBeUndefined();
     expect(compact).not.toHaveBeenCalled();
 
     branch.push({ type: "custom", customType: CONTEXT_CAPSULE_PINS_ENTRY, data: first.value });

@@ -845,19 +845,7 @@ describe("remote daemon", () => {
         },
       ]);
       await new Promise((resolve) => setTimeout(resolve, 100));
-      if (extension.receivedCount() > 0) {
-        const staleRequest = await extension.readNext();
-        const requestId = (staleRequest.payload as { requestId: string }).requestId;
-        await extension.send({
-          sessionId: "session-1",
-          type: "capsule",
-          payload: {
-            requestId,
-            supported: true,
-            error: { code: "not-found", message: "stale attachment" },
-          },
-        });
-      }
+      expect(extension.receivedCount()).toBe(0);
       await expect(capsuleRequest).resolves.toMatchObject([
         {
           payload: {
@@ -1122,9 +1110,7 @@ function isPairingInfo(payload: unknown): payload is PairingInfo {
   );
 }
 
-async function readOneEnvelope(
-  stream: Awaited<ReturnType<typeof openStream>>,
-): Promise<Envelope> {
+async function readOneEnvelope(stream: Awaited<ReturnType<typeof openStream>>): Promise<Envelope> {
   let buffered = "";
   while (!buffered.includes("\n")) {
     buffered += Buffer.from(await stream.recv.read(1024 * 1024)).toString("utf8");
