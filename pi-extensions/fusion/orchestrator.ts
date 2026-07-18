@@ -36,6 +36,8 @@ export async function runFusion(args: {
   signal: AbortSignal;
   client?: CompletionClient;
   onProgress?: (event: FusionProgressEvent) => void;
+  capsule?: FusionResult["capsule"];
+  displayPrompt?: string;
 }): Promise<FusionResult> {
   const started = Date.now();
   args.onProgress?.({
@@ -62,6 +64,8 @@ export async function runFusion(args: {
     return {
       status: "error",
       prompt: args.prompt,
+      displayPrompt: args.displayPrompt,
+      capsule: args.capsule,
       judge: args.config.judge,
       responses,
       error: "All Fusion panel models failed",
@@ -101,6 +105,8 @@ export async function runFusion(args: {
     return {
       status: "error",
       prompt: args.prompt,
+      displayPrompt: args.displayPrompt,
+      capsule: args.capsule,
       judge: args.config.judge,
       responses,
       error: failure,
@@ -124,6 +130,8 @@ export async function runFusion(args: {
   return {
     status: successes.length === responses.length ? "ok" : "degraded",
     prompt: args.prompt,
+    displayPrompt: args.displayPrompt,
+    capsule: args.capsule,
     judge: args.config.judge,
     responses,
     judgeOutput,
