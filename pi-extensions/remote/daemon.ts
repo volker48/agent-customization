@@ -101,6 +101,7 @@ export async function startRemoteDaemon(options: RemoteDaemonOptions): Promise<R
   const pairingWindow = new PairingWindow(pairingCodeFactory(options));
   const streamingAttachCounts = new Map<string, Map<number, number>>();
   const nodeAttachCounts = new Map<string, number>();
+  const streamingConnections = new Set<RemoteStreamingConnection>();
   let daemon: RemoteDaemon;
   let ipc: IpcDaemonServer;
   try {
@@ -121,6 +122,7 @@ export async function startRemoteDaemon(options: RemoteDaemonOptions): Promise<R
     pairingWindow,
     streamingAttachCounts,
     nodeAttachCounts,
+    streamingConnections,
     () => closed,
   );
 
@@ -147,6 +149,7 @@ async function acceptConnections(
   pairingWindow: PairingWindow,
   streamingAttachCounts: Map<string, Map<number, number>>,
   nodeAttachCounts: Map<string, number>,
+  streamingConnections: Set<RemoteStreamingConnection>,
   isClosed: () => boolean,
 ): Promise<void> {
   while (!isClosed()) {
@@ -159,6 +162,7 @@ async function acceptConnections(
         pairingWindow,
         streamingAttachCounts,
         nodeAttachCounts,
+        streamingConnections,
       ).catch(() => undefined);
     } catch {
       if (isClosed()) return;
@@ -173,6 +177,7 @@ async function handleConnection(
   pairingWindow: PairingWindow,
   streamingAttachCounts: Map<string, Map<number, number>>,
   nodeAttachCounts: Map<string, number>,
+  streamingConnections: Set<RemoteStreamingConnection>,
 ): Promise<void> {
   const stream = await acceptStream(connection);
   const writer = new StreamWriter(stream);
@@ -181,13 +186,26 @@ async function handleConnection(
   const retained = new Map<string, number>();
   const pending: IpcEnvelope[] = [];
   const nodeId = connection.remoteId().toString();
+  const streamingConnection: RemoteStreamingConnection = {
+    writer,
+    attached,
+    attaching,
+    retained,
+    pending,
+    nodeId,
+  };
+  streamingConnections.add(streamingConnection);
   const requestAbort = new AbortController();
   void connection.closed().then(
     () => requestAbort.abort(),
     () => requestAbort.abort(),
   );
   const unsubscribe = ipc.subscribe((frame) =>
-    routeAttachedFrame(frame, { writer, attached, attaching, pending }),
+    routeAttachedFrame(
+      frame,
+      streamingConnection,
+      (sessionId) => ipc.registry.get(sessionId)?.generation,
+    ),
   );
 
   try {
@@ -205,9 +223,16 @@ async function handleConnection(
         pairingWindow,
         nodeId,
         nodeAttachCounts,
+        streamingAttachCounts,
+        streamingConnections,
         signal: requestAbort.signal,
       });
-      if (streamingAttachSessionId && response && !retained.has(streamingAttachSessionId)) {
+      if (
+        streamingAttachSessionId &&
+        response &&
+        attaching.has(streamingAttachSessionId) &&
+        !retained.has(streamingAttachSessionId)
+      ) {
         const generation = ipc.registry.get(streamingAttachSessionId)?.generation;
         if (generation !== undefined) {
           retainStreamingAttach(streamingAttachCounts, streamingAttachSessionId, generation);
@@ -220,12 +245,7 @@ async function handleConnection(
       if (streamingAttachSessionId) {
         if (response) {
           keepOpen = true;
-          await promoteAttachedSession(streamingAttachSessionId, {
-            writer,
-            attached,
-            attaching,
-            pending,
-          });
+          await promoteAttachedSession(streamingAttachSessionId, streamingConnection);
         } else {
           dropAttachingSession(streamingAttachSessionId, { attaching, pending });
         }
@@ -242,6 +262,7 @@ async function handleConnection(
     await writer.close();
   } finally {
     requestAbort.abort();
+    streamingConnections.delete(streamingConnection);
     releaseNodeAttaches(nodeAttachCounts, nodeId, retained);
     try {
       await detachAttachedSessions(
@@ -261,6 +282,8 @@ type RemoteEnvelopeContext = {
   pairingWindow: PairingWindow;
   nodeId: string;
   nodeAttachCounts: Map<string, number>;
+  streamingAttachCounts: StreamingAttachCounts;
+  streamingConnections: Set<RemoteStreamingConnection>;
   signal: AbortSignal;
 };
 
@@ -303,16 +326,25 @@ async function handleControlEnvelope(
     return { sessionId: null, type: "list", payload: listSessions(ipc) };
   }
 
-  if (envelope.type === "attach" || envelope.type === "detach") {
+  if (envelope.type === "attach") {
     const sessionId = sessionIdFromPayload(envelope.payload);
-    if (!sessionId) {
+    if (!sessionId || !(await safeSendToSession(ipc, { sessionId, type: "attach", payload: {} }))) {
       return null;
     }
-    if (!(await safeSendToSession(ipc, { sessionId, type: envelope.type, payload: {} }))) {
+    return { sessionId: null, type: "attach", payload: { sessionId, attached: true } };
+  }
+
+  if (envelope.type === "detach") {
+    const sessionId = sessionIdFromPayload(envelope.payload);
+    if (!sessionId || !ipc.registry.has(sessionId)) return null;
+    const released = releaseNodeSessionAttachments(sessionId, context);
+    if (
+      (!released.hadAttachments || released.releasedLastCurrentGeneration) &&
+      !(await safeSendToSession(ipc, { sessionId, type: "detach", payload: {} }))
+    ) {
       return null;
     }
-    const status = envelope.type === "attach" ? { attached: true } : { detached: true };
-    return { sessionId: null, type: envelope.type, payload: { sessionId, ...status } };
+    return { sessionId: null, type: "detach", payload: { sessionId, detached: true } };
   }
 
   return null;
@@ -688,14 +720,31 @@ type AttachedFrameContext = {
   pending: IpcEnvelope[];
 };
 
-function routeAttachedFrame(frame: IpcEnvelope, context: AttachedFrameContext): void {
+type RemoteStreamingConnection = AttachedFrameContext & {
+  nodeId: string;
+  retained: Map<string, number>;
+};
+
+function routeAttachedFrame(
+  frame: IpcEnvelope,
+  context: RemoteStreamingConnection,
+  currentGeneration: (sessionId: string) => number | undefined,
+): void {
   const endedSessionId = endedSessionIdFrom(frame);
   if (endedSessionId && isKnownSession(endedSessionId, context)) {
     void context.writer.send(frame as Envelope).finally(() => context.writer.close());
     return;
   }
-  if (frame.sessionId === null) return;
-  if (frame.type !== "event") return;
+  if (frame.sessionId === null || frame.type !== "event") return;
+  const retainedGeneration = context.retained.get(frame.sessionId);
+  if (
+    retainedGeneration === undefined ||
+    retainedGeneration !== currentGeneration(frame.sessionId)
+  ) {
+    dropAttachingSession(frame.sessionId, context);
+    context.attached.delete(frame.sessionId);
+    return;
+  }
   if (context.attaching.has(frame.sessionId)) {
     context.pending.push(frame);
     return;
@@ -705,8 +754,12 @@ function routeAttachedFrame(frame: IpcEnvelope, context: AttachedFrameContext): 
 
 async function promoteAttachedSession(
   sessionId: string,
-  context: AttachedFrameContext,
+  context: RemoteStreamingConnection,
 ): Promise<void> {
+  if (!context.retained.has(sessionId)) {
+    dropAttachingSession(sessionId, context);
+    return;
+  }
   context.attaching.delete(sessionId);
   context.attached.add(sessionId);
   for (const frame of drainPendingForSession(context.pending, sessionId)) {
@@ -835,17 +888,53 @@ function isNodeAttached(
   return (counts.get(nodeAttachKey(nodeId, sessionId, generation)) ?? 0) > 0;
 }
 
+function releaseNodeAttach(
+  counts: Map<string, number>,
+  nodeId: string,
+  sessionId: string,
+  generation: number,
+): void {
+  const key = nodeAttachKey(nodeId, sessionId, generation);
+  const count = counts.get(key) ?? 0;
+  if (count <= 1) counts.delete(key);
+  else counts.set(key, count - 1);
+}
+
 function releaseNodeAttaches(
   counts: Map<string, number>,
   nodeId: string,
   sessionIds: Map<string, number>,
 ): void {
   for (const [sessionId, generation] of sessionIds) {
-    const key = nodeAttachKey(nodeId, sessionId, generation);
-    const count = counts.get(key) ?? 0;
-    if (count <= 1) counts.delete(key);
-    else counts.set(key, count - 1);
+    releaseNodeAttach(counts, nodeId, sessionId, generation);
   }
+}
+
+function releaseNodeSessionAttachments(
+  sessionId: string,
+  context: RemoteEnvelopeContext,
+): { hadAttachments: boolean; releasedLastCurrentGeneration: boolean } {
+  let hadAttachments = false;
+  let releasedLastCurrentGeneration = false;
+  const currentGeneration = context.ipc.registry.get(sessionId)?.generation;
+  for (const connection of context.streamingConnections) {
+    if (connection.nodeId !== context.nodeId) continue;
+    const wasKnown = connection.attached.delete(sessionId) || connection.attaching.has(sessionId);
+    dropAttachingSession(sessionId, connection);
+    const generation = connection.retained.get(sessionId);
+    if (generation === undefined) {
+      hadAttachments ||= wasKnown;
+      continue;
+    }
+    hadAttachments = true;
+    connection.retained.delete(sessionId);
+    releaseNodeAttach(context.nodeAttachCounts, context.nodeId, sessionId, generation);
+    const released = releaseStreamingAttaches(context.streamingAttachCounts, [
+      [sessionId, generation],
+    ]);
+    releasedLastCurrentGeneration ||= generation === currentGeneration && released.size > 0;
+  }
+  return { hadAttachments, releasedLastCurrentGeneration };
 }
 
 function releaseStreamingAttaches(

@@ -1,6 +1,6 @@
-import { compact } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
+  capsulePinsPrompt,
   capsulePrompt,
   capsuleRevisionLabel,
   extractSessionEvidence,
@@ -15,7 +15,6 @@ import {
   proposeCapsuleRefresh,
   renderCapsuleDrift,
   saveCapsule,
-  composePinnedCompactionSummary,
   stripPinnedCompactionSummary,
   CONTEXT_CAPSULE_PINS_ENTRY,
   CONTEXT_CAPSULE_PINS_MESSAGE,
@@ -27,11 +26,10 @@ import {
   type SessionEntryLike,
 } from "./lib/context-capsule.js";
 
-type CompactionPreparation = Parameters<typeof compact>[0];
-
 type PendingCapsuleSelection = {
   facts: CapsuleFact[];
   sessionId: string;
+  leafId: string | null;
   capsuleId: string;
   revision: number;
 };
@@ -47,6 +45,7 @@ export type CapsuleCommandContext = {
   waitForIdle: () => Promise<void>;
   sessionManager: {
     getBranch: () => unknown[];
+    getLeafId: () => string | null;
     getSessionId: () => string;
     getSessionFile: () => string | undefined;
     appendCustomEntry?: (customType: string, data?: unknown) => string;
@@ -60,6 +59,9 @@ export type CapsuleCommandContext = {
   ui: {
     notify: (message: string, level?: "info" | "warning" | "error") => void;
     confirm: (title: string, message: string) => Promise<boolean>;
+    onTerminalInput?: (
+      handler: (data: string) => { consume?: boolean; data?: string } | undefined,
+    ) => () => void;
   };
   newSession: (options: {
     parentSession?: string;
@@ -100,6 +102,10 @@ function pinError(result: CapsuleResult<unknown>): string {
   return "error" in result ? `${result.error.code}: ${result.error.message}` : "";
 }
 
+function isCancelled(result: CapsuleResult<unknown>): boolean {
+  return "error" in result && result.error.code === "cancelled";
+}
+
 function showPins(context: CapsuleCommandContext, state = currentPinState(context)): void {
   context.ui.notify(renderCapsulePins(state), "info");
 }
@@ -107,6 +113,20 @@ function showPins(context: CapsuleCommandContext, state = currentPinState(contex
 function setLastPreview(state: CapsuleCommandState, capsule: Capsule): void {
   state.lastPreview = capsule;
   state.pendingFacts = undefined;
+}
+
+function pendingSelectionIsCurrent(
+  pending: PendingCapsuleSelection,
+  context: CapsuleCommandContext,
+  capsule: Capsule | undefined,
+): boolean {
+  return (
+    pending.sessionId === context.sessionManager.getSessionId() &&
+    pending.leafId === context.sessionManager.getLeafId() &&
+    capsule !== undefined &&
+    pending.capsuleId === capsule.capsuleId &&
+    pending.revision === capsule.revision
+  );
 }
 
 function showPreview(context: CapsuleCommandContext, capsule: Capsule): void {
@@ -132,17 +152,53 @@ async function confirmSideEffect(
   return context.ui.confirm(title, message);
 }
 
+function cancelledCapsuleResult<T>(): CapsuleResult<T> {
+  return {
+    ok: false,
+    error: {
+      code: "cancelled",
+      message: "Capsule generation was cancelled before side effects.",
+    },
+  };
+}
+
+async function runCancellableCapsuleOperation<T>(
+  context: CapsuleCommandContext,
+  operation: (signal: AbortSignal) => Promise<CapsuleResult<T>>,
+): Promise<CapsuleResult<T>> {
+  const controller = new AbortController();
+  const unsubscribe = context.ui.onTerminalInput?.((data) => {
+    if (data !== "\u001b") return undefined;
+    controller.abort();
+    return { consume: true };
+  });
+  const cancelled = new Promise<false>((resolve) => {
+    controller.signal.addEventListener("abort", () => resolve(false), { once: true });
+  });
+
+  try {
+    const idle = await Promise.race([context.waitForIdle().then(() => true as const), cancelled]);
+    if (!idle || controller.signal.aborted) return cancelledCapsuleResult();
+    const result = await operation(controller.signal);
+    return controller.signal.aborted ? cancelledCapsuleResult() : result;
+  } finally {
+    unsubscribe?.();
+  }
+}
+
 async function generateCurrentCapsule(
   context: CapsuleCommandContext,
 ): Promise<CapsuleResult<Capsule>> {
-  await context.waitForIdle();
-  return generateCapsule(
-    extractSessionEvidence(context.sessionManager.getBranch() as SessionEntryLike[], context.cwd),
-    {
-      sessionId: context.sessionManager.getSessionId(),
-      sessionFile: context.sessionManager.getSessionFile(),
-      cwd: context.cwd,
-    },
+  return runCancellableCapsuleOperation(context, (signal) =>
+    generateCapsule(
+      extractSessionEvidence(context.sessionManager.getBranch() as SessionEntryLike[], context.cwd),
+      {
+        sessionId: context.sessionManager.getSessionId(),
+        sessionFile: context.sessionManager.getSessionFile(),
+        cwd: context.cwd,
+        signal,
+      },
+    ),
   );
 }
 
@@ -229,6 +285,7 @@ async function handlePinsCommand(
     state.pendingFacts = {
       facts: pendingFacts,
       sessionId: context.sessionManager.getSessionId(),
+      leafId: context.sessionManager.getLeafId(),
       capsuleId: capsule.capsuleId,
       revision: capsule.revision,
     };
@@ -254,12 +311,7 @@ async function handlePinsCommand(
       context.ui.notify("Select capsule facts first: /capsule pins select [ref]", "error");
       return;
     }
-    if (
-      pending.sessionId !== context.sessionManager.getSessionId() ||
-      !currentCapsule ||
-      pending.capsuleId !== currentCapsule.capsuleId ||
-      pending.revision !== currentCapsule.revision
-    ) {
+    if (!pendingSelectionIsCurrent(pending, context, currentCapsule)) {
       state.pendingFacts = undefined;
       context.ui.notify("Capsule fact selection is stale; select facts again.", "error");
       return;
@@ -283,6 +335,11 @@ async function handlePinsCommand(
       context.ui.notify("Pin confirmation cancelled; no facts were persisted.", "info");
       return;
     }
+    if (!pendingSelectionIsCurrent(pending, context, state.lastPreview)) {
+      state.pendingFacts = undefined;
+      context.ui.notify("Capsule fact selection is stale; select facts again.", "error");
+      return;
+    }
     if (!context.sessionManager.appendCustomEntry) {
       context.ui.notify("Pin persistence is unavailable in this Pi session.", "error");
       return;
@@ -298,6 +355,8 @@ async function handlePinsCommand(
       context.ui.notify("Usage: /capsule pins remove <comma-separated pin numbers|all>", "error");
       return;
     }
+    const selectedSessionId = context.sessionManager.getSessionId();
+    const selectedLeafId = context.sessionManager.getLeafId();
     const current = currentPinState(context);
     if (indices !== "all" && indices.some((index) => index > current.pins.length)) {
       context.ui.notify("One or more selected pin numbers are out of range.", "error");
@@ -311,6 +370,16 @@ async function handlePinsCommand(
     );
     if (!confirmed) {
       context.ui.notify("Pin removal cancelled; no facts were changed.", "info");
+      return;
+    }
+    if (
+      selectedSessionId !== context.sessionManager.getSessionId() ||
+      selectedLeafId !== context.sessionManager.getLeafId()
+    ) {
+      context.ui.notify(
+        "Pin removal cancelled because the active branch changed; inspect pins again.",
+        "error",
+      );
       return;
     }
     if (!context.sessionManager.appendCustomEntry) {
@@ -354,7 +423,12 @@ export async function handleCapsuleCommand(
   if (command === "preview" || command === "save") {
     const generated = await generateCurrentCapsule(context);
     if (!generated.ok) {
-      context.ui.notify(`Capsule generation failed: ${resultError(generated)}`, "error");
+      context.ui.notify(
+        isCancelled(generated)
+          ? "Capsule generation cancelled; no preview, state, filesystem, or session changes were made."
+          : `Capsule generation failed: ${resultError(generated)}`,
+        isCancelled(generated) ? "info" : "error",
+      );
       return;
     }
     setLastPreview(state, generated.value);
@@ -389,18 +463,28 @@ export async function handleCapsuleCommand(
       context.ui.notify(`Capsule load failed: ${resultError(loaded)}`, "error");
       return;
     }
-    await context.waitForIdle();
-    const proposed = await proposeCapsuleRefresh(
-      loaded.value,
-      extractSessionEvidence(context.sessionManager.getBranch() as SessionEntryLike[], context.cwd),
-      {
-        sessionId: context.sessionManager.getSessionId(),
-        sessionFile: context.sessionManager.getSessionFile(),
-        cwd: context.cwd,
-      },
+    const proposed = await runCancellableCapsuleOperation(context, (signal) =>
+      proposeCapsuleRefresh(
+        loaded.value,
+        extractSessionEvidence(
+          context.sessionManager.getBranch() as SessionEntryLike[],
+          context.cwd,
+        ),
+        {
+          sessionId: context.sessionManager.getSessionId(),
+          sessionFile: context.sessionManager.getSessionFile(),
+          cwd: context.cwd,
+          signal,
+        },
+      ),
     );
     if (!proposed.ok) {
-      context.ui.notify(`Capsule refresh failed: ${resultError(proposed)}`, "error");
+      context.ui.notify(
+        isCancelled(proposed)
+          ? "Capsule refresh cancelled; no preview, state, filesystem, or session changes were made."
+          : `Capsule refresh failed: ${resultError(proposed)}`,
+        isCancelled(proposed) ? "info" : "error",
+      );
       return;
     }
 
@@ -496,48 +580,46 @@ function isPinnedProjectionMessage(message: unknown): boolean {
   return candidate.role === "custom" && candidate.customType === CONTEXT_CAPSULE_PINS_MESSAGE;
 }
 
-/** Keep Pi's normal cut point and metadata while replacing only its summary projection. */
-function cleanCompactionPreparation(preparation: CompactionPreparation): CompactionPreparation {
-  return {
-    ...preparation,
-    previousSummary: preparation.previousSummary
-      ? stripPinnedCompactionSummary(preparation.previousSummary) || undefined
-      : undefined,
-    messagesToSummarize: preparation.messagesToSummarize.filter(
-      (message) => !isPinnedProjectionMessage(message),
-    ),
-    turnPrefixMessages: preparation.turnPrefixMessages.filter(
-      (message) => !isPinnedProjectionMessage(message),
-    ),
-  };
+function projectPinnedContext(
+  messages: readonly unknown[],
+  pins: CapsulePinState,
+): unknown[] | undefined {
+  let changed = false;
+  const projected = messages.flatMap((message) => {
+    if (isPinnedProjectionMessage(message)) {
+      changed = true;
+      return [];
+    }
+    if (!message || typeof message !== "object") return [message];
+    const candidate = message as { role?: unknown; summary?: unknown };
+    if (candidate.role !== "compactionSummary" || typeof candidate.summary !== "string") {
+      return [message];
+    }
+    const summary = stripPinnedCompactionSummary(candidate.summary);
+    if (summary === candidate.summary) return [message];
+    changed = true;
+    return [{ ...candidate, summary }];
+  });
+
+  if (pins.pins.length) {
+    changed = true;
+    projected.push({
+      role: "custom",
+      customType: CONTEXT_CAPSULE_PINS_MESSAGE,
+      content: capsulePinsPrompt(pins),
+      display: false,
+      timestamp: Date.now(),
+    });
+  }
+  return changed ? projected : undefined;
 }
 
 export default function contextCapsuleExtension(pi: ExtensionAPI): void {
   const state: CapsuleCommandState = {};
-  pi.on("session_before_compact", async (event, context) => {
+  pi.on("context", (event, context) => {
     const pins = readCapsulePinState(context.sessionManager.getBranch() as SessionEntryLike[]);
-    const model = context.model;
-    if (!model) return;
-    const auth = await context.modelRegistry.getApiKeyAndHeaders(model);
-    if (!auth.ok) return;
-
-    const result = await compact(
-      cleanCompactionPreparation(event.preparation),
-      model,
-      auth.apiKey,
-      auth.headers,
-      event.customInstructions,
-      event.signal,
-      undefined,
-      undefined,
-      auth.env,
-    );
-    return {
-      compaction: {
-        ...result,
-        summary: composePinnedCompactionSummary(result.summary, pins),
-      },
-    };
+    const messages = projectPinnedContext(event.messages, pins);
+    return messages ? { messages: messages as typeof event.messages } : undefined;
   });
   pi.registerCommand("capsule", {
     description: "Generate, preview, save, refresh, load, or resume a Context Capsule",

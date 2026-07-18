@@ -779,6 +779,116 @@ describe("remote daemon", () => {
     }
   }, 30_000);
 
+  it("revokes capsule authorization and stream membership on explicit detach", async () => {
+    const root = await tempRoot();
+    const daemon = await startRemoteDaemon({ remoteRoot: root, pairingCode: "123-456" });
+    const extension = await connectIpcExtension(daemon.socketPath, {
+      sessionId: "session-1",
+      name: "Work session",
+      cwd: "/repo",
+      capabilities: ["context-capsule-v1"],
+    });
+    const client = await bindEndpoint();
+    let attachConnection: Awaited<ReturnType<typeof connectEndpoint>> | undefined;
+
+    try {
+      await daemon.ipc.waitForSession("session-1");
+      await armPairing(daemon.socketPath);
+      await exchange(client, daemon.ticket, [
+        { sessionId: null, type: "pair", payload: { code: "123-456" } },
+      ]);
+
+      const addr = EndpointTicket.fromString(daemon.ticket).endpointAddr();
+      attachConnection = await connectEndpoint(client, addr);
+      const attachStream = await openStream(attachConnection);
+      await sendEnvelope(attachStream, {
+        sessionId: null,
+        type: "attach",
+        payload: { sessionId: "session-1", stream: true },
+      });
+      await finishSending(attachStream);
+      await expect(extension.readNext()).resolves.toMatchObject({ type: "attach" });
+      await expect(readOneEnvelope(attachStream)).resolves.toEqual({
+        sessionId: null,
+        type: "attach",
+        payload: { attached: true, sessionId: "session-1" },
+      });
+      await extension.send({
+        sessionId: "session-1",
+        type: "event",
+        payload: { role: "assistant", text: "pre-detach event" },
+      });
+      await expect(readOneEnvelope(attachStream)).resolves.toEqual({
+        sessionId: "session-1",
+        type: "event",
+        payload: { role: "assistant", text: "pre-detach event" },
+      });
+
+      await expect(
+        exchange(client, daemon.ticket, [
+          { sessionId: null, type: "detach", payload: { sessionId: "session-1" } },
+        ]),
+      ).resolves.toEqual([
+        { sessionId: null, type: "detach", payload: { detached: true, sessionId: "session-1" } },
+      ]);
+      await expect(extension.readNext()).resolves.toEqual({
+        sessionId: "session-1",
+        type: "detach",
+        payload: {},
+      });
+
+      const capsuleRequest = exchange(client, daemon.ticket, [
+        {
+          sessionId: null,
+          type: "list",
+          payload: { operation: "capsule", sessionId: "session-1" },
+        },
+      ]);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (extension.receivedCount() > 0) {
+        const staleRequest = await extension.readNext();
+        const requestId = (staleRequest.payload as { requestId: string }).requestId;
+        await extension.send({
+          sessionId: "session-1",
+          type: "capsule",
+          payload: {
+            requestId,
+            supported: true,
+            error: { code: "not-found", message: "stale attachment" },
+          },
+        });
+      }
+      await expect(capsuleRequest).resolves.toMatchObject([
+        {
+          payload: {
+            operation: "capsule",
+            supported: true,
+            error: { code: "not-attached" },
+          },
+        },
+      ]);
+
+      await extension.send({
+        sessionId: "session-1",
+        type: "event",
+        payload: { role: "assistant", text: "must not reach detached stream" },
+      });
+      const leakedFrame = await Promise.race([
+        attachStream.recv
+          .read(1024 * 1024)
+          .then((bytes) => Buffer.from(bytes).toString("utf8"))
+          .catch(() => undefined),
+        new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 200)),
+      ]);
+      expect(leakedFrame).toBeUndefined();
+    } finally {
+      attachConnection?.close(0n, []);
+      await closeEndpoint(client);
+      await extension.close();
+      await daemon.close();
+    }
+  }, 30_000);
+
   it("keeps accepting after a malformed iroh connection", async () => {
     const root = await tempRoot();
     const daemon = await startRemoteDaemon({ remoteRoot: root, pairingCode: "123-456" });
@@ -1010,6 +1120,16 @@ function isPairingInfo(payload: unknown): payload is PairingInfo {
     typeof payload.ticket === "string" &&
     typeof payload.code === "string"
   );
+}
+
+async function readOneEnvelope(
+  stream: Awaited<ReturnType<typeof openStream>>,
+): Promise<Envelope> {
+  let buffered = "";
+  while (!buffered.includes("\n")) {
+    buffered += Buffer.from(await stream.recv.read(1024 * 1024)).toString("utf8");
+  }
+  return JSON.parse(buffered.slice(0, buffered.indexOf("\n"))) as Envelope;
 }
 
 async function exchange(

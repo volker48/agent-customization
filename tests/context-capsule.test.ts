@@ -38,6 +38,7 @@ import {
 import contextCapsuleExtension, {
   handleCapsuleCommand,
   type CapsuleCommandContext,
+  type CapsuleCommandState,
 } from "../pi-extensions/context-capsule.js";
 
 vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
@@ -165,6 +166,7 @@ function commandContext(
     branch?: SessionEntryLike[];
     sendError?: Error;
     sessionId?: string;
+    leafId?: string | null;
   } = {},
 ) {
   const notifications: Array<{ message: string; level?: string }> = [];
@@ -177,6 +179,7 @@ function commandContext(
   const sent: string[] = [];
   const branch = options.branch ?? [...entries];
   let sessionId = options.sessionId ?? "session-1";
+  let leafId = options.leafId === undefined ? "leaf-1" : options.leafId;
   let newSessionOptions: Parameters<CapsuleCommandContext["newSession"]>[0] | undefined;
   const context: CapsuleCommandContext = {
     cwd: "/work/project",
@@ -184,6 +187,7 @@ function commandContext(
     waitForIdle: vi.fn(async () => undefined),
     sessionManager: {
       getBranch: () => branch,
+      getLeafId: () => leafId,
       getSessionId: () => sessionId,
       getSessionFile: () => "/sessions/session-1.jsonl",
       appendCustomEntry: (customType, data) => {
@@ -222,6 +226,9 @@ function commandContext(
     setSessionId: (next: string) => {
       sessionId = next;
     },
+    setLeafId: (next: string | null) => {
+      leafId = next;
+    },
     branch,
   };
 }
@@ -230,7 +237,7 @@ describe("Context Capsule application service", () => {
   it("extracts bounded, redacted evidence without copying raw tool output", async () => {
     const capsule = await createCapsule();
 
-    expect(capsule.objective).toBe("Implement search caching; never expose api_key=[REDACTED]");
+    expect(capsule.objective).toBe("Implement search caching");
     expect(capsule.constraints).toEqual(["Keep the API compatible"]);
     expect(capsule.decisions).toEqual([{ statement: "Use an LRU cache", status: "unknown" }]);
     expect(capsule.resources).toContainEqual({
@@ -318,6 +325,109 @@ describe("Context Capsule application service", () => {
     expect(parseCapsule(json)).toMatchObject({ ok: true });
   });
 
+  it("redacts quoted credentials, complete authorization values, and GitLab tokens", async () => {
+    const jsonSecret = "json-secret-abcdefghijklmnop";
+    const yamlSecret = "yaml-secret-abcdefghijklmnop";
+    const basicSecret = "dXNlcjpwYXNzd29yZA==";
+    const gitlabSecret = "glpat-abcdefghijklmnopqrstuvwxyz";
+    const encodedGitlabSecret = "%67lpat-abcdefghijklmnopqrstuvwxyz";
+    const deeplyEncodedGitlabSecret = "%252567lpat-abcdefghijklmnopqrstuvwxyz";
+    const snapshot = extractSessionEvidence(
+      [
+        {
+          type: "message",
+          message: {
+            role: "user",
+            content: [
+              `{"token":"${jsonSecret}"}`,
+              `'api_key': '${yamlSecret}'`,
+              `Authorization: Basic ${basicSecret}`,
+              `{"Authorization":"Basic ${basicSecret}"}`,
+              `'authorization': 'Basic ${basicSecret}'`,
+              `GitLab token: ${gitlabSecret}`,
+              `Encoded GitLab URL: https://gitlab.example/api/${encodedGitlabSecret}`,
+            ].join("\n"),
+          },
+        },
+      ],
+      "/work/project",
+    );
+    const generated = await generateCapsule(
+      {
+        ...snapshot,
+        resources: [{ kind: "url", value: `https://gitlab.example/api/${gitlabSecret}` }],
+        validation: [
+          {
+            command: "pnpm test",
+            outcome: "unknown",
+            evidence: `{"access_token":"${jsonSecret}"}`,
+          },
+        ],
+      },
+      { sessionId: "session-1", cwd: "/work/project" },
+    );
+
+    expect(generated.ok).toBe(true);
+    if (!generated.ok) return;
+    const projections = [
+      serializeCapsule(generated.value),
+      previewCapsule(generated.value).canonicalJson,
+      previewCapsule(generated.value).humanText,
+      capsulePrompt(generated.value),
+      JSON.stringify(selectCapsuleFacts(generated.value)),
+    ];
+    for (const projection of projections) {
+      for (const secret of [
+        jsonSecret,
+        yamlSecret,
+        basicSecret,
+        gitlabSecret,
+        encodedGitlabSecret,
+      ]) {
+        expect(projection).not.toContain(secret);
+      }
+    }
+    expect(generated.value.resources).toEqual([]);
+    expect(parseCapsule(serializeCapsule(generated.value))).toMatchObject({ ok: true });
+
+    for (const objective of [
+      `{"token":"${jsonSecret}"}`,
+      `Authorization: Basic ${basicSecret}`,
+      `Authorization: [REDACTED] ${basicSecret}`,
+      `{"Authorization":"Basic ${basicSecret}"}`,
+      `Use ${gitlabSecret}`,
+      `Use https://gitlab.example/api/${encodedGitlabSecret}`,
+      `Use https://gitlab.example/api/${deeplyEncodedGitlabSecret}`,
+    ]) {
+      const unsafe = { ...generated.value, objective };
+      expect(validateCapsule(unsafe)).toMatchObject({ ok: false, error: { code: "unsafe" } });
+      expect(parseCapsule(JSON.stringify(unsafe))).toMatchObject({
+        ok: false,
+        error: { code: "unsafe" },
+      });
+    }
+
+    for (const encodedSecret of [encodedGitlabSecret, deeplyEncodedGitlabSecret]) {
+      const encodedOnly = await generateCapsule(
+        extractSessionEvidence(
+          [
+            {
+              type: "message",
+              message: { role: "user", content: `Use https://gitlab.example/api/${encodedSecret}` },
+            },
+          ],
+          "/work/project",
+        ),
+        { sessionId: "session-1", cwd: "/work/project" },
+      );
+      expect(encodedOnly.ok).toBe(true);
+      if (encodedOnly.ok) {
+        expect(serializeCapsule(encodedOnly.value)).not.toContain(encodedSecret);
+        expect(validateCapsule(encodedOnly.value)).toMatchObject({ ok: true });
+      }
+    }
+  });
+
   it("redacts prefixed environment credentials and rejects them in every capsule boundary", async () => {
     const assignments = [
       "OPENAI_API_KEY=openai-secret",
@@ -376,6 +486,60 @@ describe("Context Capsule application service", () => {
         loadCapsule("unsafe", { readFile: async () => JSON.stringify(unsafe) }),
       ).resolves.toMatchObject({ ok: false });
     }
+  });
+
+  it("prefers the newest structured goal and preserves the original request when unchanged", () => {
+    const changed = extractSessionEvidence(
+      [
+        { type: "message", message: { role: "user", content: "Implement the original goal" } },
+        { type: "compaction", summary: "## Goal\nImplement the revised goal" },
+        { type: "branch_summary", summary: "## Goal\nImplement the current branch goal" },
+      ],
+      "/work/project",
+    );
+    expect(changed.objective).toBe("Implement the current branch goal");
+    expect(changed.exclusions).toContainEqual(
+      expect.objectContaining({ category: "untrusted", count: expect.any(Number) }),
+    );
+
+    const unchanged = extractSessionEvidence(
+      [
+        { type: "message", message: { role: "user", content: "Implement the stable goal" } },
+        { type: "compaction", summary: "## Goal\nImplement the stable goal" },
+      ],
+      "/work/project",
+    );
+    expect(unchanged.objective).toBe("Implement the stable goal");
+  });
+
+  it("reports current structured goal changes as objective drift", async () => {
+    const originalEntries: SessionEntryLike[] = [
+      { type: "message", message: { role: "user", content: "Implement the original goal" } },
+      { type: "compaction", summary: "## Goal\nImplement the original goal" },
+    ];
+    const predecessorResult = await generateCapsule(
+      extractSessionEvidence(originalEntries, "/work/project"),
+      { sessionId: "session-1", cwd: "/work/project", capsuleId: "goal-drift-source" },
+    );
+    if ("error" in predecessorResult) throw new Error(predecessorResult.error.message);
+    const proposal = await proposeCapsuleRefresh(
+      predecessorResult.value,
+      extractSessionEvidence(
+        [
+          ...originalEntries,
+          { type: "branch_summary", summary: "## Goal\nImplement the revised goal" },
+        ],
+        "/work/project",
+      ),
+      { sessionId: "session-1", cwd: "/work/project" },
+    );
+    expect(proposal).toMatchObject({
+      ok: true,
+      value: {
+        successor: { objective: "Implement the revised goal" },
+        drift: { sections: { objective: { status: "changed" } } },
+      },
+    });
   });
 
   it("extracts bounded direct conversation evidence as unknown context", () => {
@@ -443,6 +607,142 @@ describe("Context Capsule application service", () => {
       { path: "src/existing.ts", status: "observed", provenance: "none" },
       { path: "src/new.ts", status: "observed", provenance: "none" },
     ]);
+  });
+
+  it("canonicalizes safe absolute and Windows-style repository paths", () => {
+    const resourceEntries: SessionEntryLike[] = [
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "posix-read",
+              name: "read",
+              arguments: { path: "/work/project/docs/absolute.md" },
+            },
+            {
+              type: "toolCall",
+              id: "posix-write",
+              name: "write",
+              arguments: { path: "/work/project/src/absolute.ts" },
+            },
+            {
+              type: "toolCall",
+              id: "posix-outside",
+              name: "read",
+              arguments: { path: "/work/other/secret.md" },
+            },
+          ],
+        },
+      },
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolCallId: "posix-read",
+          content: "# Absolute evidence",
+          isError: false,
+        },
+      },
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolCallId: "posix-write",
+          content: "written",
+          isError: false,
+        },
+      },
+    ];
+    const posix = extractSessionEvidence(resourceEntries, "/work/project");
+    expect(posix.resources).toContainEqual({
+      kind: "path",
+      value: "docs/absolute.md",
+      detail: "Absolute evidence",
+    });
+    expect(posix.observedChanges).toContainEqual({
+      path: "src/absolute.ts",
+      status: "observed",
+      provenance: "tool-recorded",
+    });
+    expect(posix.resources.some((resource) => resource.value.includes("other"))).toBe(false);
+
+    const windows = extractSessionEvidence(
+      [
+        {
+          type: "message",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "windows-read",
+                name: "read",
+                arguments: { path: "C:\\work\\project\\docs\\windows.md" },
+              },
+              {
+                type: "toolCall",
+                id: "windows-write",
+                name: "write",
+                arguments: { path: "src\\windows.ts" },
+              },
+              {
+                type: "toolCall",
+                id: "windows-outside",
+                name: "read",
+                arguments: { path: "C:\\work\\other\\secret.md" },
+              },
+              {
+                type: "toolCall",
+                id: "windows-drive-relative",
+                name: "read",
+                arguments: { path: "C:ambiguous.md" },
+              },
+              {
+                type: "toolCall",
+                id: "windows-traversal",
+                name: "read",
+                arguments: { path: "..\\outside.md" },
+              },
+            ],
+          },
+        },
+        {
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolCallId: "windows-read",
+            content: "# Windows evidence",
+            isError: false,
+          },
+        },
+        {
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolCallId: "windows-write",
+            content: "written",
+            isError: false,
+          },
+        },
+      ],
+      "C:\\work\\project",
+    );
+    expect(windows.resources).toContainEqual({
+      kind: "path",
+      value: "docs/windows.md",
+      detail: "Windows evidence",
+    });
+    expect(windows.observedChanges).toContainEqual({
+      path: "src/windows.ts",
+      status: "observed",
+      provenance: "tool-recorded",
+    });
+    expect(windows.resources.some((resource) => resource.value.includes("other"))).toBe(false);
+    expect(windows.resources.some((resource) => resource.value.includes("ambiguous"))).toBe(false);
+    expect(windows.resources.some((resource) => resource.value.includes("outside"))).toBe(false);
   });
 
   it("ignores long-form git status prose and parses machine-readable status formats", () => {
@@ -610,6 +910,85 @@ describe("Context Capsule application service", () => {
       "/work/project",
     );
     expect(mixed.validation[0]?.outcome).toBe("failed");
+  });
+
+  it("lets failure evidence override masked zero exits and accepts safe success chains", () => {
+    const cases = [
+      {
+        id: "masked-failure",
+        command: "pnpm test; echo finished",
+        output: "1 failed\nfinished",
+        details: { exitCode: 0 },
+        outcome: "failed",
+      },
+      {
+        id: "tap-failure",
+        command: "pnpm test",
+        output: "not ok 1 - rejects invalid capsule\n1..1",
+        details: { exitCode: 0 },
+        outcome: "failed",
+      },
+      {
+        id: "tap-failure-without-details",
+        command: "pnpm test",
+        output: "not ok 1 - rejects invalid capsule\n1..1",
+        details: undefined,
+        outcome: "failed",
+      },
+      {
+        id: "masked-ambiguous",
+        command: "pnpm test; echo finished",
+        output: "finished",
+        details: { exitCode: 0 },
+        outcome: "unknown",
+      },
+      {
+        id: "masked-text-success",
+        command: "pnpm test; echo success",
+        output: "success",
+        details: undefined,
+        outcome: "unknown",
+      },
+      {
+        id: "safe-chain",
+        command: "pnpm test && pnpm lint && pnpm typecheck",
+        output: "completed",
+        details: { exitCode: 0 },
+        outcome: "passed",
+      },
+    ] as const;
+    const snapshot = extractSessionEvidence(
+      cases.flatMap((testCase) => [
+        {
+          type: "message" as const,
+          message: {
+            role: "assistant" as const,
+            content: [
+              {
+                type: "toolCall" as const,
+                id: testCase.id,
+                name: "bash",
+                arguments: { command: testCase.command },
+              },
+            ],
+          },
+        },
+        {
+          type: "message" as const,
+          message: {
+            role: "toolResult" as const,
+            toolCallId: testCase.id,
+            content: testCase.output,
+            details: testCase.details,
+            isError: false,
+          },
+        },
+      ]),
+      "/work/project",
+    );
+    expect(snapshot.validation.map((value) => value.outcome)).toEqual(
+      cases.map((value) => value.outcome),
+    );
   });
 
   it("never reports ambiguous or interrupted validation as passed", () => {
@@ -899,130 +1278,155 @@ describe("Context Capsule application service", () => {
       expect.objectContaining({ customType: CONTEXT_CAPSULE_PINS_ENTRY }),
     );
     expect(harness.notifications.at(-1)?.message).toContain("selection is stale");
+
+    harness.setSessionId("session-1");
+    state.lastPreview = firstCapsule;
+    await handleCapsuleCommand("pins select", harness.context, state, dependencies);
+    harness.setLeafId("other-branch-leaf");
+    await handleCapsuleCommand("pins confirm 1", harness.context, state, dependencies);
+    expect(harness.branch).not.toContainEqual(
+      expect.objectContaining({ customType: CONTEXT_CAPSULE_PINS_ENTRY }),
+    );
+    expect(harness.notifications.at(-1)?.message).toContain("selection is stale");
   });
 
-  it("uses the latest pin state for every compaction and revokes removed projections", async () => {
+  it("rechecks the selected leaf after confirmation and before pin persistence", async () => {
+    const capsule = await createCapsule({ capsuleId: "confirm-navigation" });
+    const harness = commandContext({ confirm: true });
+    const state: CapsuleCommandState = { lastPreview: capsule };
+    const dependencies = { load: vi.fn(), save: vi.fn() };
+    await handleCapsuleCommand("pins select", harness.context, state, dependencies);
+    harness.context.ui.confirm = vi.fn(async () => {
+      harness.setLeafId("navigated-during-confirmation");
+      return true;
+    });
+
+    await handleCapsuleCommand("pins confirm 1", harness.context, state, dependencies);
+
+    expect(harness.branch).not.toContainEqual(
+      expect.objectContaining({ customType: CONTEXT_CAPSULE_PINS_ENTRY }),
+    );
+    expect(state.pendingFacts).toBeUndefined();
+    expect(harness.notifications.at(-1)).toMatchObject({
+      message: expect.stringContaining("selection is stale"),
+      level: "error",
+    });
+  });
+
+  it("rechecks the active branch before removing persisted pins", async () => {
+    const capsule = await createCapsule({ capsuleId: "remove-navigation" });
+    const fact = selectCapsuleFacts(capsule)[0];
+    const pinned = pinCapsuleFacts({ version: 1, pins: [] }, [fact]);
+    if (!pinned.ok) throw new Error("pin setup failed");
+    const branch: SessionEntryLike[] = [
+      { type: "custom", customType: CONTEXT_CAPSULE_PINS_ENTRY, data: pinned.value },
+    ];
+    const harness = commandContext({ confirm: true, branch });
+    harness.context.ui.confirm = vi.fn(async () => {
+      harness.setLeafId("navigated-during-removal");
+      return true;
+    });
+
+    await handleCapsuleCommand(
+      "pins remove 1",
+      harness.context,
+      {},
+      { load: vi.fn(), save: vi.fn() },
+    );
+
+    expect(readCapsulePinState(branch)).toEqual(pinned.value);
+    expect(branch).toHaveLength(1);
+    expect(harness.notifications.at(-1)).toMatchObject({
+      message: expect.stringContaining("active branch changed"),
+      level: "error",
+    });
+  });
+
+  it("preserves native compaction and projects only the latest pins into model context", async () => {
     const capsule = await createCapsule({ capsuleId: "compaction-pins" });
     const facts = selectCapsuleFacts(capsule);
     const first = pinCapsuleFacts({ version: 1, pins: [] }, [facts[0]]);
     if (!first.ok) throw new Error("pin setup failed");
     const second = pinCapsuleFacts({ version: 1, pins: [] }, [facts[4]]);
     if (!second.ok) throw new Error("pin setup failed");
-    const branch: SessionEntryLike[] = [
-      { type: "custom", customType: CONTEXT_CAPSULE_PINS_ENTRY, data: first.value },
-    ];
-    const handlers: Array<(event: unknown, context: unknown) => Promise<unknown>> = [];
+    const branch: SessionEntryLike[] = [];
+    const handlers = new Map<string, (event: any, context: any) => Promise<any> | any>();
     const pi = {
       registerCommand: vi.fn(),
-      on: vi.fn(
-        (event: string, handler: (event: unknown, context: unknown) => Promise<unknown>) => {
-          if (event === "session_before_compact") handlers.push(handler);
-        },
-      ),
+      on: vi.fn((event: string, handler: (event: any, context: any) => Promise<any> | any) => {
+        handlers.set(event, handler);
+      }),
     };
     contextCapsuleExtension(pi as never);
-    vi.mocked(compact).mockImplementation(async (preparation) => ({
-      summary: "normal summary",
-      firstKeptEntryId: preparation.firstKeptEntryId,
-      tokensBefore: preparation.tokensBefore,
-      details: preparation.fileOps,
-    }));
-    const context = {
-      model: { id: "test-model" },
-      modelRegistry: { getApiKeyAndHeaders: vi.fn(async () => ({ ok: true as const })) },
-      sessionManager: { getBranch: () => branch },
-    };
-    const preparation = {
-      firstKeptEntryId: "kept",
-      messagesToSummarize: [
-        {
-          role: "custom",
-          customType: CONTEXT_CAPSULE_PINS_MESSAGE,
-          content: capsulePinsPrompt(first.value),
-        },
-        {
-          role: "user",
-          content: "ordinary ## Confirmed Context Capsule facts marker text",
-        },
-        { role: "user", content: "ordinary history" },
-      ],
-      turnPrefixMessages: [],
-      isSplitTurn: false,
-      tokensBefore: 123,
-      previousSummary: `old summary\n${composePinnedCompactionSummary("", first.value)}`,
-      fileOps: { readFiles: [], modifiedFiles: [] },
-      settings: {},
-    };
-    const compactEvent = {
-      preparation,
-      customInstructions: undefined,
-      signal: new AbortController().signal,
-    };
-    const firstResult = await handlers[0](compactEvent, context);
-    expect(firstResult).toMatchObject({
-      compaction: {
-        firstKeptEntryId: "kept",
-        tokensBefore: 123,
-        summary: expect.stringContaining(facts[0].statement),
+    const contextHandler = handlers.get("context");
+    expect(contextHandler).toBeTypeOf("function");
+    expect(handlers.has("session_before_compact")).toBe(false);
+
+    const normalMessages = [{ role: "user", content: "ordinary history" }];
+    expect(await contextHandler?.({ messages: normalMessages }, { sessionManager: { getBranch: () => branch } })).toBeUndefined();
+    expect(compact).not.toHaveBeenCalled();
+
+    branch.push({ type: "custom", customType: CONTEXT_CAPSULE_PINS_ENTRY, data: first.value });
+    const legacySummary = composePinnedCompactionSummary("normal summary", first.value);
+    const firstResult = await contextHandler?.(
+      {
+        messages: [
+          { role: "compactionSummary", summary: legacySummary, tokensBefore: 123 },
+          {
+            role: "custom",
+            customType: CONTEXT_CAPSULE_PINS_MESSAGE,
+            content: capsulePinsPrompt({ version: 1, pins: [] }),
+          },
+          ...normalMessages,
+        ],
       },
-    });
-    expect(vi.mocked(compact).mock.calls[0][0].messagesToSummarize).toHaveLength(2);
-    expect(vi.mocked(compact).mock.calls[0][0].messagesToSummarize).toContainEqual(
+      { sessionManager: { getBranch: () => branch } },
+    );
+    expect(firstResult.messages).toContainEqual(
       expect.objectContaining({
-        content: "ordinary ## Confirmed Context Capsule facts marker text",
+        role: "compactionSummary",
+        summary: "normal summary",
+        tokensBefore: 123,
       }),
     );
+    const firstProjections = firstResult.messages.filter(
+      (message: any) => message.customType === CONTEXT_CAPSULE_PINS_MESSAGE,
+    );
+    expect(firstProjections).toHaveLength(1);
+    expect(firstProjections[0].content).toContain(facts[0].statement);
 
     branch.push({
       type: "custom",
       customType: CONTEXT_CAPSULE_PINS_ENTRY,
       data: { version: 1, pins: [] },
     });
-    const removedResult = await handlers[0](
-      {
-        ...compactEvent,
-        preparation: { ...preparation, previousSummary: (firstResult as any).compaction.summary },
-      },
-      context,
-    );
-    expect((removedResult as any).compaction.summary).not.toContain(facts[0].statement);
-
-    branch.push({ type: "custom", customType: CONTEXT_CAPSULE_PINS_ENTRY, data: second.value });
-    const replacedResult = await handlers[0](
-      {
-        ...compactEvent,
-        reason: "overflow",
-        willRetry: true,
-        preparation: { ...preparation, previousSummary: (removedResult as any).compaction.summary },
-      },
-      context,
-    );
-    expect((replacedResult as any).compaction.summary).toContain(facts[4].statement);
-    expect((replacedResult as any).compaction.summary).not.toContain(facts[0].statement);
-    expect(stripPinnedCompactionSummary((replacedResult as any).compaction.summary)).toBe(
-      "normal summary",
-    );
-
-    const repeatedResult = await handlers[0](
-      {
-        ...compactEvent,
-        reason: "threshold",
-        preparation: {
-          ...preparation,
-          previousSummary: (replacedResult as any).compaction.summary,
-        },
-      },
-      context,
-    );
-    expect((repeatedResult as any).compaction.summary).toBe(
-      (replacedResult as any).compaction.summary,
+    const removedResult = await contextHandler?.(
+      { messages: firstResult.messages },
+      { sessionManager: { getBranch: () => branch } },
     );
     expect(
-      readCapsulePinState([
-        ...branch,
-        { type: "compaction", summary: (repeatedResult as any).compaction.summary },
-      ]),
-    ).toEqual(second.value);
+      removedResult.messages.some(
+        (message: any) => message.customType === CONTEXT_CAPSULE_PINS_MESSAGE,
+      ),
+    ).toBe(false);
+    expect(JSON.stringify(removedResult.messages)).not.toContain(facts[0].statement);
+
+    branch.push({ type: "custom", customType: CONTEXT_CAPSULE_PINS_ENTRY, data: second.value });
+    const replacedResult = await contextHandler?.(
+      { messages: removedResult.messages },
+      { sessionManager: { getBranch: () => branch } },
+    );
+    const repeatedResult = await contextHandler?.(
+      { messages: replacedResult.messages },
+      { sessionManager: { getBranch: () => branch } },
+    );
+    const repeatedProjections = repeatedResult.messages.filter(
+      (message: any) => message.customType === CONTEXT_CAPSULE_PINS_MESSAGE,
+    );
+    expect(repeatedProjections).toHaveLength(1);
+    expect(repeatedProjections[0].content).toContain(facts[4].statement);
+    expect(JSON.stringify(repeatedResult.messages)).not.toContain(facts[0].statement);
+    expect(compact).not.toHaveBeenCalled();
   });
 
   it("round trips through deterministic canonical JSON and renders every section", async () => {
@@ -1377,9 +1781,41 @@ describe("Context Capsule application service", () => {
       ok: false,
       error: { code: "unsafe" },
     });
+    expect(validateCapsule({ ...capsule, revision: Number.MAX_SAFE_INTEGER + 1 })).toMatchObject({
+      ok: false,
+      error: { code: "malformed", field: "revision" },
+    });
+    expect(
+      validateCapsule({
+        ...capsule,
+        predecessor: {
+          capsuleId: capsule.capsuleId,
+          revision: Number.MAX_SAFE_INTEGER + 1,
+        },
+      }),
+    ).toMatchObject({ ok: false, error: { code: "malformed", field: "predecessor" } });
+    expect(
+      validateCapsule({
+        ...capsule,
+        exclusions: [{ category: "oversized", count: Number.MAX_SAFE_INTEGER + 1 }],
+      }),
+    ).toMatchObject({ ok: false, error: { code: "malformed", field: "exclusions" } });
     expect(parseCapsule("x".repeat(CAPSULE_MAX_BYTES + 1))).toMatchObject({
       ok: false,
       error: { code: "oversized" },
+    });
+  });
+
+  it("rejects refresh when the predecessor revision cannot be incremented safely", async () => {
+    const predecessor = await createCapsule({ revision: Number.MAX_SAFE_INTEGER });
+    const result = await proposeCapsuleRefresh(
+      predecessor,
+      extractSessionEvidence(entries, "/work/project"),
+      { sessionId: "session-2", cwd: "/work/project" },
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: "malformed", field: "revision" },
     });
   });
 
@@ -1454,6 +1890,47 @@ describe("/capsule command", () => {
     expect(harness.context.newSession).not.toHaveBeenCalled();
     expect(harness.notifications.at(-1)?.message).toContain("## Objective");
   });
+
+  it.each(["preview", "save", "refresh capsule-1"])(
+    "cancels %s generation at the command boundary without side effects",
+    async (command) => {
+      const harness = commandContext({ confirm: true });
+      let releaseIdle: (() => void) | undefined;
+      let terminalInput: ((data: string) => { consume?: boolean } | undefined) | undefined;
+      harness.context.waitForIdle = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseIdle = resolve;
+          }),
+      );
+      harness.context.ui.onTerminalInput = vi.fn((handler) => {
+        terminalInput = handler;
+        return vi.fn();
+      });
+      const existing = await createCapsule({ capsuleId: "existing-command-state" });
+      const state = { lastPreview: existing };
+      const save = vi.fn();
+      const operation = handleCapsuleCommand(command, harness.context, state, {
+        load: vi.fn(async () => ({ ok: true as const, value: await createCapsule() })),
+        save,
+      });
+
+      await vi.waitFor(() => expect(terminalInput).toBeTypeOf("function"));
+      expect(terminalInput?.("\u001b")).toEqual({ consume: true });
+      await operation;
+      releaseIdle?.();
+
+      expect(state).toEqual({ lastPreview: existing });
+      expect(save).not.toHaveBeenCalled();
+      expect(harness.context.ui.confirm).not.toHaveBeenCalled();
+      expect(harness.context.newSession).not.toHaveBeenCalled();
+      expect(harness.notifications.at(-1)).toMatchObject({
+        message: expect.stringContaining("cancelled"),
+        level: "info",
+      });
+      expect(harness.notifications.at(-1)?.message).not.toContain("failed");
+    },
+  );
 
   it("cancels save before filesystem persistence", async () => {
     const harness = commandContext({ confirm: false });

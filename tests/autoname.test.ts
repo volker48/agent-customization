@@ -181,6 +181,12 @@ describe("autoname extension", () => {
               },
               {
                 type: "toolCall",
+                id: "absolute-read",
+                name: "read",
+                arguments: { path: "/work/agent-customization/docs/absolute.md" },
+              },
+              {
+                type: "toolCall",
                 id: "edit-1",
                 name: "edit",
                 arguments: { path: "src/search.ts", newText: "PRIVATE SOURCE" },
@@ -203,6 +209,15 @@ describe("autoname extension", () => {
             role: "toolResult",
             toolCallId: "read-1",
             content: [{ type: "text", text: "# Search Result Caching\n\nSECRET BODY" }],
+          },
+        },
+        {
+          type: "message",
+          id: "absolute-read-result",
+          message: {
+            role: "toolResult",
+            toolCallId: "absolute-read",
+            content: [{ type: "text", text: "# Absolute Resource\n\nPRIVATE ABSOLUTE BODY" }],
           },
         },
         {
@@ -231,6 +246,7 @@ describe("autoname extension", () => {
     expect(transcript).toContain("Project: agent-customization");
     expect(transcript).toContain("Task:\nRead issue 14 and implement it");
     expect(transcript).toContain("read: docs/issue-14.md — Search Result Caching");
+    expect(transcript).toContain("read: docs/absolute.md — Absolute Resource");
     expect(transcript).toContain("edit: src/search.ts");
     expect(transcript).toContain("Issue #14: Cache Search Results");
     expect(transcript).toContain("Outcome:\nImplemented issue 14 caching.");
@@ -267,6 +283,14 @@ describe("autoname extension", () => {
                 id: "web-1",
                 name: "webfetch",
                 arguments: { url: "https://user:pass@example.com/docs?q=secret#token" },
+              },
+              {
+                type: "toolCall",
+                id: "gitlab-secret-url",
+                name: "webfetch",
+                arguments: {
+                  url: "https://gitlab.example/api/glpat-abcdefghijklmnopqrstuvwxyz",
+                },
               },
             ],
           },
@@ -308,6 +332,7 @@ describe("autoname extension", () => {
     expect(transcript).not.toContain("q=secret");
     expect(transcript).not.toContain("Private page content");
     expect(transcript).not.toContain("Plain Output Must Stay Private");
+    expect(transcript).not.toContain("glpat-abcdefghijklmnopqrstuvwxyz");
   });
 
   it("strips only complete leading expanded skill blocks", () => {

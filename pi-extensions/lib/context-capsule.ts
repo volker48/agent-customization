@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { chmod, link, mkdir, open, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, extname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
+import { dirname, extname, join, posix, win32 } from "node:path";
 
 export const CONTEXT_CAPSULE_SCHEMA = 1 as const;
 export const CAPSULE_MAX_BYTES = 32 * 1024;
@@ -209,19 +209,48 @@ function hasControl(value: string): boolean {
 // These patterns are deliberately conservative: a false positive is preferable to
 // carrying a credential into a portable artifact. PEMs and URLs are matched across
 // lines before whitespace normalization so no fragment can survive redaction.
-const SECRET_ASSIGNMENT =
-  /(?:\b(?:api[_-]?key|access[_-]?(?:key|token)|refresh[_-]?token|id[_-]?token|token|password|passwd|secret|credential|client[_-]?secret|aws[_-]?(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key)|google[_-]?application[_-]?credentials|azure[_-]?(?:client[_-]?secret|tenant[_-]?id)|[a-z][a-z0-9]*(?:_[a-z0-9]+)*_(?:token|secret|password|api[_-]?key|access[_-]?key|credential))\b|--(?:token|password|api-key|secret)\b)\s*(?:=|:)?\s+((?:\[REDACTED(?: SECRET)?\]|"[^"]*"|'[^']*'|(?!\[REDACTED(?: SECRET)?\])[^\s,;]+))|(?:\b(?:api[_-]?key|access[_-]?(?:key|token)|refresh[_-]?token|id[_-]?token|token|password|passwd|secret|credential|client[_-]?secret|aws[_-]?(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key)|[a-z][a-z0-9]*(?:_[a-z0-9]+)*_(?:token|secret|password|api[_-]?key|access[_-]?key|credential))\b)\s*(?:=|:)\s*((?:\[REDACTED(?: SECRET)?\]|"[^"]*"|'[^']*'|(?!\[REDACTED(?: SECRET)?\])[^\s,;]+))/gi;
+const SECRET_KEY_NAME = String.raw`(?:api[_-]?key|access[_-]?(?:key|token)|refresh[_-]?token|id[_-]?token|authorization|token|password|passwd|secret|credential|client[_-]?secret|aws[_-]?(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key)|google[_-]?application[_-]?credentials|azure[_-]?(?:client[_-]?secret|tenant[_-]?id)|[a-z][a-z0-9]*(?:_[a-z0-9]+)*_(?:token|secret|password|api[_-]?key|access[_-]?key|credential))`;
+const SECRET_VALUE = String.raw`(?:\[REDACTED(?: SECRET)?\]|"[^"]*"|'[^']*'|(?!\[REDACTED(?: SECRET)?\])[^\s,;]+)`;
+const SECRET_ASSIGNMENT = new RegExp(
+  String.raw`(?:(?:["']?\b${SECRET_KEY_NAME}\b["']?)\s*(?:(?:=|:)\s*|\s+)|--(?:token|password|api-key|secret)\b\s*(?:(?:=|:)\s*|\s+))(${SECRET_VALUE})`,
+  "gi",
+);
 const PEM_PRIVATE_KEY =
   /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/gi;
 const PEM_REMAINDER = /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*$/i;
-const AUTHORIZATION_CREDENTIAL = /\b(?:authorization\s*:\s*|bearer\s+)(?:bearer\s+)?[^\s,;]+/gi;
+const AUTHORIZATION_CREDENTIAL = /\bauthorization\s*:[^\r\n]*|\bbearer\s+[^\s,;]+/gi;
 const CREDENTIAL_URL = /([a-z][a-z\d+.-]*:\/\/)([^\s/@]+)@/gi;
 const JWT = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
 const SECRET_MARKERS = [
   /\bgh[opusr]_[A-Za-z0-9_]{20,}\b/g,
   /\bsk-[A-Za-z0-9_-]{20,}\b/g,
   /\bAKIA[0-9A-Z]{16}\b/g,
+  /\bgl(?:pat|dt|rt|cbt|ptt|ft)-[A-Za-z0-9_-]{20,}\b/g,
 ];
+
+function isCanonicalAuthorizationRedaction(value: string): boolean {
+  return (
+    /^authorization\s*:\s*\[REDACTED\]\s*$/i.test(value) ||
+    /^bearer\s+\[REDACTED\]\s*$/i.test(value)
+  );
+}
+
+function containsSecretMarker(value: string): boolean {
+  return SECRET_MARKERS.some((pattern) => {
+    pattern.lastIndex = 0;
+    return pattern.test(value);
+  });
+}
+
+function containsPercentEncodedSecretMarker(value: string): boolean {
+  // `%25` is an encoded percent sign. Consuming any `%25` chain before
+  // the final byte decodes arbitrarily nested ASCII percent encoding in
+  // one bounded pass instead of imposing a bypassable decode-depth limit.
+  const decoded = value.replace(/%(?:25)*([0-9a-f]{2})/gi, (_match, hex: string) =>
+    String.fromCharCode(Number.parseInt(hex, 16)),
+  );
+  return decoded !== value && containsSecretMarker(decoded);
+}
 
 function containsSensitiveValue(value: string): boolean {
   if (PEM_PRIVATE_KEY.test(value) || PEM_REMAINDER.test(value) || JWT.test(value)) {
@@ -235,7 +264,7 @@ function containsSensitiveValue(value: string): boolean {
   AUTHORIZATION_CREDENTIAL.lastIndex = 0;
   if (
     [...value.matchAll(AUTHORIZATION_CREDENTIAL)].some(
-      (match) => !/\[REDACTED(?: [^\]]+)?\]/i.test(match[0]),
+      (match) => !isCanonicalAuthorizationRedaction(match[0]),
     )
   ) {
     AUTHORIZATION_CREDENTIAL.lastIndex = 0;
@@ -253,16 +282,16 @@ function containsSensitiveValue(value: string): boolean {
       0;
   SECRET_ASSIGNMENT.lastIndex = 0;
   for (const match of value.matchAll(SECRET_ASSIGNMENT)) {
-    const secretValue = match[1] ?? match[2];
+    const secretValue = match[1];
     if (secretValue !== "[REDACTED]" && secretValue !== "[REDACTED SECRET]") return true;
   }
-  return SECRET_MARKERS.some((pattern) => {
-    pattern.lastIndex = 0;
-    return pattern.test(value);
-  });
+  return containsSecretMarker(value) || containsPercentEncodedSecretMarker(value);
 }
 
 function redactSensitive(value: string): { value: string; count: number } {
+  if (containsPercentEncodedSecretMarker(value)) {
+    return { value: "[REDACTED SECRET]", count: 1 };
+  }
   let count = 0;
   let redacted = value.replace(PEM_PRIVATE_KEY, () => {
     count += 1;
@@ -277,7 +306,7 @@ function redactSensitive(value: string): { value: string; count: number } {
     return `${scheme}[REDACTED]@`;
   });
   redacted = redacted.replace(AUTHORIZATION_CREDENTIAL, (match) => {
-    if (/\[REDACTED\]/i.test(match)) return match;
+    if (isCanonicalAuthorizationRedaction(match)) return match;
     count += 1;
     const prefix = /^(authorization\s*:\s*)/i.exec(match)?.[1] ?? "Bearer ";
     return `${prefix}[REDACTED]`;
@@ -287,8 +316,7 @@ function redactSensitive(value: string): { value: string; count: number } {
     return "[REDACTED JWT]";
   });
   SECRET_ASSIGNMENT.lastIndex = 0;
-  redacted = redacted.replace(SECRET_ASSIGNMENT, (match, first: string, second: string) => {
-    const secretValue = first ?? second;
+  redacted = redacted.replace(SECRET_ASSIGNMENT, (match, secretValue: string) => {
     if (secretValue === "[REDACTED]" || secretValue === "[REDACTED SECRET]") return match;
     count += 1;
     // Preserve the option/name while replacing only its value.
@@ -347,6 +375,14 @@ function safeUrl(value: unknown): string | undefined {
     url.password = "";
     url.search = "";
     url.hash = "";
+    let decodedPath = url.pathname;
+    try {
+      decodedPath = decodeURIComponent(decodedPath);
+    } catch {
+      return undefined;
+    }
+    if (containsSensitiveValue(url.pathname) || containsSensitiveValue(decodedPath))
+      return undefined;
     return url.toString();
   } catch {
     return undefined;
@@ -355,30 +391,52 @@ function safeUrl(value: unknown): string | undefined {
 
 function isIgnoredCapsulePath(path: string): boolean {
   const segments = path.split(/[\\/]/);
-  return (
-    path.includes("\\") ||
-    segments.some(
-      (segment) =>
-        [".git", ".env", "node_modules"].includes(segment) || segment.startsWith(".env."),
-    )
-  );
+  return segments.some((segment) => {
+    const normalized = segment.toLowerCase();
+    return [".git", ".env", "node_modules"].includes(normalized) || normalized.startsWith(".env.");
+  });
+}
+
+function isWindowsAbsolutePath(value: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
+}
+
+function isWindowsDriveRelativePath(value: string): boolean {
+  return /^[A-Za-z]:(?![\\/])/.test(value);
 }
 
 function capsulePath(value: unknown, cwd: string): string | undefined {
   if (typeof value !== "string" || value.length > MAX_PATH || hasControl(value)) return undefined;
   const candidate = value.trim().replace(/^@/, "");
-  if (!candidate || isAbsolute(candidate) || isIgnoredCapsulePath(candidate)) return undefined;
-  const normalized = relative(cwd, resolve(cwd, candidate));
+  if (!candidate || isWindowsDriveRelativePath(candidate) || isIgnoredCapsulePath(candidate)) {
+    return undefined;
+  }
+
+  const windowsCwd = isWindowsAbsolutePath(cwd);
+  const windowsCandidate = isWindowsAbsolutePath(candidate);
+  if (windowsCwd !== windowsCandidate && (windowsCwd || windowsCandidate)) {
+    // Absolute paths from a different platform/root cannot be proven to be inside cwd.
+    if (windowsCandidate || posix.isAbsolute(candidate)) return undefined;
+  }
+
+  const pathApi = windowsCwd ? win32 : posix;
+  const root = windowsCwd ? cwd.replaceAll("/", "\\") : cwd.replaceAll("\\", "/");
+  const input = windowsCwd ? candidate.replaceAll("/", "\\") : candidate.replaceAll("\\", "/");
+  if (!pathApi.isAbsolute(root)) return undefined;
+  const absolute = pathApi.isAbsolute(input)
+    ? pathApi.normalize(input)
+    : pathApi.resolve(root, input);
+  const normalized = pathApi.relative(pathApi.normalize(root), absolute);
   if (
     !normalized ||
     normalized === ".." ||
-    normalized.startsWith(`..${sep}`) ||
-    isAbsolute(normalized) ||
+    normalized.startsWith(`..${pathApi.sep}`) ||
+    pathApi.isAbsolute(normalized) ||
     isIgnoredCapsulePath(normalized)
   ) {
     return undefined;
   }
-  return normalize(normalized);
+  return normalized.split(pathApi.sep).join("/");
 }
 
 function resourcePath(value: unknown, cwd: string): string | undefined {
@@ -547,6 +605,24 @@ function firstUserObjective(
   return undefined;
 }
 
+function currentStructuredObjective(
+  summaries: readonly string[],
+  exclusions: CapsuleExclusion[],
+): string | undefined {
+  for (let index = summaries.length - 1; index >= 0; index -= 1) {
+    const goal = section(summaries[index], ["Goal"]).join(" ");
+    if (!goal) continue;
+    const sanitized = sanitizeText(goal, MAX_TEXT);
+    addExclusion(exclusions, "secret", sanitized.redactions);
+    addExclusion(exclusions, "oversized", sanitized.truncated ? 1 : 0);
+    if (sanitized.value) {
+      addExclusion(exclusions, "untrusted");
+      return sanitized.value;
+    }
+  }
+  return undefined;
+}
+
 function safeSummaryItems(
   values: string[],
   exclusions: CapsuleExclusion[],
@@ -563,24 +639,28 @@ function safeSummaryItems(
   return output.slice(0, max);
 }
 
-function validationOutcome(result: SessionEntryLike | undefined): CapsuleValidation["outcome"] {
+function commandCanMaskValidationFailure(command: string): boolean {
+  const withoutSafeAnd = command.replaceAll("&&", "");
+  return /[;|&\n\r`]/.test(withoutSafeAnd) || command.includes("$(");
+}
+
+function validationOutcome(
+  result: SessionEntryLike | undefined,
+  command: string,
+): CapsuleValidation["outcome"] {
   if (!result) return "unknown";
   const details = result.message?.details;
   const output = textParts(result.message?.content).join("\n");
-  if (isRecord(details)) {
-    if (details.killed === true || details.interrupted === true || details.signal !== undefined) {
-      return "blocked";
-    }
-    if (typeof details.exitCode === "number") return details.exitCode === 0 ? "passed" : "failed";
-  }
   if (
+    (isRecord(details) &&
+      (details.killed === true || details.interrupted === true || details.signal !== undefined)) ||
     /\b(?:killed|interrupted|terminated|timed out|timeout|cancelled|canceled|aborted)\b/i.test(
       output,
     )
   ) {
     return "blocked";
   }
-  if (result.message?.isError) return "failed";
+
   const hasExplicitSuccess =
     /\b(?:exit(?:ed)?|status|code)\s*[:=]?\s*0\b/i.test(output) ||
     /\b(?:passed|pass|success(?:ful)?|completed successfully|all tests? passed|ok)\b/i.test(
@@ -590,19 +670,21 @@ function validationOutcome(result: SessionEntryLike | undefined): CapsuleValidat
     /\b0\s+(?:failed|failures?|errors?)\b/i.test(output) ||
     /\bno\s+failures?\b/i.test(output);
   const hasNonZeroFailure =
+    /\bnot\s+ok\b/i.test(output) ||
     /command exited with code [1-9]\d*/i.test(output) ||
-    /\b[1-9]\d*\s+(?:failed|failures?|errors?)\b/i.test(output);
+    /\b[1-9]\d*\s+(?:failed|failures?|errors?)\b/i.test(output) ||
+    /\b(?:failed|failures?|errors?)\s*[:=]\s*[1-9]\d*\b/i.test(output);
   const failureEvidence = output
     .replace(/\b0\s+(?:failed|failures?|errors?)\b/gi, "")
     .replace(/\bno\s+failures?\b/gi, "");
-  if (
-    hasExplicitSuccess &&
-    !hasNonZeroFailure &&
-    !/\b(?:failed|failure|error)\b/i.test(failureEvidence)
-  ) {
-    return "passed";
+  const hasFailure = hasNonZeroFailure || /\b(?:failed|failure|error)\b/i.test(failureEvidence);
+  if (hasFailure || result.message?.isError) return "failed";
+
+  if (isRecord(details) && typeof details.exitCode === "number") {
+    if (details.exitCode !== 0) return "failed";
+    return commandCanMaskValidationFailure(command) ? "unknown" : "passed";
   }
-  if (hasNonZeroFailure || /\b(?:failed|failure|error)\b/i.test(output)) return "failed";
+  if (hasExplicitSuccess) return commandCanMaskValidationFailure(command) ? "unknown" : "passed";
   return "unknown";
 }
 
@@ -760,13 +842,16 @@ export function extractSessionEvidence(
     addExclusion(exclusions, "secret", command.redactions);
     addExclusion(exclusions, "oversized", command.truncated ? 1 : 0);
     if (!command.value) continue;
-    const outcome = validationOutcome(results.get(call.id));
+    const result = results.get(call.id);
+    const outcome = validationOutcome(result, call.arguments.command);
     validation.push({
       command: command.value,
       outcome,
       evidence:
         outcome === "unknown"
-          ? "No matching tool result was observed."
+          ? result
+            ? "Observed tool result was inconclusive."
+            : "No matching tool result was observed."
           : `Observed tool result: ${outcome}.`,
       ...(call.timestamp ? { observedAt: call.timestamp } : {}),
     });
@@ -785,8 +870,11 @@ export function extractSessionEvidence(
   addExclusion(exclusions, "oversized", Math.max(0, observedChanges.length - CAPSULE_MAX_ENTRIES));
   addExclusion(exclusions, "oversized", Math.max(0, validation.length - CAPSULE_MAX_ENTRIES));
 
+  const originalObjective = firstUserObjective(entries, exclusions);
+  const structuredObjective = currentStructuredObjective(summaries, exclusions);
+
   return {
-    objective: firstUserObjective(entries, exclusions),
+    objective: structuredObjective ?? originalObjective,
     constraints,
     decisions: decisionStatements.map((statement) => ({ statement, status: "unknown" })),
     resources: resources.slice(0, CAPSULE_MAX_ENTRIES),
@@ -1524,6 +1612,9 @@ export async function proposeCapsuleRefresh(
   if (options.signal?.aborted) {
     return fail("cancelled", "Capsule refresh was cancelled before side effects.");
   }
+  if (predecessor.revision >= Number.MAX_SAFE_INTEGER) {
+    return fail("malformed", "Capsule revision cannot be incremented safely.", "revision");
+  }
   const generated = await generateCapsule(snapshot, {
     ...options,
     revision: predecessor.revision + 1,
@@ -1703,8 +1794,8 @@ export function validateCapsule(input: unknown): CapsuleResult<Capsule> {
   if (!validCapsuleId(input.capsuleId)) {
     return fail("malformed", "capsuleId must be a non-empty safe string.", "capsuleId");
   }
-  if (!Number.isInteger(input.revision) || (input.revision as number) < 1) {
-    return fail("malformed", "revision must be a positive integer.", "revision");
+  if (!Number.isSafeInteger(input.revision) || (input.revision as number) < 1) {
+    return fail("malformed", "revision must be a positive safe integer.", "revision");
   }
   if (!validIsoDate(input.createdAt)) {
     return fail("malformed", "createdAt must be an ISO timestamp.", "createdAt");
@@ -1730,7 +1821,7 @@ export function validateCapsule(input: unknown): CapsuleResult<Capsule> {
       !isRecord(input.predecessor) ||
       !hasOnlyKeys(input.predecessor, ["capsuleId", "revision"]) ||
       !validCapsuleId(input.predecessor.capsuleId) ||
-      !Number.isInteger(input.predecessor.revision) ||
+      !Number.isSafeInteger(input.predecessor.revision) ||
       (input.predecessor.revision as number) < 1
     ) {
       return fail(
@@ -1842,7 +1933,7 @@ export function validateCapsule(input: unknown): CapsuleResult<Capsule> {
         "unsupported",
         "untrusted",
       ].includes(value.category as string) ||
-      !Number.isInteger(value.count) ||
+      !Number.isSafeInteger(value.count) ||
       (value.count as number) < 1
     ) {
       return fail("malformed", "Invalid exclusion metadata entry.", "exclusions");
