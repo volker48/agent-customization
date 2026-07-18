@@ -63,5 +63,8 @@ export function resultLogDetails(result: FusionResult): Record<string, unknown> 
     successCount: result.responses.filter((response) => response.status === "ok").length,
     error: result.error,
     confidence: result.confidence,
+    capsuleRevision: result.capsule
+      ? `${result.capsule.capsuleId}@${result.capsule.revision}`
+      : undefined,
   };
 }

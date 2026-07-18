@@ -1,13 +1,24 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import type { ClaudeReviewOptions, ReviewLevel } from "./args.js";
+import type { ClaudeReviewCapsuleProvenance, ClaudeReviewOptions, ReviewLevel } from "./args.js";
 
 export const JOB_STORE_ENV = "PI_CLAUDE_REVIEW_JOB_DIR";
 export const JOB_BACKEND = "claude-bg";
 export const JOB_SESSION_NAME_PREFIX = "pi-claude-review:";
+export const JOB_STORE_DIRECTORY_MODE = 0o700;
+export const JOB_FILE_MODE = 0o600;
 
 export type ClaudeReviewJobStatus =
   | "queued"
@@ -29,6 +40,7 @@ export interface ClaudeReviewJob {
   level: ReviewLevel;
   contextMessage: string;
   autoFix: boolean;
+  capsuleProvenance?: ClaudeReviewCapsuleProvenance;
   prompt: string;
   claudeSessionId?: string;
   claudeSessionName: string;
@@ -49,7 +61,7 @@ export interface ClaudeReviewJob {
 
 export interface CreateClaudeReviewJobInput {
   cwd: string;
-  options: Pick<ClaudeReviewOptions, "autoFix" | "contextMessage" | "level">;
+  options: Pick<ClaudeReviewOptions, "autoFix" | "contextMessage" | "level" | "capsuleProvenance">;
   prompt: string;
 }
 
@@ -88,8 +100,38 @@ function jobPath(id: string): string {
   return join(jobStoreDir(), `${id}.json`);
 }
 
+async function assertOwnerOnlyDirectory(path: string): Promise<void> {
+  const entry = await lstat(path);
+  if (!entry.isDirectory() || entry.isSymbolicLink()) {
+    throw new Error(`Claude review job store is not a directory: ${path}`);
+  }
+  await chmod(path, JOB_STORE_DIRECTORY_MODE);
+  const secured = await lstat(path);
+  if (
+    !secured.isDirectory() ||
+    secured.isSymbolicLink() ||
+    (secured.mode & 0o777) !== JOB_STORE_DIRECTORY_MODE
+  ) {
+    throw new Error(`Claude review job store must have mode 0700: ${path}`);
+  }
+}
+
 async function ensureJobStore(): Promise<void> {
-  await mkdir(jobStoreDir(), { recursive: true });
+  const path = jobStoreDir();
+  await mkdir(path, { recursive: true, mode: JOB_STORE_DIRECTORY_MODE });
+  await assertOwnerOnlyDirectory(path);
+}
+
+async function secureJobFile(path: string): Promise<void> {
+  const entry = await lstat(path);
+  if (!entry.isFile() || entry.isSymbolicLink()) {
+    throw new Error(`Claude review job file is not a regular file: ${path}`);
+  }
+  await chmod(path, JOB_FILE_MODE);
+  const secured = await lstat(path);
+  if (!secured.isFile() || secured.isSymbolicLink() || (secured.mode & 0o777) !== JOB_FILE_MODE) {
+    throw new Error(`Claude review job file must have mode 0600: ${path}`);
+  }
 }
 
 export async function createJob(input: CreateClaudeReviewJobInput): Promise<ClaudeReviewJob> {
@@ -102,6 +144,9 @@ export async function createJob(input: CreateClaudeReviewJobInput): Promise<Clau
     level: input.options.level,
     contextMessage: input.options.contextMessage,
     autoFix: input.options.autoFix,
+    ...(input.options.capsuleProvenance
+      ? { capsuleProvenance: input.options.capsuleProvenance }
+      : {}),
     prompt: input.prompt,
     claudeSessionName: createSessionName(id),
     status: "queued",
@@ -121,7 +166,10 @@ export async function createJob(input: CreateClaudeReviewJobInput): Promise<Clau
 }
 
 export async function readJob(id: string): Promise<ClaudeReviewJob> {
-  const content = await readFile(jobPath(id), "utf8");
+  await ensureJobStore();
+  const path = jobPath(id);
+  await secureJobFile(path);
+  const content = await readFile(path, "utf8");
   const job = JSON.parse(content) as ClaudeReviewJob;
   assertValidJobId(job.id);
   if (job.id !== id) {
@@ -133,21 +181,46 @@ export async function readJob(id: string): Promise<ClaudeReviewJob> {
 export async function writeJob(job: ClaudeReviewJob): Promise<ClaudeReviewJob> {
   await ensureJobStore();
   const next = { ...job, updatedAt: new Date().toISOString() };
-  await writeFile(jobPath(next.id), `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  const target = jobPath(next.id);
+  try {
+    await secureJobFile(target);
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+      throw error;
+    }
+  }
+  const temporary = `${target}.${randomBytes(12).toString("hex")}.tmp`;
+  try {
+    await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: JOB_FILE_MODE,
+      flag: "wx",
+    });
+    await chmod(temporary, JOB_FILE_MODE);
+    await secureJobFile(temporary);
+    await rename(temporary, target);
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw error;
+  }
+  // Rename is the atomic commit boundary. The same-directory temporary file
+  // was already secured, so no fallible verification follows the commit.
   return next;
 }
 
 export async function listJobs(options: { cwd?: string } = {}): Promise<ClaudeReviewJob[]> {
   await ensureJobStore();
-  const files = await readdir(jobStoreDir()).catch(() => [] as string[]);
+  const files = await readdir(jobStoreDir());
   const jobs: ClaudeReviewJob[] = [];
 
   for (const file of files) {
     if (!file.endsWith(".json")) {
       continue;
     }
+    const path = join(jobStoreDir(), file);
+    await secureJobFile(path);
+    const content = await readFile(path, "utf8");
     try {
-      const content = await readFile(join(jobStoreDir(), file), "utf8");
       const job = JSON.parse(content) as ClaudeReviewJob;
       assertValidJobId(job.id);
       if (file !== `${job.id}.json`) {
@@ -157,7 +230,7 @@ export async function listJobs(options: { cwd?: string } = {}): Promise<ClaudeRe
         jobs.push(job);
       }
     } catch {
-      // Ignore partial or unrelated files in the job store.
+      // Ignore partial or unrelated JSON files in the job store.
     }
   }
 

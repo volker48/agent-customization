@@ -27,6 +27,15 @@ import { createJob, isTerminalJobStatus, listJobs, resolveJob, writeJob } from "
 import type { ClaudeReviewJob } from "./jobs.js";
 import type { ClaudeReviewDetails } from "./render.js";
 import {
+  capsuleRevisionLabel,
+  extractSessionEvidence,
+  generateCapsule,
+  loadCapsule,
+  previewCapsule,
+  type Capsule,
+  type SessionEntryLike,
+} from "../lib/context-capsule.js";
+import {
   buildAutoFixPrompt,
   buildJobsListDetails,
   CLAUDE_REVIEW_MESSAGE_TYPE,
@@ -40,21 +49,22 @@ const DEFAULT_CLAUDE_BIN = "claude";
 const LOADER_KEY = "claude-review";
 const REVIEW_TIMEOUT_MS = 20 * 60 * 1000;
 const REVIEW_TOOLS = "Bash,Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill";
+const CAPSULE_REVIEW_TOOLS = "Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill";
 
 function claudeBinary(): string {
   return process.env[CLAUDE_BIN_ENV]?.trim() || DEFAULT_CLAUDE_BIN;
 }
 
-function claudeArgs(prompt: string): string[] {
+function claudeArgs(prompt: string, reviewTools = REVIEW_TOOLS): string[] {
   return [
     "--permission-mode",
     "auto",
     "--model",
     DEFAULT_CLAUDE_MODEL,
     "--tools",
-    REVIEW_TOOLS,
+    reviewTools,
     "--allowed-tools",
-    REVIEW_TOOLS,
+    reviewTools,
     "-p",
     prompt,
   ];
@@ -74,6 +84,89 @@ function clearLoader(ctx: ExtensionCommandContext) {
   ctx.ui.setWidget(LOADER_KEY, undefined);
 }
 
+type CapsuleSessionContext = {
+  sessionManager: {
+    getBranch: () => unknown[];
+    getSessionId: () => string;
+    getSessionFile: () => string | undefined;
+  };
+};
+
+/** Resolve and confirm capsule grounding before any job file or Claude process exists. */
+async function prepareCapsule(
+  options: ClaudeReviewOptions,
+  ctx: ExtensionCommandContext,
+  signal: AbortSignal,
+): Promise<Capsule | undefined | null> {
+  const reference = options.capsuleReference;
+  if (!reference) return undefined;
+  if (signal.aborted) {
+    ctx.ui.notify("Claude review cancelled", "info");
+    return null;
+  }
+
+  const session = ctx as unknown as CapsuleSessionContext;
+  const capsuleResult =
+    reference === "current"
+      ? await generateCapsule(
+          extractSessionEvidence(session.sessionManager.getBranch() as SessionEntryLike[], ctx.cwd),
+          {
+            sessionId: session.sessionManager.getSessionId(),
+            sessionFile: session.sessionManager.getSessionFile(),
+            cwd: ctx.cwd,
+            signal,
+          },
+        )
+      : await loadCapsule(reference);
+
+  if (signal.aborted) {
+    ctx.ui.notify("Claude review cancelled", "info");
+    return null;
+  }
+  if ("error" in capsuleResult) {
+    const { error } = capsuleResult;
+    ctx.ui.notify(`Claude review capsule rejected: ${error.code}: ${error.message}`, "error");
+    return null;
+  }
+
+  const capsule = capsuleResult.value;
+  const preview = previewCapsule(capsule);
+  ctx.ui.notify(
+    `Claude review will use Context Capsule ${capsuleRevisionLabel(capsule)} as untrusted grounding.\n\n${preview.humanText}\n\nCanonical representation: ${preview.byteLength} UTF-8 bytes`,
+    "info",
+  );
+
+  const interactiveContext = ctx as unknown as {
+    hasUI?: boolean;
+    ui: { confirm?: (title: string, message: string) => Promise<boolean> };
+  };
+  if (interactiveContext.hasUI === false || typeof interactiveContext.ui.confirm !== "function") {
+    ctx.ui.notify(
+      "Capsule-grounded Claude review requires explicit interactive confirmation; no job or subprocess was started.",
+      "error",
+    );
+    return null;
+  }
+  const confirmed = await interactiveContext.ui.confirm(
+    "Start Claude review with this Context Capsule?",
+    `Claude receives ${capsuleRevisionLabel(capsule)} as bounded untrusted data. Review subprocess tools remain read-only.`,
+  );
+  if (signal.aborted) {
+    ctx.ui.notify("Claude review cancelled", "info");
+    return null;
+  }
+  if (!confirmed) {
+    ctx.ui.notify("Claude review cancelled; no job or subprocess was started.", "info");
+    return null;
+  }
+  options.capsuleProvenance = {
+    capsuleId: capsule.capsuleId,
+    revision: capsule.revision,
+    source: reference === "current" ? "current-session" : "saved",
+  };
+  return capsule;
+}
+
 function sendReviewOnly(pi: ExtensionAPI, details: ClaudeReviewDetails): void {
   pi.sendMessage(toClaudeReviewMessage(details));
 }
@@ -85,6 +178,7 @@ function toReviewDetails(result: ExecResult, options: ClaudeReviewOptions): Clau
     level: options.level,
     contextMessage: options.contextMessage,
     autoFix: options.autoFix,
+    capsuleProvenance: options.capsuleProvenance,
     stdout: markedResult?.review ?? result.stdout,
     stderr: result.stderr,
     exitCode: result.code,
@@ -140,13 +234,16 @@ async function handleWaitClaudeReviewCommand(
   ctx: ExtensionCommandContext,
 ): Promise<void> {
   const controller = new AbortController();
-  const reviewPrompt = buildCodeReviewPrompt(options, { resultMarkers: true });
 
   updateLoader(ctx, "Claude review: waiting for Pi to become idle…", controller);
   try {
     await ctx.waitForIdle();
+    const capsule = await prepareCapsule(options, ctx, controller.signal);
+    if (capsule === null) return;
+    const reviewPrompt = buildCodeReviewPrompt(options, { resultMarkers: true, capsule });
     updateLoader(ctx, `Claude review: running /code-review ${options.level}…`, controller);
-    const result = await pi.exec(claudeBinary(), claudeArgs(reviewPrompt), {
+    const reviewTools = capsule ? CAPSULE_REVIEW_TOOLS : REVIEW_TOOLS;
+    const result = await pi.exec(claudeBinary(), claudeArgs(reviewPrompt, reviewTools), {
       cwd: ctx.cwd,
       signal: controller.signal,
       timeout: REVIEW_TIMEOUT_MS,
@@ -181,14 +278,16 @@ async function handleBackgroundClaudeReviewCommand(
   updateLoader(ctx, "Claude review: waiting for Pi to become idle…", controller);
   try {
     await ctx.waitForIdle();
-    const prompt = buildCodeReviewPrompt(options, { resultMarkers: true });
+    const capsule = await prepareCapsule(options, ctx, controller.signal);
+    if (capsule === null) return;
+    const prompt = buildCodeReviewPrompt(options, { resultMarkers: true, capsule });
     job = await createJob({ cwd: ctx.cwd, options, prompt });
     updateLoader(ctx, `Claude review: starting background job ${job.id}…`, controller);
     job = await startClaudeBackgroundReview(
       pi,
       job,
       claudeBinary(),
-      REVIEW_TOOLS,
+      capsule ? CAPSULE_REVIEW_TOOLS : REVIEW_TOOLS,
       controller.signal,
     );
     sendReviewOnly(pi, jobToClaudeReviewDetails(job));
