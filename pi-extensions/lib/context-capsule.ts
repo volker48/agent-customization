@@ -7,6 +7,13 @@ export const CONTEXT_CAPSULE_SCHEMA = 1 as const;
 export const CAPSULE_MAX_BYTES = 32 * 1024;
 export const CAPSULE_MAX_ENTRIES = 20;
 export const CAPSULE_STORE_DIRECTORY = "context-capsules";
+/** Maximum number of facts that can be confirmed for compaction persistence. */
+export const CAPSULE_PIN_MAX_COUNT = 20;
+/** Maximum UTF-8 size of the persisted pin state and compaction projection. */
+export const CAPSULE_PIN_MAX_BYTES = 8 * 1024;
+export const CONTEXT_CAPSULE_PINS_ENTRY = "context-capsule-pins";
+/** Custom message type used by older sessions for the hidden pin projection. */
+export const CONTEXT_CAPSULE_PINS_MESSAGE = "context-capsule-pinned-facts";
 
 const MAX_TEXT = 2_000;
 const MAX_ENTRY = 1_000;
@@ -22,6 +29,21 @@ export type CapsuleId = string;
 export type CapsuleDecision = {
   statement: string;
   status: "confirmed" | "proposed" | "unknown";
+};
+export type CapsulePinCategory =
+  | "objective"
+  | "constraint"
+  | "decision"
+  | "blocker"
+  | "next-action";
+export type CapsuleFact = {
+  category: CapsulePinCategory;
+  statement: string;
+};
+export type CapsulePin = CapsuleFact;
+export type CapsulePinState = {
+  version: 1;
+  pins: CapsulePin[];
 };
 export type CapsuleResource = {
   kind: "path" | "url" | "github";
@@ -123,6 +145,10 @@ export type SessionEntryLike = {
   timestamp?: string;
   summary?: unknown;
   firstKeptEntryId?: string;
+  customType?: string;
+  data?: unknown;
+  content?: unknown;
+  display?: boolean;
   message?: {
     role?: string;
     content?: unknown;
@@ -909,6 +935,179 @@ function sanitizeDecisions(
   return output.slice(0, CAPSULE_MAX_ENTRIES);
 }
 
+function pinStateJson(state: CapsulePinState): string {
+  return JSON.stringify({ version: 1, pins: state.pins.map((pin) => ({ ...pin })) });
+}
+
+function pinStateSize(state: CapsulePinState): number {
+  return Buffer.byteLength(pinStateJson(state), "utf8");
+}
+
+function validPinCategory(value: unknown): value is CapsulePinCategory {
+  return ["objective", "constraint", "decision", "blocker", "next-action"].includes(
+    value as string,
+  );
+}
+
+function normalizePin(value: unknown): CapsulePin | undefined {
+  if (!isRecord(value) || !validPinCategory(value.category)) return undefined;
+  if (typeof value.statement !== "string") return undefined;
+  const sanitized = sanitizeText(value.statement, MAX_ENTRY);
+  // Persisted facts must already be canonical and safe. Never silently turn a
+  // redacted, truncated, or whitespace-normalized statement into a different fact.
+  if (!sanitized.value || sanitized.value !== value.statement) return undefined;
+  return { category: value.category, statement: sanitized.value };
+}
+
+/** Return the explicitly selectable facts in stable, user-facing order. */
+export function selectCapsuleFacts(capsule: Capsule): CapsuleFact[] {
+  return [
+    { category: "objective", statement: capsule.objective },
+    ...capsule.constraints.map((statement) => ({ category: "constraint" as const, statement })),
+    ...capsule.decisions.map(({ statement }) => ({ category: "decision" as const, statement })),
+    ...capsule.blockers.map((statement) => ({ category: "blocker" as const, statement })),
+    { category: "next-action", statement: capsule.nextAction },
+  ];
+}
+
+/** Validate persisted state; malformed custom entries are ignored, never promoted to context. */
+export function validateCapsulePinState(input: unknown): CapsuleResult<CapsulePinState> {
+  if (!isRecord(input) || input.version !== 1 || !Array.isArray(input.pins)) {
+    return fail("malformed", "Context Capsule pin state is malformed.");
+  }
+  if (input.pins.length > CAPSULE_PIN_MAX_COUNT) {
+    return fail("oversized", `At most ${CAPSULE_PIN_MAX_COUNT} facts may be pinned.`);
+  }
+  const pins: CapsulePin[] = [];
+  for (const value of input.pins) {
+    const pin = normalizePin(value);
+    if (!pin) return fail("unsafe", "Pinned facts must contain safe bounded text.");
+    if (!pins.some((item) => item.category === pin.category && item.statement === pin.statement)) {
+      pins.push(pin);
+    }
+  }
+  const state = { version: 1 as const, pins };
+  if (pinStateSize(state) > CAPSULE_PIN_MAX_BYTES) {
+    return fail("oversized", `Pinned facts exceed ${CAPSULE_PIN_MAX_BYTES} UTF-8 bytes.`);
+  }
+  return ok(state);
+}
+
+export function serializeCapsulePinState(state: CapsulePinState): string {
+  const validated = validateCapsulePinState(state);
+  if (!validated.ok) throw new Error(capsuleError(validated).message);
+  return pinStateJson(validated.value);
+}
+
+/** Recover only the latest state from the active branch, so old pins cannot resurrect. */
+export function readCapsulePinState(entries: readonly SessionEntryLike[]): CapsulePinState {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry.type !== "custom" || entry.customType !== CONTEXT_CAPSULE_PINS_ENTRY) continue;
+    const result = validateCapsulePinState(entry.data);
+    return result.ok ? result.value : { version: 1, pins: [] };
+  }
+  return { version: 1, pins: [] };
+}
+
+export function pinCapsuleFacts(
+  current: CapsulePinState,
+  facts: readonly CapsuleFact[],
+): CapsuleResult<CapsulePinState> {
+  const pins = [...current.pins];
+  for (const fact of facts) {
+    const pin = normalizePin(fact);
+    if (!pin) return fail("unsafe", "Selected fact is unsafe or empty.");
+    if (pins.some((item) => item.category === pin.category && item.statement === pin.statement))
+      continue;
+    if (pins.length >= CAPSULE_PIN_MAX_COUNT) {
+      return fail(
+        "oversized",
+        `Pin limit reached (${CAPSULE_PIN_MAX_COUNT} facts). Remove a pin first.`,
+      );
+    }
+    const candidate = { version: 1 as const, pins: [...pins, pin] };
+    if (pinStateSize(candidate) > CAPSULE_PIN_MAX_BYTES) {
+      return fail(
+        "oversized",
+        `Pin size limit reached (${CAPSULE_PIN_MAX_BYTES} bytes). Remove a pin first.`,
+      );
+    }
+    pins.push(pin);
+  }
+  return ok({ version: 1, pins });
+}
+
+export function removeCapsulePins(
+  current: CapsulePinState,
+  indices: readonly number[] | "all",
+): CapsulePinState {
+  if (indices === "all") return { version: 1, pins: [] };
+  const remove = new Set(indices);
+  return { version: 1, pins: current.pins.filter((_pin, index) => !remove.has(index + 1)) };
+}
+
+export function renderCapsulePins(state: CapsulePinState): string {
+  if (!state.pins.length) return "No confirmed Context Capsule facts are pinned.";
+  return state.pins
+    .map((pin, index) => `${index + 1}. [${pin.category}] ${pin.statement}`)
+    .join("\n");
+}
+
+/** A stable hidden projection used in the saved Pi compaction summary. */
+export function capsulePinsPrompt(state: CapsulePinState): string {
+  return [
+    "CONFIRMED CONTEXT CAPSULE FACTS (user-selected; bounded; authoritative only as stated):",
+    renderCapsulePins(state),
+    "Do not add, infer, or promote other capsule facts.",
+  ].join("\n");
+}
+
+const PINNED_SUMMARY_MARKER = "## Confirmed Context Capsule facts";
+const PINNED_SUMMARY_ENVELOPE = "pi-context-capsule-pins";
+const PINNED_SUMMARY_CLOSE = `<!-- /${PINNED_SUMMARY_ENVELOPE}:v1 -->`;
+
+function encodePinnedProjection(projection: string): string {
+  return Buffer.from(projection, "utf8").toString("base64url");
+}
+
+function decodePinnedProjection(encoded: string): string | undefined {
+  try {
+    return Buffer.from(encoded, "base64url").toString("utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+/** Remove only projections emitted by composePinnedCompactionSummary. */
+export function stripPinnedCompactionSummary(summary: string): string {
+  // Match and validate the complete envelope in one pass. The encoded payload
+  // must exactly equal the visible body, so marker-like ordinary prose is safe.
+  const envelope = new RegExp(
+    `<!-- ${PINNED_SUMMARY_ENVELOPE}:v1:([A-Za-z0-9_-]+) -->\\n([\\s\\S]*?)\\n${PINNED_SUMMARY_CLOSE}`,
+    "g",
+  );
+  let removed = false;
+  const cleaned = summary.replace(envelope, (full, encoded: string, body: string) => {
+    if (decodePinnedProjection(encoded) !== body) return full;
+    removed = true;
+    return "";
+  });
+  return removed ? cleaned.replace(/\n{3,}/g, "\n\n").trim() : summary;
+}
+
+/** Compose the current authoritative projection onto Pi's normal summary. */
+export function composePinnedCompactionSummary(
+  normalSummary: string,
+  state: CapsulePinState,
+): string {
+  const cleaned = stripPinnedCompactionSummary(normalSummary);
+  if (!state.pins.length) return cleaned;
+  const projection = `${PINNED_SUMMARY_MARKER}\n${renderCapsulePins(state)}`;
+  const encoded = encodePinnedProjection(projection);
+  return `${cleaned}\n\n<!-- ${PINNED_SUMMARY_ENVELOPE}:v1:${encoded} -->\n${projection}\n${PINNED_SUMMARY_CLOSE}`;
+}
+
 export async function generateCapsule(
   snapshot: EvidenceSnapshot,
   options: {
@@ -968,6 +1167,458 @@ export async function generateCapsule(
     return fail("cancelled", "Capsule generation was cancelled before side effects.");
   }
   return validated;
+}
+
+export type ScalarCapsuleDrift = {
+  status: "unchanged" | "changed";
+  before: string;
+  after: string;
+};
+
+export type CollectionDriftChange<T> = {
+  kind: "introduced" | "removed" | "changed";
+  before?: T;
+  after?: T;
+};
+
+export type CollectionCapsuleDrift<T> = {
+  status: "unchanged" | "changed";
+  unchangedCount: number;
+  changes: CollectionDriftChange<T>[];
+};
+
+export type DecisionDriftChange = {
+  kind: "introduced" | "superseded" | "status-changed";
+  before?: CapsuleDecision;
+  after?: CapsuleDecision;
+};
+
+export type ValidationDriftChange = {
+  kind: "introduced" | "removed" | "outcome-changed" | "evidence-updated";
+  before?: CapsuleValidation;
+  after?: CapsuleValidation;
+};
+
+export type BlockerDriftChange = {
+  kind: "introduced" | "resolved";
+  blocker: string;
+};
+
+export type CapsuleDrift = {
+  noOp: boolean;
+  changedSections: number;
+  sections: {
+    objective: ScalarCapsuleDrift;
+    constraints: CollectionCapsuleDrift<string>;
+    decisions: Omit<CollectionCapsuleDrift<CapsuleDecision>, "changes"> & {
+      changes: DecisionDriftChange[];
+    };
+    resources: CollectionCapsuleDrift<CapsuleResource>;
+    observedChanges: CollectionCapsuleDrift<CapsuleObservedChange>;
+    validation: Omit<CollectionCapsuleDrift<CapsuleValidation>, "changes"> & {
+      changes: ValidationDriftChange[];
+    };
+    blockers: Omit<CollectionCapsuleDrift<string>, "changes"> & {
+      changes: BlockerDriftChange[];
+    };
+    risks: CollectionCapsuleDrift<string>;
+    nextAction: ScalarCapsuleDrift;
+    exclusions: CollectionCapsuleDrift<CapsuleExclusion>;
+  };
+};
+
+export type CapsuleRefreshProposal = {
+  predecessor: Capsule;
+  successor: Capsule;
+  drift: CapsuleDrift;
+};
+
+function semanticText(value: string): string {
+  return value.normalize("NFKC").trim().toLocaleLowerCase("en-US").replace(/\s+/g, " ");
+}
+
+function semanticCommand(value: string): string {
+  return value.trim();
+}
+
+function scalarDrift(before: string, after: string): ScalarCapsuleDrift {
+  return {
+    status: semanticText(before) === semanticText(after) ? "unchanged" : "changed",
+    before,
+    after,
+  };
+}
+
+function compareTextCollection(
+  before: readonly string[],
+  after: readonly string[],
+): CollectionCapsuleDrift<string> {
+  const beforeByMeaning = new Map(before.map((value) => [semanticText(value), value]));
+  const afterByMeaning = new Map(after.map((value) => [semanticText(value), value]));
+  const changes: CollectionDriftChange<string>[] = [];
+  for (const [meaning, value] of beforeByMeaning) {
+    if (!afterByMeaning.has(meaning)) changes.push({ kind: "removed", before: value });
+  }
+  for (const [meaning, value] of afterByMeaning) {
+    if (!beforeByMeaning.has(meaning)) changes.push({ kind: "introduced", after: value });
+  }
+  return {
+    status: changes.length ? "changed" : "unchanged",
+    unchangedCount: [...beforeByMeaning.keys()].filter((key) => afterByMeaning.has(key)).length,
+    changes,
+  };
+}
+
+function compareDecisions(
+  before: readonly CapsuleDecision[],
+  after: readonly CapsuleDecision[],
+): CapsuleDrift["sections"]["decisions"] {
+  const beforeByMeaning = new Map(before.map((value) => [semanticText(value.statement), value]));
+  const afterByMeaning = new Map(after.map((value) => [semanticText(value.statement), value]));
+  const changes: DecisionDriftChange[] = [];
+  let unchangedCount = 0;
+  for (const [meaning, value] of beforeByMeaning) {
+    const current = afterByMeaning.get(meaning);
+    if (!current) changes.push({ kind: "superseded", before: value });
+    else if (current.status !== value.status) {
+      changes.push({ kind: "status-changed", before: value, after: current });
+    } else unchangedCount += 1;
+  }
+  for (const [meaning, value] of afterByMeaning) {
+    if (!beforeByMeaning.has(meaning)) changes.push({ kind: "introduced", after: value });
+  }
+  return { status: changes.length ? "changed" : "unchanged", unchangedCount, changes };
+}
+
+function compareResources(
+  before: readonly CapsuleResource[],
+  after: readonly CapsuleResource[],
+): CollectionCapsuleDrift<CapsuleResource> {
+  const key = (value: CapsuleResource) => `${value.kind}\u0000${value.value}`;
+  const beforeByIdentity = new Map(before.map((value) => [key(value), value]));
+  const afterByIdentity = new Map(after.map((value) => [key(value), value]));
+  const changes: CollectionDriftChange<CapsuleResource>[] = [];
+  let unchangedCount = 0;
+  for (const [identity, value] of beforeByIdentity) {
+    const current = afterByIdentity.get(identity);
+    if (!current) changes.push({ kind: "removed", before: value });
+    else if (semanticText(value.detail ?? "") !== semanticText(current.detail ?? "")) {
+      changes.push({ kind: "changed", before: value, after: current });
+    } else unchangedCount += 1;
+  }
+  for (const [identity, value] of afterByIdentity) {
+    if (!beforeByIdentity.has(identity)) changes.push({ kind: "introduced", after: value });
+  }
+  return { status: changes.length ? "changed" : "unchanged", unchangedCount, changes };
+}
+
+function compareObservedChanges(
+  before: readonly CapsuleObservedChange[],
+  after: readonly CapsuleObservedChange[],
+): CollectionCapsuleDrift<CapsuleObservedChange> {
+  const beforeByPath = new Map(before.map((value) => [value.path, value]));
+  const afterByPath = new Map(after.map((value) => [value.path, value]));
+  const changes: CollectionDriftChange<CapsuleObservedChange>[] = [];
+  let unchangedCount = 0;
+  for (const [path, value] of beforeByPath) {
+    const current = afterByPath.get(path);
+    if (!current) changes.push({ kind: "removed", before: value });
+    else if (current.status !== value.status || current.provenance !== value.provenance) {
+      changes.push({ kind: "changed", before: value, after: current });
+    } else unchangedCount += 1;
+  }
+  for (const [path, value] of afterByPath) {
+    if (!beforeByPath.has(path)) changes.push({ kind: "introduced", after: value });
+  }
+  return { status: changes.length ? "changed" : "unchanged", unchangedCount, changes };
+}
+
+function validationsByCommand(
+  values: readonly CapsuleValidation[],
+): Map<string, CapsuleValidation[]> {
+  const output = new Map<string, CapsuleValidation[]>();
+  for (const value of values) {
+    const command = semanticCommand(value.command);
+    const entries = output.get(command);
+    if (entries) entries.push(value);
+    else output.set(command, [value]);
+  }
+  return output;
+}
+
+function sameValidationEvidence(before: CapsuleValidation, after: CapsuleValidation): boolean {
+  return (
+    before.outcome === after.outcome &&
+    semanticText(before.evidence) === semanticText(after.evidence) &&
+    before.observedAt === after.observedAt
+  );
+}
+
+function compareValidation(
+  before: readonly CapsuleValidation[],
+  after: readonly CapsuleValidation[],
+): CapsuleDrift["sections"]["validation"] {
+  const beforeByCommand = validationsByCommand(before);
+  const afterByCommand = validationsByCommand(after);
+  const changes: ValidationDriftChange[] = [];
+  let unchangedCount = 0;
+  const commands = new Set([...beforeByCommand.keys(), ...afterByCommand.keys()]);
+
+  for (const command of commands) {
+    const beforeValues = beforeByCommand.get(command) ?? [];
+    const afterValues = afterByCommand.get(command) ?? [];
+    const matchedBefore = new Set<number>();
+    const matchedAfter = new Set<number>();
+    const changesByBefore = new Map<number, ValidationDriftChange>();
+
+    // Match exact repeated runs first, so removing an older failed run while
+    // retaining a later passed run is reported as a removal, not a no-op.
+    for (let beforeIndex = 0; beforeIndex < beforeValues.length; beforeIndex += 1) {
+      const value = beforeValues[beforeIndex];
+      const match = afterValues.findIndex(
+        (current, afterIndex) =>
+          !matchedAfter.has(afterIndex) && sameValidationEvidence(value, current),
+      );
+      if (match < 0) continue;
+      matchedBefore.add(beforeIndex);
+      matchedAfter.add(match);
+      unchangedCount += 1;
+    }
+
+    // Pair remaining entries with the same outcome before comparing outcomes;
+    // this keeps duplicate command runs as distinct evidence records.
+    for (let beforeIndex = 0; beforeIndex < beforeValues.length; beforeIndex += 1) {
+      if (matchedBefore.has(beforeIndex) || changesByBefore.has(beforeIndex)) continue;
+      const value = beforeValues[beforeIndex];
+      const match = afterValues.findIndex(
+        (current, afterIndex) => !matchedAfter.has(afterIndex) && current.outcome === value.outcome,
+      );
+      if (match < 0) continue;
+      matchedAfter.add(match);
+      changesByBefore.set(beforeIndex, {
+        kind: "evidence-updated",
+        before: value,
+        after: afterValues[match],
+      });
+    }
+
+    const unmatchedBeforeIndices = beforeValues.flatMap((_value, index) =>
+      matchedBefore.has(index) || changesByBefore.has(index) ? [] : [index],
+    );
+    const unmatchedBefore = unmatchedBeforeIndices.map((index) => beforeValues[index]);
+    const unmatchedAfter = afterValues.filter((_value, index) => !matchedAfter.has(index));
+    const pairedCount = Math.min(unmatchedBefore.length, unmatchedAfter.length);
+    for (let index = 0; index < pairedCount; index += 1) {
+      const beforeIndex = unmatchedBeforeIndices[index];
+      const value = unmatchedBefore[index];
+      const current = unmatchedAfter[index];
+      changesByBefore.set(beforeIndex, {
+        kind: current.outcome === value.outcome ? "evidence-updated" : "outcome-changed",
+        before: value,
+        after: current,
+      });
+    }
+    for (let index = pairedCount; index < unmatchedBefore.length; index += 1) {
+      changesByBefore.set(unmatchedBeforeIndices[index], {
+        kind: "removed",
+        before: unmatchedBefore[index],
+      });
+    }
+    for (let index = 0; index < beforeValues.length; index += 1) {
+      const change = changesByBefore.get(index);
+      if (change) changes.push(change);
+    }
+    for (const value of unmatchedAfter.slice(pairedCount)) {
+      changes.push({ kind: "introduced", after: value });
+    }
+  }
+  return { status: changes.length ? "changed" : "unchanged", unchangedCount, changes };
+}
+
+function compareBlockers(
+  before: readonly string[],
+  after: readonly string[],
+): CapsuleDrift["sections"]["blockers"] {
+  const compared = compareTextCollection(before, after);
+  return {
+    status: compared.status,
+    unchangedCount: compared.unchangedCount,
+    changes: compared.changes.map((change) =>
+      change.kind === "introduced"
+        ? { kind: "introduced", blocker: change.after as string }
+        : { kind: "resolved", blocker: change.before as string },
+    ),
+  };
+}
+
+function compareExclusions(
+  before: readonly CapsuleExclusion[],
+  after: readonly CapsuleExclusion[],
+): CollectionCapsuleDrift<CapsuleExclusion> {
+  const beforeByCategory = new Map(before.map((value) => [value.category, value]));
+  const afterByCategory = new Map(after.map((value) => [value.category, value]));
+  const changes: CollectionDriftChange<CapsuleExclusion>[] = [];
+  let unchangedCount = 0;
+  for (const [category, value] of beforeByCategory) {
+    const current = afterByCategory.get(category);
+    if (!current) changes.push({ kind: "removed", before: value });
+    else if (current.count !== value.count) {
+      changes.push({ kind: "changed", before: value, after: current });
+    } else unchangedCount += 1;
+  }
+  for (const [category, value] of afterByCategory) {
+    if (!beforeByCategory.has(category)) changes.push({ kind: "introduced", after: value });
+  }
+  return { status: changes.length ? "changed" : "unchanged", unchangedCount, changes };
+}
+
+export function compareCapsules(predecessor: Capsule, successor: Capsule): CapsuleDrift {
+  const sections: CapsuleDrift["sections"] = {
+    objective: scalarDrift(predecessor.objective, successor.objective),
+    constraints: compareTextCollection(predecessor.constraints, successor.constraints),
+    decisions: compareDecisions(predecessor.decisions, successor.decisions),
+    resources: compareResources(predecessor.resources, successor.resources),
+    observedChanges: compareObservedChanges(predecessor.observedChanges, successor.observedChanges),
+    validation: compareValidation(predecessor.validation, successor.validation),
+    blockers: compareBlockers(predecessor.blockers, successor.blockers),
+    risks: compareTextCollection(predecessor.risks, successor.risks),
+    nextAction: scalarDrift(predecessor.nextAction, successor.nextAction),
+    exclusions: compareExclusions(predecessor.exclusions, successor.exclusions),
+  };
+  const materialSections: Array<Exclude<keyof CapsuleDrift["sections"], "exclusions">> = [
+    "objective",
+    "constraints",
+    "decisions",
+    "resources",
+    "observedChanges",
+    "validation",
+    "blockers",
+    "risks",
+    "nextAction",
+  ];
+  const changedSections = materialSections.filter(
+    (key) => sections[key].status === "changed",
+  ).length;
+  return { noOp: changedSections === 0, changedSections, sections };
+}
+
+export async function proposeCapsuleRefresh(
+  predecessor: Capsule,
+  snapshot: EvidenceSnapshot,
+  options: {
+    sessionId: string;
+    sessionFile?: string;
+    cwd?: string;
+    signal?: AbortSignal;
+    now?: () => Date;
+  },
+): Promise<CapsuleResult<CapsuleRefreshProposal>> {
+  const validatedPredecessor = validateCapsule(predecessor);
+  if ("error" in validatedPredecessor) {
+    return fail(
+      validatedPredecessor.error.code,
+      validatedPredecessor.error.message,
+      validatedPredecessor.error.field,
+    );
+  }
+  if (options.signal?.aborted) {
+    return fail("cancelled", "Capsule refresh was cancelled before side effects.");
+  }
+  const generated = await generateCapsule(snapshot, {
+    ...options,
+    revision: predecessor.revision + 1,
+    predecessor: {
+      capsuleId: predecessor.capsuleId,
+      revision: predecessor.revision,
+    },
+  });
+  if ("error" in generated) {
+    return fail(generated.error.code, generated.error.message, generated.error.field);
+  }
+  return ok({
+    predecessor: validatedPredecessor.value,
+    successor: generated.value,
+    drift: compareCapsules(validatedPredecessor.value, generated.value),
+  });
+}
+
+function renderDriftValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (isRecord(value) && "command" in value) {
+    const validation = value as CapsuleValidation;
+    return `\`${validation.command}\` — ${validation.outcome}; ${validation.evidence}${validation.observedAt ? `; observed ${validation.observedAt}` : ""}`;
+  }
+  if (isRecord(value) && "statement" in value) {
+    const decision = value as CapsuleDecision;
+    return `[${decision.status}] ${decision.statement}`;
+  }
+  if (isRecord(value) && "path" in value) {
+    const observed = value as CapsuleObservedChange;
+    return `${observed.path} — ${observed.status}; provenance: ${observed.provenance}`;
+  }
+  if (isRecord(value) && "kind" in value && "value" in value) {
+    const resource = value as CapsuleResource;
+    return `[${resource.kind}] ${resource.value}${resource.detail ? ` — ${resource.detail}` : ""}`;
+  }
+  if (isRecord(value) && "category" in value) {
+    const exclusion = value as CapsuleExclusion;
+    return `${exclusion.category}: ${exclusion.count}`;
+  }
+  return JSON.stringify(value);
+}
+
+function renderCollectionDrift(section: {
+  status: "unchanged" | "changed";
+  unchangedCount: number;
+  changes: readonly unknown[];
+}): string[] {
+  if (section.status === "unchanged") return [`Unchanged (${section.unchangedCount} entries).`];
+  const lines = section.changes.flatMap((rawChange) => {
+    const change = rawChange as Record<string, unknown>;
+    if ("blocker" in change) return [`- ${change.kind}: ${String(change.blocker)}`];
+    const before = change.before === undefined ? undefined : renderDriftValue(change.before);
+    const after = change.after === undefined ? undefined : renderDriftValue(change.after);
+    if (before !== undefined && after !== undefined) {
+      return [`- ${String(change.kind)}:`, `  - before: ${before}`, `  - after: ${after}`];
+    }
+    return [`- ${String(change.kind)}: ${after ?? before ?? ""}`];
+  });
+  if (section.unchangedCount) lines.push(`Unchanged entries collapsed: ${section.unchangedCount}.`);
+  return lines;
+}
+
+export function renderCapsuleDrift(proposal: CapsuleRefreshProposal): string {
+  const { drift, predecessor, successor } = proposal;
+  const lines = [
+    `# Context drift: ${capsuleRevisionLabel(predecessor)} → ${capsuleRevisionLabel(successor)}`,
+    drift.noOp
+      ? "No material context drift detected; no successor should be saved."
+      : `${drift.changedSections} section(s) contain material drift.`,
+  ];
+  const labels: Array<[keyof CapsuleDrift["sections"], string]> = [
+    ["objective", "Objective"],
+    ["constraints", "Constraints"],
+    ["decisions", "Decisions"],
+    ["resources", "Resources"],
+    ["observedChanges", "Observed changed paths"],
+    ["validation", "Validation evidence"],
+    ["blockers", "Blockers"],
+    ["risks", "Risks"],
+    ["nextAction", "Next action"],
+    ["exclusions", "Exclusions"],
+  ];
+  for (const [key, label] of labels) {
+    const section = drift.sections[key];
+    lines.push("", `## ${label}`);
+    if (key === "objective" || key === "nextAction") {
+      const scalar = section as ScalarCapsuleDrift;
+      if (scalar.status === "unchanged") lines.push("Unchanged.");
+      else lines.push(`- before: ${scalar.before}`, `- after: ${scalar.after}`);
+    } else {
+      lines.push(...renderCollectionDrift(section as never));
+    }
+  }
+  return lines.join("\n");
 }
 
 const TOP_LEVEL_KEYS = new Set([
