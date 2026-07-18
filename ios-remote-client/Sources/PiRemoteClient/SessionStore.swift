@@ -17,6 +17,14 @@ public final class SessionStore {
   public private(set) var connectionState: ConnectionState
   public private(set) var feedErrorMessage: String?
   public private(set) var steeringErrorMessage: String?
+  public private(set) var capsuleErrorMessages: [String: String]
+  public private(set) var capsules: [String: CapsuleBrief]
+
+  /// Compatibility accessor for callers that display the currently attached session.
+  public var capsuleErrorMessage: String? {
+    guard let sessionID = attachedSessionID else { return nil }
+    return capsuleErrorMessages[sessionID]
+  }
 
   private let client: RemoteClient
   private let reconnectDelayNanoseconds: UInt64
@@ -35,6 +43,8 @@ public final class SessionStore {
     self.connectionState = .disconnected
     self.feedErrorMessage = nil
     self.steeringErrorMessage = nil
+    self.capsuleErrorMessages = [:]
+    self.capsules = [:]
     self.reconnectDelayNanoseconds = reconnectDelayNanoseconds
     self.registryRefreshIntervalNanoseconds = registryRefreshIntervalNanoseconds
   }
@@ -105,6 +115,25 @@ public final class SessionStore {
       steeringErrorMessage = String(describing: error)
       return false
     }
+  }
+
+  public func fetchCapsule(for sessionID: String) async -> CapsuleBrief? {
+    do {
+      let capsule = try await client.fetchCapsule(sessionID: sessionID)
+      try Task.checkCancellation()
+      capsules[sessionID] = capsule
+      capsuleErrorMessages[sessionID] = nil
+      return capsule
+    } catch is CancellationError {
+      return nil
+    } catch {
+      capsuleErrorMessages[sessionID] = String(describing: error)
+      return nil
+    }
+  }
+
+  public func capsule(for sessionID: String) -> CapsuleBrief? {
+    capsules[sessionID]
   }
 
   public func abort(sessionID: String) async -> Bool {
@@ -204,6 +233,11 @@ public struct ConversationView: View {
       )
     }
     .navigationTitle(session.name)
+    .toolbar {
+      ToolbarItem(placement: .automatic) {
+        CapsuleButton(store: store, session: session)
+      }
+    }
     .task(id: attachTaskID) {
       await store.attach(to: session)
     }
@@ -253,6 +287,9 @@ public struct ConversationView: View {
         ErrorBanner(message: message)
       }
       if let message = store.steeringErrorMessage {
+        ErrorBanner(message: message)
+      }
+      if let message = store.capsuleErrorMessages[session.sessionID] {
         ErrorBanner(message: message)
       }
       ConnectionStatusBanner(state: store.connectionState)
@@ -382,6 +419,106 @@ private func decodeSessionEnded(_ payload: JSONValue) throws -> String? {
     return try JSONDecoder().decode(SessionEndedPayload.self, from: payload.jsonData()).sessionId
   } catch {
     throw RemoteClientError.invalidPayload(String(describing: error))
+  }
+}
+
+@available(iOS 17.5, macOS 14.5, *)
+public struct CapsuleBriefView: View {
+  public let capsule: CapsuleBrief
+
+  public init(capsule: CapsuleBrief) {
+    self.capsule = capsule
+  }
+
+  public var body: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 14) {
+        Text("Context Capsule")
+          .font(.title3.weight(.semibold))
+        Text(capsule.objective)
+          .font(.body)
+        ForEach(capsule.compactSections, id: \.title) { section in
+          briefSection(section.title, section.items)
+        }
+        disclosure
+      }
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .padding()
+    }
+    .navigationTitle("Capsule")
+  }
+
+  @ViewBuilder
+  private var disclosure: some View {
+    VStack(alignment: .leading, spacing: 4) {
+      Label("Host safety boundary", systemImage: "shield.lefthalf.filled")
+        .font(.headline)
+      Text(
+        "Generated and redacted on the execution host. "
+          + "Payload limit: \(capsule.maxPayloadBytes) bytes."
+      )
+      ForEach(capsule.redactions, id: \.category) { redaction in
+        Text("• \(redaction.category): \(redaction.count) omitted")
+      }
+      if capsule.truncated {
+        Text("Additional content was truncated to fit the bounded projection.")
+      }
+    }
+    .font(.caption)
+    .foregroundStyle(.secondary)
+  }
+
+  @ViewBuilder
+  private func briefSection(_ title: String, _ values: [String]) -> some View {
+    if !values.isEmpty {
+      VStack(alignment: .leading, spacing: 4) {
+        Text(title).font(.headline)
+        ForEach(Array(values.enumerated()), id: \.offset) { _, value in
+          Text("• \(value)").font(.subheadline)
+        }
+      }
+    }
+  }
+}
+
+@available(iOS 17.5, macOS 14.5, *)
+private struct CapsuleButton: View {
+  let store: SessionStore
+  let session: RemoteSession
+  @State private var showingCapsule = false
+  @State private var loading = false
+  @State private var requestTask: Task<Void, Never>?
+
+  var body: some View {
+    Button {
+      requestTask?.cancel()
+      loading = true
+      requestTask = Task { @MainActor in
+        defer {
+          loading = false
+          requestTask = nil
+        }
+        guard await store.fetchCapsule(for: session.sessionID) != nil,
+          !Task.isCancelled
+        else {
+          return
+        }
+        showingCapsule = true
+      }
+    } label: {
+      Label("Capsule", systemImage: loading ? "hourglass" : "doc.text.magnifyingglass")
+    }
+    .disabled(loading || store.connectionState != .connected)
+    .onDisappear {
+      requestTask?.cancel()
+      requestTask = nil
+      loading = false
+    }
+    .sheet(isPresented: $showingCapsule) {
+      if let capsule = store.capsule(for: session.sessionID) {
+        NavigationStack { CapsuleBriefView(capsule: capsule) }
+      }
+    }
   }
 }
 

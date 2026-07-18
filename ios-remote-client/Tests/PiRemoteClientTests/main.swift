@@ -28,12 +28,16 @@ private func runProjectionTests() throws {
   try toolResultsCollapseByDefaultButUserFacingMessagesDoNot()
   try freshProjectionsDoNotReuseChatItemIDs()
   try streamingDeltasKeepTheirChatItemID()
+  try compactCapsuleSectionsExposeBoundedHostDisclosure()
 }
 
 private func runRemoteClientTests() async throws {
   try await pairAndListSendControlFrames()
   try await wrongPairResponseIsRejected()
   try await listSendsNoPairingCodeForAlreadyPairedIdentity()
+  try await fetchCapsuleUsesListCompatibilityEnvelope()
+  try await oldDaemonReturnsTypedUnsupportedCapability()
+  try await cancelledCapsuleFetchDoesNotLeaveAnError()
   try await attachStreamSendsStreamingAttachAndSurfacesFrames()
   try await promptSendsPerSessionRequest()
   try await abortSendsPerSessionRequest()
@@ -259,6 +263,68 @@ private func listSendsNoPairingCodeForAlreadyPairedIdentity() async throws {
   let requests = await transport.recordedRequests()
   try expect(requests.count == 1)
   try expect(try encodeFrameString(requests[0].envelopes[0]) == listFrame())
+}
+
+private func fetchCapsuleUsesListCompatibilityEnvelope() async throws {
+  let fixtures = try loadProtocolFixtures()
+  let responseFixture = try require(fixtures.first { $0.name == "control capsule response" })
+  let requestFixture = try require(fixtures.first { $0.name == "control capsule request" })
+  let transport = RecordingTransport(responses: [[try decodeFrame(responseFixture.frame)]])
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+
+  let capsule = try await client.fetchCapsule(sessionID: "session-1")
+
+  try expect(capsule.capsuleId == "capsule-1")
+  try expect(capsule.maxPayloadBytes == 32 * 1024)
+  let requests = await transport.recordedRequests()
+  try expect(try encodeFrameString(requests[0].envelopes[0]) == requestFixture.frame)
+}
+
+private func oldDaemonReturnsTypedUnsupportedCapability() async throws {
+  let legacyListResponse = try decodeFrame(
+    "{\"sessionId\":null,\"type\":\"list\",\"payload\":[]}\n"
+  )
+  let transport = RecordingTransport(responses: [[legacyListResponse]])
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+
+  try await expectThrows(RemoteClientError.unsupportedCapability("context capsule")) {
+    _ = try await client.fetchCapsule(sessionID: "session-1")
+  }
+}
+
+private func cancelledCapsuleFetchDoesNotLeaveAnError() async throws {
+  let transport = CancellableCapsuleTransport()
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+  let store = await SessionStore(client: client)
+
+  let request = Task { await store.fetchCapsule(for: "session-1") }
+  try await waitUntil { await transport.requestStarted }
+  request.cancel()
+  _ = await request.value
+
+  let errorMessages = await store.capsuleErrorMessages
+  let capsule = await store.capsule(for: "session-1")
+  try expect(errorMessages.isEmpty)
+  try expect(capsule == nil)
+}
+
+private func compactCapsuleSectionsExposeBoundedHostDisclosure() throws {
+  struct Response: Decodable { let capsule: CapsuleBrief }
+  let fixture = try require(
+    try loadProtocolFixtures().first { $0.name == "control capsule response" }
+  )
+  let payload = try decodeFrame(fixture.frame).payload
+  let capsule = try JSONDecoder().decode(Response.self, from: payload.jsonData()).capsule
+
+  try expect(
+    capsule.compactSections.map(\.title) == [
+      "Next action", "Constraints", "Decisions", "Validation", "Risks",
+    ]
+  )
+  try expect(capsule.compactSections.flatMap(\.items).contains { $0.contains("pnpm typecheck") })
+  try expect(capsule.redactions.map(\.category) == ["secret", "oversized"])
+  try expect(capsule.truncated)
+  try expect(capsule.maxPayloadBytes == 32 * 1024)
 }
 
 private func attachStreamSendsStreamingAttachAndSurfacesFrames() async throws {
@@ -817,6 +883,50 @@ private actor FailingRequestTransport: RemoteTransport {
 
   func request(ticket: String, envelopes: [Envelope]) async throws -> [Envelope] {
     throw error
+  }
+
+  nonisolated func stream(
+    ticket: String,
+    envelopes: [Envelope]
+  ) -> AsyncThrowingStream<Envelope, Error> {
+    AsyncThrowingStream { continuation in continuation.finish() }
+  }
+}
+
+private actor CancellableCapsuleTransport: RemoteTransport {
+  nonisolated let localNodeID = "node-a"
+  private(set) var requestStarted = false
+
+  func request(ticket: String, envelopes: [Envelope]) async throws -> [Envelope] {
+    requestStarted = true
+    try? await Task.sleep(nanoseconds: 10_000_000_000)
+    return [
+      .control(
+        .init(
+          type: .list,
+          payload: [
+            "operation": .string("capsule"),
+            "requestId": .string("cancelled"),
+            "supported": .bool(true),
+            "capsule": [
+              "capsuleId": .string("cancelled-capsule"),
+              "schemaVersion": .number(1),
+              "revision": .number(1),
+              "objective": .string("Should not be stored"),
+              "constraints": .array([]),
+              "decisions": .array([]),
+              "validation": .array([]),
+              "blockers": .array([]),
+              "risks": .array([]),
+              "nextAction": .string("No action"),
+              "redactions": .array([]),
+              "truncated": .bool(false),
+              "maxPayloadBytes": .number(32 * 1024),
+            ],
+          ]
+        )
+      )
+    ]
   }
 
   nonisolated func stream(

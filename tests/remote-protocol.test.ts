@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CAPSULE_CAPABILITY,
   REMOTE_CONTROL_ALPN,
   CONTROL_MESSAGE_TYPES,
   PER_SESSION_MESSAGE_TYPES,
+  capsuleControlRequest,
   decodeFrame,
   decodeFrames,
   encodeFrame,
+  parseCapsuleControlRequest,
   routeEnvelope,
   type Envelope,
 } from "../pi-extensions/remote/protocol.js";
@@ -64,6 +67,16 @@ describe("remote wire protocol", () => {
       channel: "session",
       envelope: { sessionId: "session-1", type: "prompt", payload: {} },
     });
+  });
+
+  it("adds capsule requests inside the compatible list control envelope", () => {
+    const request = capsuleControlRequest("session-1");
+
+    expect(request).toEqual({ operation: "capsule", sessionId: "session-1" });
+    expect(parseCapsuleControlRequest(request)).toEqual(request);
+    expect(parseCapsuleControlRequest({ operation: "capsule", sessionId: "" })).toBeNull();
+    expect(CAPSULE_CAPABILITY).toBe("context-capsule-v1");
+    expect(CONTROL_MESSAGE_TYPES).not.toContain("capsule");
   });
 
   it("exports message type vocabularies and the ALPN constant", () => {

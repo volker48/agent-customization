@@ -28,6 +28,8 @@ public enum RemoteClientError: Error, Equatable, CustomStringConvertible {
   case pairingRejected
   case invalidPairingCode(String)
   case invalidPayload(String)
+  case unsupportedCapability(String)
+  case capsuleUnavailable(String)
 
   public var description: String {
     switch self {
@@ -43,6 +45,10 @@ public enum RemoteClientError: Error, Equatable, CustomStringConvertible {
       "Pairing code must be six digits, optionally formatted as 123-456: \(code)"
     case .invalidPayload(let message):
       "Invalid remote daemon payload: \(message)"
+    case .unsupportedCapability(let capability):
+      "This remote daemon does not support \(capability)."
+    case .capsuleUnavailable(let message):
+      "Context Capsule unavailable: \(message)"
     }
   }
 }
@@ -104,6 +110,33 @@ public actor RemoteClient {
     return try decodePayload([RemoteSession].self, from: payload)
   }
 
+  /// Retrieves a bounded, host-generated Context Capsule projection. It uses
+  /// the existing `list` vocabulary so mixed-version daemons stay decodable.
+  public func fetchCapsule(sessionID: String) async throws -> CapsuleBrief {
+    let responses = try await requestControl(
+      .list,
+      payload: ["operation": .string("capsule"), "sessionId": .string(sessionID)]
+    )
+    let payload = try requireControlPayload(responses.first, type: .list)
+    if isJSONArrayPayload(payload) {
+      throw RemoteClientError.unsupportedCapability("context capsule")
+    }
+    let result = try decodePayload(CapsuleResponse.self, from: payload)
+    guard result.operation == "capsule" else {
+      throw RemoteClientError.invalidPayload("capsule response used an unexpected operation")
+    }
+    guard result.supported else {
+      throw RemoteClientError.unsupportedCapability(result.capability ?? "context capsule")
+    }
+    if let error = result.error {
+      throw RemoteClientError.capsuleUnavailable(error.message)
+    }
+    guard let capsule = result.capsule else {
+      throw RemoteClientError.invalidPayload("capsule response did not include a projection")
+    }
+    return capsule
+  }
+
   public func attachStream(sessionID: String) throws -> AsyncThrowingStream<Envelope, Error> {
     guard let ticket else {
       throw RemoteClientError.missingTicket
@@ -123,6 +156,61 @@ public actor RemoteClient {
   /// Sends an abort frame; success confirms transport completion, not agent interruption.
   public func abort(sessionID: String) async throws {
     _ = try await requestSession(.abort, sessionID: sessionID, payload: .object([]))
+  }
+}
+
+public struct CapsuleBrief: Codable, Equatable, Sendable {
+  public struct Decision: Codable, Equatable, Sendable {
+    public let statement: String
+    public let status: String
+  }
+  public struct Validation: Codable, Equatable, Sendable {
+    public let command: String
+    public let outcome: String
+    public let evidence: String
+    public let observedAt: String?
+  }
+  public struct Redaction: Codable, Equatable, Sendable {
+    public let category: String
+    public let count: Int
+  }
+
+  public let capsuleId: String
+  public let schemaVersion: Int
+  public let revision: Int
+  public let objective: String
+  public let constraints: [String]
+  public let decisions: [Decision]
+  public let validation: [Validation]
+  public let blockers: [String]
+  public let risks: [String]
+  public let nextAction: String
+  public let redactions: [Redaction]
+  public let truncated: Bool
+  public let maxPayloadBytes: Int
+
+  public var compactSections: [CapsuleBriefSection] {
+    [
+      .init(title: "Next action", items: [nextAction]),
+      .init(title: "Constraints", items: constraints),
+      .init(title: "Decisions", items: decisions.map { "\($0.status): \($0.statement)" }),
+      .init(
+        title: "Validation",
+        items: validation.map { "\($0.outcome): \($0.command) — \($0.evidence)" }
+      ),
+      .init(title: "Blockers", items: blockers),
+      .init(title: "Risks", items: risks),
+    ].filter { !$0.items.isEmpty }
+  }
+}
+
+public struct CapsuleBriefSection: Equatable, Sendable {
+  public let title: String
+  public let items: [String]
+
+  public init(title: String, items: [String]) {
+    self.title = title
+    self.items = items
   }
 }
 
@@ -236,6 +324,18 @@ private struct PairResponse: Decodable {
   let paired: Bool
 }
 
+private struct CapsuleResponse: Decodable {
+  let operation: String
+  let supported: Bool
+  let capability: String?
+  let capsule: CapsuleBrief?
+  let error: CapsuleResponseError?
+}
+
+private struct CapsuleResponseError: Decodable {
+  let message: String
+}
+
 private extension RemoteClient {
   func requestControl(_ type: ControlMessageType, payload: JSONValue) async throws -> [Envelope] {
     guard let ticket else {
@@ -284,6 +384,20 @@ private func requireControlPayload(
   }
 
   return control.payload
+}
+
+private func isJSONArrayPayload(_ payload: JSONValue) -> Bool {
+  switch payload {
+  case .array:
+    return true
+  case .rawJSON:
+    guard let value = try? JSONSerialization.jsonObject(with: payload.jsonData()) else {
+      return false
+    }
+    return value is [Any]
+  default:
+    return false
+  }
 }
 
 private func decodePayload<T: Decodable>(_ type: T.Type, from payload: JSONValue) throws -> T {

@@ -5,8 +5,16 @@ import { fileURLToPath } from "node:url";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
+import {
+  extractSessionEvidence,
+  generateCapsule,
+  type SessionEntryLike,
+} from "../lib/context-capsule.js";
+import { projectCapsule } from "./capsule-projection.js";
+
 import { FileNodeAllowlist, defaultRemoteRoot, renderPairingTicket } from "./authorization.js";
 import { connectIpcExtension, type IpcEnvelope, type IpcExtensionClient } from "./ipc.js";
+import { CAPSULE_CAPABILITY, CAPSULE_OPERATION } from "./protocol.js";
 import { projectTranscriptEvent, projectTranscriptMessage } from "./transcript-projection.js";
 
 const DAEMON_SOCKET_FILE = "daemon.sock";
@@ -66,6 +74,7 @@ export default function remoteExtension(pi: ExtensionAPI): void {
         sessionId,
         name: sessionName(pi, ctx),
         cwd: ctx.cwd,
+        capabilities: [CAPSULE_CAPABILITY],
       });
       state = {
         client,
@@ -186,6 +195,11 @@ async function applyInbound(
     resolveSync(state, envelope.payload);
     return;
   }
+  if (envelope.type === "capsule") {
+    const requestId = capsuleRequestIdFrom(envelope.payload);
+    if (requestId) await sendCapsule(state, requestId);
+    return;
+  }
   if (envelope.type === "prompt") {
     const text = promptText(envelope.payload);
     if (text.trim().length > 0) {
@@ -196,6 +210,37 @@ async function applyInbound(
   if (envelope.type === "abort") {
     state.ctx.abort();
   }
+}
+
+async function sendCapsule(state: RemoteState, requestId: string): Promise<void> {
+  const entries = state.ctx.sessionManager.getBranch() as SessionEntryLike[];
+  const capsule = await generateCapsule(extractSessionEvidence(entries, state.ctx.cwd), {
+    sessionId: state.sessionId,
+    sessionFile: state.ctx.sessionManager.getSessionFile(),
+    cwd: state.ctx.cwd,
+  });
+  await state.client.send({
+    sessionId: state.sessionId,
+    type: "capsule",
+    payload:
+      "error" in capsule
+        ? { operation: CAPSULE_OPERATION, requestId, supported: true, error: capsule.error }
+        : {
+            operation: CAPSULE_OPERATION,
+            requestId,
+            supported: true,
+            capsule: projectCapsule(capsule.value),
+          },
+  });
+}
+
+function capsuleRequestIdFrom(payload: unknown): string | null {
+  return typeof payload === "object" &&
+    payload !== null &&
+    "requestId" in payload &&
+    typeof payload.requestId === "string"
+    ? payload.requestId
+    : null;
 }
 
 async function sendBackfill(state: RemoteState): Promise<void> {
