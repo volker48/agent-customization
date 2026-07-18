@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -10,6 +10,8 @@ import claudeReviewExtension, {
   claudeBackgroundArgs,
   parseClaudeReviewArgs,
 } from "../pi-extensions/claude-review/index.js";
+import { renderClaudeReviewMarkdown } from "../pi-extensions/claude-review/render.js";
+import { saveCapsule, type Capsule } from "../pi-extensions/lib/context-capsule.js";
 import {
   CLAUDE_REVIEW_HAS_FINDINGS_END,
   CLAUDE_REVIEW_HAS_FINDINGS_START,
@@ -25,7 +27,7 @@ import {
   refreshClaudeBackgroundJob,
   startClaudeBackgroundReview,
 } from "../pi-extensions/claude-review/claude-bg.js";
-import { readJob, writeJob } from "../pi-extensions/claude-review/jobs.js";
+import { listJobs, readJob, writeJob } from "../pi-extensions/claude-review/jobs.js";
 import type { ClaudeReviewJob } from "../pi-extensions/claude-review/jobs.js";
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
@@ -52,13 +54,41 @@ type RegisteredCommand = {
 
 type MockCommandContext = {
   cwd: string;
+  hasUI?: boolean;
   waitForIdle: () => Promise<void>;
+  sessionManager?: {
+    getBranch: () => unknown[];
+    getSessionId: () => string;
+    getSessionFile: () => string | undefined;
+  };
   ui: {
     notify: (message: string, type?: "info" | "warning" | "error") => void;
     setStatus: (key: string, value: string | undefined) => void;
     setWidget: (key: string, value: unknown) => void;
+    confirm?: (title: string, message: string) => Promise<boolean>;
   };
 };
+
+function testCapsule(): Capsule {
+  return {
+    kind: "pi-context-capsule",
+    schemaVersion: 1,
+    capsuleId: "capsule-review-test",
+    revision: 2,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    source: { sessionId: "session-review", cwd: "/repo" },
+    objective: "Review the current change",
+    constraints: ["Keep the review read-only"],
+    decisions: [],
+    resources: [],
+    observedChanges: [],
+    validation: [],
+    blockers: [],
+    risks: [],
+    nextAction: "Inspect the diff",
+    exclusions: [],
+  };
+}
 
 function createMockPi(execResult = { stdout: "review", stderr: "", code: 0, killed: false }) {
   const commands = new Map<string, RegisteredCommand>();
@@ -90,6 +120,23 @@ function createContext(): MockCommandContext {
       setWidget: vi.fn(),
     },
   };
+}
+
+function createCurrentCapsuleContext(): MockCommandContext {
+  const context = createContext();
+  context.hasUI = true;
+  context.ui.confirm = vi.fn(async () => true);
+  context.sessionManager = {
+    getBranch: () => [
+      {
+        type: "message",
+        message: { role: "user", content: "Review issue #94 without widening scope" },
+      },
+    ],
+    getSessionId: () => "current-review-session",
+    getSessionFile: () => "/sessions/current-review-session.jsonl",
+  };
+  return context;
 }
 
 function markedReviewOutput(review: string, hasFindings: boolean): string {
@@ -151,6 +198,28 @@ describe("claude review arguments", () => {
     });
   });
 
+  it("parses current and saved capsule references", () => {
+    expect(parseClaudeReviewArgs("--capsule --no-fix low")).toMatchObject({
+      capsuleReference: "current",
+      autoFix: false,
+      level: "low",
+    });
+    expect(parseClaudeReviewArgs("--capsule-ref saved-capsule --wait")).toMatchObject({
+      capsuleReference: "saved-capsule",
+      mode: "wait",
+    });
+  });
+
+  it("keeps review arguments after the current-session capsule shorthand", () => {
+    expect(parseClaudeReviewArgs("--capsule high inspect")).toEqual({
+      autoFix: true,
+      level: "high",
+      contextMessage: "inspect",
+      mode: "background",
+      capsuleReference: "current",
+    });
+  });
+
   it("rejects ultra for headless review runs", () => {
     expect(() => parseClaudeReviewArgs("ultra review deeply")).toThrow(/ultra/);
   });
@@ -158,6 +227,36 @@ describe("claude review arguments", () => {
   it("builds the Claude Code slash-command prompt", () => {
     const options = parseClaudeReviewArgs("max inspect the current branch");
     expect(buildCodeReviewPrompt(options)).toBe("/code-review max inspect the current branch");
+  });
+
+  it("renders compact capsule provenance without dumping capsule contents", () => {
+    const rendered = renderClaudeReviewMarkdown({
+      status: "running",
+      level: "medium",
+      contextMessage: "",
+      autoFix: false,
+      stdout: "review output",
+      stderr: "",
+      capsuleProvenance: {
+        capsuleId: "capsule-review-test",
+        revision: 2,
+        source: "saved",
+      },
+    });
+    expect(rendered).toContain("capsule-review-test@2");
+    expect(rendered).toContain("(saved)");
+    expect(rendered).not.toContain("Review the current change");
+  });
+
+  it("delimits capsule grounding as untrusted data", () => {
+    const prompt = buildCodeReviewPrompt(parseClaudeReviewArgs("high inspect the current branch"), {
+      capsule: testCapsule(),
+      resultMarkers: true,
+    });
+    expect(prompt).toContain("BEGIN UNTRUSTED CONTEXT CAPSULE");
+    expect(prompt).toContain("END UNTRUSTED CONTEXT CAPSULE");
+    expect(prompt).toContain('"objective":"Review the current change"');
+    expect(prompt).toContain(CLAUDE_REVIEW_RESULT_START);
   });
 
   it("asks Claude for machine-readable review result markers", () => {
@@ -207,6 +306,7 @@ describe("claude review command", () => {
   const originalBin = process.env.PI_CLAUDE_REVIEW_BIN;
   const originalHome = process.env.HOME;
   const originalJobDir = process.env.PI_CLAUDE_REVIEW_JOB_DIR;
+  const originalCapsuleDir = process.env.PI_CODING_AGENT_DIR;
   const tempDirs: string[] = [];
 
   afterEach(async () => {
@@ -224,6 +324,11 @@ describe("claude review command", () => {
       delete process.env.PI_CLAUDE_REVIEW_JOB_DIR;
     } else {
       process.env.PI_CLAUDE_REVIEW_JOB_DIR = originalJobDir;
+    }
+    if (originalCapsuleDir === undefined) {
+      delete process.env.PI_CODING_AGENT_DIR;
+    } else {
+      process.env.PI_CODING_AGENT_DIR = originalCapsuleDir;
     }
     await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { force: true, recursive: true })));
   });
@@ -358,6 +463,139 @@ describe("claude review command", () => {
     expect(ctx.ui.notify).toHaveBeenCalledWith("Claude review failed with exit code 2", "error");
   });
 
+  it("rejects invalid saved capsules before starting foreground Claude", async () => {
+    const { pi, command } = createMockPi();
+    claudeReviewExtension(pi as never);
+    const ctx = createContext();
+
+    await command().handler("--wait --capsule-ref /missing/capsule.json", ctx);
+
+    expect(pi.exec).not.toHaveBeenCalled();
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Claude review capsule rejected"),
+      "error",
+    );
+  });
+
+  it("previews and confirms a saved capsule before foreground review", async () => {
+    const capsuleRoot = await mkdtemp(join(tmpdir(), "claude-review-capsules-"));
+    tempDirs.push(capsuleRoot);
+    process.env.PI_CODING_AGENT_DIR = capsuleRoot;
+    await saveCapsule(testCapsule());
+    const { pi, command } = createMockPi({
+      stdout: markedReviewOutput("Capsule finding", false),
+      stderr: "",
+      code: 0,
+      killed: false,
+    });
+    claudeReviewExtension(pi as never);
+    const ctx = createContext();
+    ctx.hasUI = true;
+    ctx.ui.confirm = vi.fn(async () => true);
+
+    await command().handler("--wait --no-fix --capsule-ref capsule-review-test", ctx);
+
+    expect(ctx.ui.confirm).toHaveBeenCalledOnce();
+    expect(pi.exec).toHaveBeenCalledWith(
+      "claude",
+      expect.arrayContaining([expect.stringContaining("BEGIN UNTRUSTED CONTEXT CAPSULE")]),
+      expect.anything(),
+    );
+    const foregroundArgs = pi.exec.mock.calls[0][1] as string[];
+    expect(foregroundArgs.slice(0, 8)).toEqual([
+      "--permission-mode",
+      "auto",
+      "--model",
+      "opus",
+      "--tools",
+      "Bash,Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill",
+      "--allowed-tools",
+      "Bash,Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill",
+    ]);
+    expect(pi.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        details: expect.objectContaining({
+          capsuleProvenance: {
+            capsuleId: "capsule-review-test",
+            revision: 2,
+            source: "saved",
+          },
+        }),
+      }),
+    );
+  });
+
+  it("uses a current-session capsule while keeping auto-fix in Pi", async () => {
+    const { pi, command } = createMockPi({
+      stdout: markedReviewOutput("Fix the grounded edge case", true),
+      stderr: "",
+      code: 0,
+      killed: false,
+    });
+    claudeReviewExtension(pi as never);
+    const ctx = createCurrentCapsuleContext();
+
+    await command().handler("--wait --capsule=current high", ctx);
+
+    expect(pi.exec).toHaveBeenCalledOnce();
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+    expect(pi.sendUserMessage).toHaveBeenCalledWith(
+      expect.stringContaining("Fix the grounded edge case"),
+    );
+    expect(pi.sendUserMessage).toHaveBeenCalledWith(
+      expect.stringMatching(/Context Capsule: .+@1 \(current-session\)/),
+    );
+  });
+
+  it("rejects invalid saved capsules before persisting a background job", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "claude-review-invalid-capsule-"));
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(rootDir, jobDir);
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    const invalidCapsulePath = join(rootDir, "unsupported.json");
+    await writeFile(
+      invalidCapsulePath,
+      JSON.stringify({ ...testCapsule(), schemaVersion: 999 }),
+      "utf8",
+    );
+    const { pi, command } = createMockPi();
+    claudeReviewExtension(pi as never);
+    const ctx = createContext();
+
+    await command().handler(`--capsule-ref ${invalidCapsulePath}`, ctx);
+
+    expect(pi.exec).not.toHaveBeenCalled();
+    await expect(readdir(jobDir)).resolves.toEqual([]);
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("unsupported-version"),
+      "error",
+    );
+  });
+
+  it("does not persist a background job when capsule confirmation is declined", async () => {
+    const capsuleRoot = await mkdtemp(join(tmpdir(), "claude-review-capsules-"));
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(capsuleRoot, jobDir);
+    process.env.PI_CODING_AGENT_DIR = capsuleRoot;
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    await saveCapsule(testCapsule());
+    const { pi, command } = createMockPi({
+      stdout: "backgrounded · session-123456",
+      stderr: "",
+      code: 0,
+      killed: false,
+    });
+    claudeReviewExtension(pi as never);
+    const ctx = createContext();
+    ctx.hasUI = true;
+    ctx.ui.confirm = vi.fn(async () => false);
+
+    await command().handler("--capsule-ref capsule-review-test", ctx);
+
+    expect(pi.exec).not.toHaveBeenCalled();
+    await expect(readdir(jobDir)).resolves.toEqual([]);
+  });
+
   it("waits for Pi to become idle before creating and starting a background job", async () => {
     process.env.PI_CLAUDE_REVIEW_BIN = "fake-claude";
     const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
@@ -397,6 +635,62 @@ describe("claude review command", () => {
     );
   });
 
+  it("persists saved-capsule provenance for background recovery", async () => {
+    const capsuleRoot = await mkdtemp(join(tmpdir(), "claude-review-capsules-"));
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(capsuleRoot, jobDir);
+    process.env.PI_CODING_AGENT_DIR = capsuleRoot;
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    await saveCapsule(testCapsule());
+    const { pi, command } = createMockPi({
+      stdout: "backgrounded · session-grounded",
+      stderr: "",
+      code: 0,
+      killed: false,
+    });
+    claudeReviewExtension(pi as never);
+    const ctx = createContext();
+    ctx.hasUI = true;
+    ctx.ui.confirm = vi.fn(async () => true);
+
+    await command().handler("--no-fix --capsule saved capsule-review-test", ctx);
+
+    const [jobFile] = await readdir(jobDir);
+    const recovered = await readJob(jobFile.replace(/\.json$/, ""));
+    expect(recovered.capsuleProvenance).toEqual({
+      capsuleId: "capsule-review-test",
+      revision: 2,
+      source: "saved",
+    });
+    expect(pi.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("capsule-review-test@2"),
+        details: expect.objectContaining({ capsuleProvenance: recovered.capsuleProvenance }),
+      }),
+    );
+  });
+
+  it("cancels capsule preparation before creating a job or subprocess", async () => {
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(jobDir);
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    const { pi, command } = createMockPi();
+    claudeReviewExtension(pi as never);
+    const ctx = createCurrentCapsuleContext();
+    ctx.waitForIdle = vi.fn(async () => {
+      const widgetFactory = vi.mocked(ctx.ui.setWidget).mock.calls.at(-1)?.[1] as
+        | ((tui: unknown, theme: unknown) => { onAbort?: () => void })
+        | undefined;
+      widgetFactory?.({}, {}).onAbort?.();
+    });
+
+    await command().handler("--capsule=current", ctx);
+
+    expect(pi.exec).not.toHaveBeenCalled();
+    await expect(readdir(jobDir)).resolves.toEqual([]);
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Claude review cancelled", "info");
+  });
+
   it("fails background starts that do not report a session id", async () => {
     const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
     tempDirs.push(jobDir);
@@ -418,6 +712,49 @@ describe("claude review command", () => {
     expect(started.claudeSessionId).toBeUndefined();
     expect(started.errorMessage).toBe("Claude background session did not report a session id");
     expect(started.rawStartOutput).toBe("background session started");
+  });
+
+  it("repairs permissive env-overridden job stores and files before persistence", async () => {
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(jobDir);
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    await chmod(jobDir, 0o755);
+
+    const job = createBackgroundJob();
+    await writeJob(job);
+    const [jobFile] = await readdir(jobDir);
+    const jobPath = join(jobDir, jobFile);
+    expect((await stat(jobDir)).mode & 0o777).toBe(0o700);
+    expect((await stat(jobPath)).mode & 0o777).toBe(0o600);
+
+    await chmod(jobPath, 0o644);
+    await expect(readJob(job.id)).resolves.toMatchObject({ id: job.id });
+    expect((await stat(jobPath)).mode & 0o777).toBe(0o600);
+  });
+
+  it("fails closed for an env-overridden store that is not a directory", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(rootDir);
+    const storePath = join(rootDir, "not-a-directory");
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = storePath;
+    await writeFile(storePath, "not a store", "utf8");
+
+    await expect(writeJob(createBackgroundJob())).rejects.toThrow(/EEXIST|job store/);
+    await expect(listJobs()).rejects.toThrow(/EEXIST|job store/);
+  });
+
+  it("fails closed instead of reading a job file through a symlink", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(rootDir);
+    const jobDir = join(rootDir, "jobs");
+    const outsidePath = join(rootDir, "outside.json");
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    await mkdir(jobDir);
+    await writeFile(outsidePath, JSON.stringify(createBackgroundJob()), "utf8");
+    const jobPath = join(jobDir, "claude-review-20260101000000-abcdef12.json");
+    await symlink(outsidePath, jobPath);
+
+    await expect(listJobs()).rejects.toThrow(/regular file/);
   });
 
   it("rejects job ids that resolve outside the job store", async () => {
@@ -603,53 +940,50 @@ describe("claude review command", () => {
     },
   );
 
-  it(
-    "rejects markerless completed jobs whose stdout is only the startup session banner",
-    async () => {
-      process.env.PI_CLAUDE_REVIEW_BIN = "fake-claude";
-      const homeDir = await mkdtemp(join(tmpdir(), "claude-home-"));
-      const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
-      tempDirs.push(homeDir, jobDir);
-      process.env.HOME = homeDir;
-      process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
-      const startupOutput = "backgrounded · session-123";
-      const job = await writeJob(
-        createBackgroundJob({
-          status: "running",
-          stdout: startupOutput,
-          lastLog: "",
-          autoFix: true,
-        }),
-      );
-      const { pi, command } = createMockPi();
-      pi.exec.mockImplementation(async (_bin: string, args: string[]) => {
-        if (args[0] === "agents") {
-          return {
-            stdout: JSON.stringify([{ id: "session-123", status: "completed", exitCode: 0 }]),
-            stderr: "",
-            code: 0,
-            killed: false,
-          };
-        }
-        return { stdout: "markerless completed output", stderr: "", code: 0, killed: false };
-      });
-      claudeReviewExtension(pi as never);
-      const ctx = createContext();
+  it("rejects markerless completed jobs whose stdout is only the startup session banner", async () => {
+    process.env.PI_CLAUDE_REVIEW_BIN = "fake-claude";
+    const homeDir = await mkdtemp(join(tmpdir(), "claude-home-"));
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(homeDir, jobDir);
+    process.env.HOME = homeDir;
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    const startupOutput = "backgrounded · session-123";
+    const job = await writeJob(
+      createBackgroundJob({
+        status: "running",
+        stdout: startupOutput,
+        lastLog: "",
+        autoFix: true,
+      }),
+    );
+    const { pi, command } = createMockPi();
+    pi.exec.mockImplementation(async (_bin: string, args: string[]) => {
+      if (args[0] === "agents") {
+        return {
+          stdout: JSON.stringify([{ id: "session-123", status: "completed", exitCode: 0 }]),
+          stderr: "",
+          code: 0,
+          killed: false,
+        };
+      }
+      return { stdout: "markerless completed output", stderr: "", code: 0, killed: false };
+    });
+    claudeReviewExtension(pi as never);
+    const ctx = createContext();
 
-      await command("claude-review-result").handler(job.id, ctx);
-      const stored = await readJob(job.id);
+    await command("claude-review-result").handler(job.id, ctx);
+    const stored = await readJob(job.id);
 
-      expect(stored.status).toBe("failed");
-      expect(stored.stdout).toBe("");
-      expect(stored.errorMessage).toMatch(/did not contain review result markers/);
-      expect(pi.sendUserMessage).not.toHaveBeenCalled();
-      expect(pi.sendMessage).toHaveBeenCalledWith(
-        expect.objectContaining({
-          details: expect.objectContaining({ status: "failed", stdout: "" }),
-        }),
-      );
-    },
-  );
+    expect(stored.status).toBe("failed");
+    expect(stored.stdout).toBe("");
+    expect(stored.errorMessage).toMatch(/did not contain review result markers/);
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(pi.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        details: expect.objectContaining({ status: "failed", stdout: "" }),
+      }),
+    );
+  });
 
   it("does not treat startup stdout as a persisted review", async () => {
     process.env.PI_CLAUDE_REVIEW_BIN = "fake-claude";
@@ -858,39 +1192,36 @@ describe("claude review command", () => {
     expect(withLogs.completedAt).toEqual(expect.any(String));
   });
 
-  it(
-    "preserves completed background reviews when later successful log reads lack markers",
-    async () => {
-      const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
-      tempDirs.push(jobDir);
-      process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
-      const { pi } = createMockPi({
-        stdout: "markerless later log read",
-        stderr: "",
-        code: 0,
-        killed: false,
-      });
-      const job = await writeJob(
-        createBackgroundJob({
-          status: "review",
-          stdout: "final review",
-          lastLog: createTranscriptLine("final review"),
-          completedAt: "2026-01-01T00:05:00.000Z",
-          exitCode: 0,
-        }),
-      );
+  it("preserves completed background reviews when later successful log reads lack markers", async () => {
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(jobDir);
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    const { pi } = createMockPi({
+      stdout: "markerless later log read",
+      stderr: "",
+      code: 0,
+      killed: false,
+    });
+    const job = await writeJob(
+      createBackgroundJob({
+        status: "review",
+        stdout: "final review",
+        lastLog: createTranscriptLine("final review"),
+        completedAt: "2026-01-01T00:05:00.000Z",
+        exitCode: 0,
+      }),
+    );
 
-      const withLogs = await readClaudeBackgroundLogs(pi as never, job, "fake-claude");
-      const stored = await readJob(job.id);
+    const withLogs = await readClaudeBackgroundLogs(pi as never, job, "fake-claude");
+    const stored = await readJob(job.id);
 
-      expect(withLogs.status).toBe("review");
-      expect(withLogs.stdout).toBe("final review");
-      expect(withLogs.completedAt).toBe("2026-01-01T00:05:00.000Z");
-      expect(withLogs.errorMessage).toBeNull();
-      expect(stored.status).toBe("review");
-      expect(stored.stdout).toBe("final review");
-    },
-  );
+    expect(withLogs.status).toBe("review");
+    expect(withLogs.stdout).toBe("final review");
+    expect(withLogs.completedAt).toBe("2026-01-01T00:05:00.000Z");
+    expect(withLogs.errorMessage).toBeNull();
+    expect(stored.status).toBe("review");
+    expect(stored.stdout).toBe("final review");
+  });
 
   it("preserves legacy completed reviews after lastLog markers have been truncated", async () => {
     const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
