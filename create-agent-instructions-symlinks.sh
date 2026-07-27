@@ -3,6 +3,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE="${SCRIPT_DIR}/MY_AGENTS.md"
+if [[ ! -f "$SOURCE" ]]; then
+	echo "Source file not found: $SOURCE" >&2
+	exit 1
+fi
 TARGETS=(
 	"${HOME}/.codex/AGENTS.md"
 	"${HOME}/.claude/CLAUDE.md"
