@@ -1,13 +1,14 @@
 # Pi subagent customizations
 
-These package-owned definitions shadow only the builtin `pi-subagents` roles whose prompts are intentionally customized here. They were based on `pi-subagents` 0.34.0 at upstream commit `96d0bd8e3580c76aef3509fa8f47dd7fedd1d9dd`.
+These package-owned definitions shadow only the builtin `pi-subagents` roles whose prompts or launch defaults are intentionally customized here. They were based on `pi-subagents` 0.34.0 at upstream commit `96d0bd8e3580c76aef3509fa8f47dd7fedd1d9dd`.
 
 ## Ownership split
 
 - `agents/context-builder.md` adapts external-research guidance to the local `exa_search` tool.
 - `agents/researcher.md` adapts search and fetch guidance to the local `exa_search` and `webfetch` schemas.
 - `agents/reviewer.md` keeps the repository's intentional non-mutating `bash` guidance.
-- Bundled definitions remain authoritative for roles without prompt customizations.
+- `agents/oracle.md` gives high-effort forked Oracle reviews a 15-minute default runtime.
+- Bundled definitions remain authoritative for roles without prompt or launch-default customizations.
 - `~/.pi/agent/settings.json` owns local model, thinking, and tool overrides for every role.
 
 The Markdown intentionally omits `tools` and `thinking`. `subagents.agentOverrides` fills those unset fields while explicit prompt frontmatter remains package-owned.
@@ -33,4 +34,4 @@ Restart Pi or use `/reload`, then verify with:
 
 ## Updating from upstream
 
-Compare the three files in `agents/` with their upstream counterparts. Keep only intentional prompt differences, preserve the ownership split above, update local web-tool references when schemas change, and record the new upstream version and commit here.
+Compare the four files in `agents/` with their upstream counterparts. Keep only intentional prompt or launch-default differences, preserve the ownership split above, update local web-tool references when schemas change, and record the new upstream version and commit here.
