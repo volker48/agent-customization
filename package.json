@@ -25,6 +25,7 @@
     "validate:rtk": "node scripts/verify-rtk-extension.mjs"
   },
   "dependencies": {
+    "@cursor/sdk": "1.0.26",
     "@mozilla/readability": "0.6.0",
     "@number0/iroh": "1.0.0",
     "linkedom": "0.18.12",
@@ -47,7 +48,7 @@
   "engines": {
     "node": ">=22"
   },
-  "packageManager": "pnpm@11.9.0",
+  "packageManager": "pnpm@11.18.0",
   "pi": {
     "extensions": [
       "./pi-extensions"
