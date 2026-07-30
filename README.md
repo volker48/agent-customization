@@ -212,12 +212,12 @@ binary question decomposition inspired by the BinEval framework: see
 
 Use the models available in your Cursor subscription as a pi model provider. Cursor
 exposes no raw model-inference API, so this extension bridges at the agent level:
-each pi turn drives a Cursor agent run, and the run's output (assistant text,
-thinking, and inline tool activity) streams back into pi as a normal assistant
-message. The **Cursor agent does the file/shell work with its own harness** — pi's
-built-in tools are bypassed while a `cursor/*` model is active. Completed Cursor
-tool activity is shown as non-executable success/error cards in the pi transcript;
-those cards are observational and never cause pi to run the tool a second time.
+each pi turn drives a Cursor agent run. The **Cursor agent does the file/shell work
+with its own harness** — pi's built-in tools are bypassed while a `cursor/*` model
+is active. Completed Cursor tool activity is shown as non-executable success/error
+cards in the pi transcript; those cards are observational and never cause pi to run
+the tool a second time. Assistant text and thinking are buffered until the Cursor
+run finishes so the final response appears after its tool cards.
 
 **Setup:**
 
@@ -227,10 +227,10 @@ pnpm install   # installs @cursor/sdk (SDK transport dependency)
 
 Then pick one authentication method:
 
-| Transport      | Auth                                                                                      | Notes                                                                                                                |
-| -------------- | ----------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| SDK (primary)  | `export CURSOR_API_KEY=...` from [Dashboard → API Keys](https://cursor.com/dashboard/api) | Adds thinking deltas, direct image attachments, current-turn token usage, and conversation resume across pi restarts |
-| CLI (fallback) | `cursor-agent login` (browser OAuth, same login as the Cursor app)                        | Used automatically when `CURSOR_API_KEY` is unset; print mode suppresses thinking and direct image attachments       |
+| Transport      | Auth                                                                                      | Notes                                                                                                                 |
+| -------------- | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| SDK (primary)  | `export CURSOR_API_KEY=...` from [Dashboard → API Keys](https://cursor.com/dashboard/api) | Adds thinking content, direct image attachments, current-turn token usage, and conversation resume across pi restarts |
+| CLI (fallback) | `cursor-agent login` (browser OAuth, same login as the Cursor app)                        | Used automatically when `CURSOR_API_KEY` is unset; print mode suppresses thinking and direct image attachments        |
 
 Both transports bill identically: runs draw from your plan's normal usage pools at
 the same rates as IDE usage (SDK runs appear under the "SDK" tag in the team usage
@@ -277,8 +277,10 @@ cache-miss heuristic is incompatible with Cursor's multi-request agent turns. Us
 numbers require the SDK transport; subscription cost remains
 `$0` in pi because the SDK does not expose synchronous per-run billing cost.
 
-There is no pi tool execution while bridged. The bridged Cursor conversation can
-diverge if you edit pi history mid-session — recover with `/cursor-reset`.
+There is no pi tool execution while bridged. Because assistant output is buffered
+to preserve transcript ordering, it does not appear token-by-token during the
+Cursor run. The bridged Cursor conversation can diverge if you edit pi history
+mid-session — recover with `/cursor-reset`.
 
 ### CLI: babysit
 

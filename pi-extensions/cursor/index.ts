@@ -2,12 +2,12 @@
  * Cursor bridge: use the models available in your Cursor subscription as a pi provider.
  *
  * Architecture: "agent-as-model". Cursor exposes no raw model-inference
- * API, so each pi model call drives a Cursor agent run and streams its events back
- * as pi assistant events. The Cursor agent does file/shell work with its own
- * harness; pi renders the transcript.
+ * API, so each pi model call drives a Cursor agent run. The Cursor agent does
+ * file/shell work with its own harness; pi records completed tools as transcript
+ * cards, then emits the buffered assistant output so the answer follows the work.
  *
  * Transports (billing is identical — both draw from your plan's usage pools):
- *   1. SDK (primary)  - @cursor/sdk with CURSOR_API_KEY. Adds thinking deltas,
+ *   1. SDK (primary)  - @cursor/sdk with CURSOR_API_KEY. Adds thinking content,
  *                       images, and current-turn token usage. Persists the Cursor
  *                       agent ID to disk, so conversations resume across pi restarts.
  *   2. CLI (fallback) - spawns `cursor-agent` in print mode, authenticated by your
@@ -189,7 +189,7 @@ interface CursorToolEntry {
   details: string;
 }
 
-type ToolActivitySink = (message: AssistantMessage, entry: CursorToolEntry) => void;
+type ToolActivitySink = (entry: CursorToolEntry) => void;
 
 function containsErrorStatus(value: unknown, depth = 0): boolean {
   if (!value || typeof value !== "object" || depth > 5) return false;
@@ -312,6 +312,54 @@ function createOutput(model: Model<never>): AssistantMessage {
   };
 }
 
+function finishBufferedOutput(stream: AssistantMessageEventStream, output: AssistantMessage): void {
+  const content = output.content;
+  output.content = [];
+  stream.push({ type: "start", partial: output });
+
+  for (const block of content) {
+    const contentIndex = output.content.length;
+    if (block.type === "text") {
+      output.content.push({ ...block, text: "" });
+      stream.push({ type: "text_start", contentIndex, partial: output });
+      if (block.text) {
+        (output.content[contentIndex] as { type: "text"; text: string }).text = block.text;
+        stream.push({ type: "text_delta", contentIndex, delta: block.text, partial: output });
+      }
+      stream.push({
+        type: "text_end",
+        contentIndex,
+        content: block.text,
+        partial: output,
+      });
+    } else if (block.type === "thinking") {
+      output.content.push({ ...block, thinking: "" });
+      stream.push({ type: "thinking_start", contentIndex, partial: output });
+      if (block.thinking) {
+        (output.content[contentIndex] as { type: "thinking"; thinking: string }).thinking =
+          block.thinking;
+        stream.push({
+          type: "thinking_delta",
+          contentIndex,
+          delta: block.thinking,
+          partial: output,
+        });
+      }
+      stream.push({
+        type: "thinking_end",
+        contentIndex,
+        content: block.thinking,
+        partial: output,
+      });
+    } else {
+      output.content.push(block);
+    }
+  }
+
+  stream.push({ type: "done", reason: "stop", message: output });
+  stream.end();
+}
+
 function pushError(
   stream: AssistantMessageEventStream,
   output: AssistantMessage,
@@ -320,6 +368,7 @@ function pushError(
 ) {
   output.stopReason = aborted ? "aborted" : "error";
   output.errorMessage = error instanceof Error ? error.message : String(error);
+  stream.push({ type: "start", partial: output });
   stream.push({ type: "error", reason: output.stopReason, error: output });
   stream.end();
 }
@@ -464,7 +513,6 @@ function streamSdk(
     }
 
     try {
-      stream.push({ type: "start", partial: output });
       if (options?.signal?.aborted) {
         throw Object.assign(new Error("Aborted"), { aborted: true });
       }
@@ -493,25 +541,9 @@ function streamSdk(
       const turnUsages: TokenUsage[] = [];
 
       const closeText = () => {
-        if (!textOpen) return;
-        const block = output.content[textIndex] as { type: "text"; text: string };
-        stream.push({
-          type: "text_end",
-          contentIndex: textIndex,
-          content: block.text,
-          partial: output,
-        });
         textOpen = false;
       };
       const closeThinking = () => {
-        if (!thinkingOpen) return;
-        const block = output.content[thinkingIndex] as { type: "thinking"; thinking: string };
-        stream.push({
-          type: "thinking_end",
-          contentIndex: thinkingIndex,
-          content: block.thinking,
-          partial: output,
-        });
         thinkingOpen = false;
       };
       const openText = () => {
@@ -519,7 +551,6 @@ function streamSdk(
         closeThinking();
         output.content.push({ type: "text", text: "" });
         textIndex = output.content.length - 1;
-        stream.push({ type: "text_start", contentIndex: textIndex, partial: output });
         textOpen = true;
       };
       const openThinking = () => {
@@ -527,7 +558,6 @@ function streamSdk(
         closeText();
         output.content.push({ type: "thinking", thinking: "" });
         thinkingIndex = output.content.length - 1;
-        stream.push({ type: "thinking_start", contentIndex: thinkingIndex, partial: output });
         thinkingOpen = true;
       };
 
@@ -539,24 +569,12 @@ function streamSdk(
               openText();
               const block = output.content[textIndex] as { type: "text"; text: string };
               block.text += update.text;
-              stream.push({
-                type: "text_delta",
-                contentIndex: textIndex,
-                delta: update.text,
-                partial: output,
-              });
               break;
             }
             case "thinking-delta": {
               openThinking();
               const block = output.content[thinkingIndex] as { type: "thinking"; thinking: string };
               block.thinking += update.text;
-              stream.push({
-                type: "thinking_delta",
-                contentIndex: thinkingIndex,
-                delta: update.text,
-                partial: output,
-              });
               break;
             }
             case "thinking-completed":
@@ -567,7 +585,7 @@ function streamSdk(
               closeThinking();
               break;
             case "tool-call-completed":
-              onToolActivity(output, createToolEntry(update.toolCall));
+              onToolActivity(createToolEntry(update.toolCall));
               break;
             case "turn-ended":
               if (update.usage) {
@@ -618,8 +636,7 @@ function streamSdk(
 
       output.stopReason = "stop";
       output.errorMessage = undefined;
-      stream.push({ type: "done", reason: output.stopReason, message: output });
-      stream.end();
+      finishBufferedOutput(stream, output);
     } catch (error) {
       const aborted =
         options?.signal?.aborted || (error as { aborted?: boolean })?.aborted === true;
@@ -674,7 +691,6 @@ function streamCli(
 
   (async () => {
     const output = createOutput(model);
-    stream.push({ type: "start", partial: output });
     if (options?.signal?.aborted) {
       pushError(stream, output, new Error("Aborted"), true);
       return;
@@ -728,13 +744,9 @@ function streamCli(
 
       const pushDelta = (delta: string) => {
         if (!delta) return;
-        if (!textOpen) {
-          stream.push({ type: "text_start", contentIndex, partial: output });
-          textOpen = true;
-        }
+        textOpen = true;
         const block = output.content[contentIndex] as { type: "text"; text: string };
         block.text += delta;
-        stream.push({ type: "text_delta", contentIndex, delta, partial: output });
       };
 
       child.stderr!.on("data", (chunk: Buffer) => {
@@ -784,7 +796,7 @@ function streamCli(
 
               case "tool_call":
                 if (event.subtype === "completed") {
-                  onToolActivity(output, createToolEntry(event.tool_call));
+                  onToolActivity(createToolEntry(event.tool_call));
                 }
                 break;
 
@@ -819,17 +831,11 @@ function streamCli(
         );
       }
 
-      if (textOpen) {
-        const block = output.content[contentIndex] as { type: "text"; text: string };
-        stream.push({ type: "text_end", contentIndex, content: block.text, partial: output });
-      } else {
-        output.content.pop();
-      }
+      if (!textOpen) output.content.pop();
 
       output.stopReason = "stop";
       output.errorMessage = undefined;
-      stream.push({ type: "done", reason: output.stopReason, message: output });
-      stream.end();
+      finishBufferedOutput(stream, output);
     } catch (error) {
       pushError(stream, output, error, options?.signal?.aborted ?? false);
     } finally {
@@ -877,18 +883,9 @@ export default async function (pi: ExtensionAPI) {
     return box;
   });
 
-  const pendingToolEntries = new WeakMap<AssistantMessage, CursorToolEntry[]>();
-  const onToolActivity: ToolActivitySink = (message, entry) => {
-    const entries = pendingToolEntries.get(message) ?? [];
-    entries.push(entry);
-    pendingToolEntries.set(message, entries);
+  const onToolActivity: ToolActivitySink = (entry) => {
+    pi.appendEntry(TOOL_ENTRY_TYPE, entry);
   };
-  pi.on("turn_end", (event) => {
-    if (event.message.role !== "assistant" || event.message.provider !== PROVIDER) return;
-    const entries = pendingToolEntries.get(event.message) ?? [];
-    pendingToolEntries.delete(event.message);
-    for (const entry of entries) pi.appendEntry(TOOL_ENTRY_TYPE, entry);
-  });
 
   const stream = transport === "sdk" ? streamSdk : streamCli;
 

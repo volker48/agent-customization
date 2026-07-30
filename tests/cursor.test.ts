@@ -129,6 +129,7 @@ async function loadCliProvider(cursorAgentBin: string) {
   vi.resetModules();
 
   let provider: { baseUrl: string; streamSimple: Function } | undefined;
+  const appendEntry = vi.fn();
   const { default: cursorExtension } = await import("../pi-extensions/cursor/index.js");
   await cursorExtension({
     registerProvider(id: string, config: unknown) {
@@ -139,12 +140,12 @@ async function loadCliProvider(cursorAgentBin: string) {
     registerCommand: vi.fn(),
     on: vi.fn(),
     registerEntryRenderer: vi.fn(),
-    appendEntry: vi.fn(),
+    appendEntry,
     exec: vi.fn(async () => ({ stdout: "", stderr: "", code: 0 })),
   } as never);
 
   if (!provider) throw new Error("cursor provider was not registered");
-  return provider;
+  return { provider, appendEntry };
 }
 
 async function collectEvents(stream: AsyncIterable<AssistantMessageEvent>) {
@@ -399,7 +400,7 @@ describe("Cursor provider", () => {
     });
   });
 
-  it("renders completed Cursor tools as non-executable transcript cards", async () => {
+  it("renders completed Cursor tools before the assistant output", async () => {
     const agent = {
       agentId: "agent-1",
       send: vi.fn(async (_prompt: unknown, options: { onDelta: Function }) => {
@@ -417,10 +418,13 @@ describe("Cursor provider", () => {
             },
           },
         });
+        await options.onDelta({ update: { type: "text-delta", text: "Tests passed." } });
         return finishedRun();
       }),
     };
-    const { provider, eventHandlers, appendEntry } = await loadSdkProvider(agent);
+    const { provider, appendEntry } = await loadSdkProvider(agent);
+    const timeline: string[] = [];
+    appendEntry.mockImplementation(() => timeline.push("tool-card"));
 
     const rawEvents: AssistantMessageEvent[] = [];
     for await (const event of provider.streamSimple(
@@ -428,12 +432,10 @@ describe("Cursor provider", () => {
       { messages: [{ role: "user", content: "Run tests", timestamp: Date.now() }] },
       { apiKey: "test-key", sessionId: "session-1" },
     )) {
+      timeline.push(event.type);
       rawEvents.push(event);
     }
-    const finalMessage = (rawEvents.at(-1) as { type: "done"; message: unknown }).message;
 
-    expect(appendEntry).not.toHaveBeenCalled();
-    await eventHandlers.get("turn_end")?.({ message: finalMessage });
     expect(appendEntry).toHaveBeenCalledWith(
       "cursor-tool",
       expect.objectContaining({
@@ -442,6 +444,7 @@ describe("Cursor provider", () => {
         preview: expect.stringContaining("passed"),
       }),
     );
+    expect(timeline.indexOf("tool-card")).toBeLessThan(timeline.indexOf("start"));
     expect(
       rawEvents.some(
         (event) =>
@@ -688,7 +691,7 @@ describe("Cursor provider", () => {
       ].join("\n"),
     );
     await chmod(cursorAgentBin, 0o755);
-    const provider = await loadCliProvider(cursorAgentBin);
+    const { provider } = await loadCliProvider(cursorAgentBin);
     const controller = new AbortController();
     controller.abort();
 
@@ -702,6 +705,56 @@ describe("Cursor provider", () => {
 
     await expect(readFile(runMarker, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     expect(events.at(-1)).toMatchObject({ type: "error", reason: "aborted" });
+  });
+
+  it("renders CLI tool cards before the assistant output", async () => {
+    const cursorAgentBin = join(home, "cursor-agent");
+    await writeFile(
+      cursorAgentBin,
+      [
+        "#!/bin/bash",
+        "set -euo pipefail",
+        'if [[ "${1:-}" == "models" ]]; then printf "grok-4.5\\n"; exit 0; fi',
+        `printf '%s\\n' '${JSON.stringify({
+          type: "tool_call",
+          subtype: "completed",
+          tool_call: {
+            shellToolCall: {
+              args: { command: "pnpm test" },
+              result: { status: "success", stdout: "passed" },
+            },
+          },
+        })}'`,
+        `printf '%s\\n' '${JSON.stringify({
+          type: "assistant",
+          timestamp_ms: 1,
+          message: { content: [{ type: "text", text: "Tests passed." }] },
+        })}'`,
+        `printf '%s\\n' '${JSON.stringify({ type: "result", is_error: false })}'`,
+      ].join("\n"),
+    );
+    await chmod(cursorAgentBin, 0o755);
+    const { provider, appendEntry } = await loadCliProvider(cursorAgentBin);
+    const timeline: string[] = [];
+    appendEntry.mockImplementation(() => timeline.push("tool-card"));
+
+    for await (const event of provider.streamSimple(
+      model,
+      { messages: [{ role: "user", content: "Run tests", timestamp: Date.now() }] },
+      { sessionId: "session-1" },
+    )) {
+      timeline.push(event.type);
+    }
+
+    expect(appendEntry).toHaveBeenCalledWith(
+      "cursor-tool",
+      expect.objectContaining({
+        summary: "shell: pnpm test",
+        status: "success",
+        preview: expect.stringContaining("passed"),
+      }),
+    );
+    expect(timeline.indexOf("tool-card")).toBeLessThan(timeline.indexOf("start"));
   });
 
   it("reports CLI result errors through the provider stream", async () => {
@@ -720,7 +773,7 @@ describe("Cursor provider", () => {
       ].join("\n"),
     );
     await chmod(cursorAgentBin, 0o755);
-    const provider = await loadCliProvider(cursorAgentBin);
+    const { provider } = await loadCliProvider(cursorAgentBin);
     expect(provider.baseUrl).toBe("cursor-agent://local");
 
     const events = await collectEvents(
