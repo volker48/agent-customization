@@ -67,21 +67,40 @@ async function loadSdkProvider(
   };
   vi.doMock("@cursor/sdk", () => sdk);
 
-  let provider: { streamSimple: Function } | undefined;
+  let provider:
+    | {
+        models: Array<{
+          reasoning: boolean;
+          input: Array<"text" | "image">;
+          thinkingLevelMap?: Record<string, string | null>;
+        }>;
+        streamSimple: Function;
+      }
+    | undefined;
   const commands = new Map<string, { handler: Function }>();
+  const eventHandlers = new Map<string, Function>();
+  const appendEntry = vi.fn();
+  const registerEntryRenderer = vi.fn();
   const { default: cursorExtension } = await import("../pi-extensions/cursor/index.js");
   await cursorExtension({
     registerProvider(id: string, config: unknown) {
-      if (id === "cursor") provider = config as { streamSimple: Function };
+      if (id === "cursor") {
+        provider = config as typeof provider;
+      }
     },
     registerCommand(name: string, command: { handler: Function }) {
       commands.set(name, command);
     },
+    on(name: string, handler: Function) {
+      eventHandlers.set(name, handler);
+    },
+    appendEntry,
+    registerEntryRenderer,
     exec: vi.fn(async () => ({ stdout: "", stderr: "", code: 0 })),
   } as never);
 
   if (!provider) throw new Error("cursor provider was not registered");
-  return { provider, commands, sdk };
+  return { provider, commands, eventHandlers, sdk, appendEntry, registerEntryRenderer };
 }
 
 function cursorAssistant(text: string) {
@@ -118,6 +137,9 @@ async function loadCliProvider(cursorAgentBin: string) {
       }
     },
     registerCommand: vi.fn(),
+    on: vi.fn(),
+    registerEntryRenderer: vi.fn(),
+    appendEntry: vi.fn(),
     exec: vi.fn(async () => ({ stdout: "", stderr: "", code: 0 })),
   } as never);
 
@@ -174,6 +196,258 @@ describe("Cursor provider", () => {
       expect.stringContaining("Never modify generated files."),
       expect.any(Object),
     );
+  });
+
+  it("registers SDK models with automatic reasoning and image capabilities", async () => {
+    const agent = {
+      agentId: "agent-1",
+      send: vi.fn(async () => finishedRun()),
+    };
+    const { provider, registerEntryRenderer } = await loadSdkProvider(agent);
+
+    expect(provider.models[0]).toMatchObject({
+      reasoning: true,
+      input: ["text", "image"],
+      thinkingLevelMap: {
+        off: null,
+        minimal: "auto",
+        low: "auto",
+        medium: "auto",
+        high: "auto",
+      },
+    });
+    expect(registerEntryRenderer).toHaveBeenCalledWith("cursor-tool", expect.any(Function));
+  });
+
+  it("forwards attached images through the SDK", async () => {
+    const agent = {
+      agentId: "agent-1",
+      send: vi.fn(async () => finishedRun()),
+    };
+    const { provider } = await loadSdkProvider(agent);
+    const context: Context = {
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Describe this" },
+            { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+          ],
+          timestamp: Date.now(),
+        },
+      ],
+    };
+
+    await collectEvents(
+      provider.streamSimple(model, context, { apiKey: "test-key", sessionId: "session-1" }),
+    );
+
+    expect(agent.send).toHaveBeenCalledWith(
+      {
+        text: "Describe this",
+        images: [{ data: "aGVsbG8=", mimeType: "image/png" }],
+      },
+      expect.any(Object),
+    );
+  });
+
+  it("sums current-run turn usage without treating it as context size", async () => {
+    const agent = {
+      agentId: "agent-1",
+      send: vi.fn(async (_prompt: unknown, options: { onDelta: Function }) => {
+        await options.onDelta({
+          update: {
+            type: "turn-ended",
+            usage: {
+              inputTokens: 1_000,
+              outputTokens: 100,
+              cacheReadTokens: 500,
+              cacheWriteTokens: 50,
+              reasoningTokens: 25,
+            },
+          },
+        });
+        await options.onDelta({
+          update: {
+            type: "turn-ended",
+            usage: {
+              inputTokens: 2_000,
+              outputTokens: 200,
+              cacheReadTokens: 800,
+              cacheWriteTokens: 80,
+              reasoningTokens: 50,
+            },
+          },
+        });
+        return finishedRun();
+      }),
+    };
+    const { provider } = await loadSdkProvider(agent);
+    const events = await collectEvents(
+      provider.streamSimple(
+        model,
+        { messages: [{ role: "user", content: "Short prompt", timestamp: Date.now() }] },
+        { apiKey: "test-key", sessionId: "session-1" },
+      ),
+    );
+    const done = events.at(-1) as unknown as {
+      type: "done";
+      message: { usage: Record<string, number> };
+    };
+
+    expect(done).toMatchObject({
+      type: "done",
+      message: {
+        usage: {
+          input: 4_430,
+          output: 300,
+          cacheRead: 0,
+          cacheWrite: 0,
+          reasoning: 75,
+        },
+      },
+    });
+    expect(done.message.usage.totalTokens).toBeLessThan(100);
+  });
+
+  it("uses terminal run usage as a fallback on resumed agents", async () => {
+    const usage = {
+      inputTokens: 2_000,
+      outputTokens: 200,
+      cacheReadTokens: 800,
+      cacheWriteTokens: 80,
+      reasoningTokens: 50,
+      totalTokens: 3_080,
+    };
+    const agent = {
+      agentId: "agent-1",
+      send: vi.fn(async () => ({
+        ...finishedRun(),
+        wait: vi.fn(async () => ({ status: "finished" as const, usage })),
+      })),
+    };
+    const { provider } = await loadSdkProvider(agent);
+    const options = { apiKey: "test-key", sessionId: "session-1" };
+
+    await collectEvents(
+      provider.streamSimple(
+        model,
+        { messages: [{ role: "user", content: "First", timestamp: Date.now() }] },
+        options,
+      ),
+    );
+    const events = await collectEvents(
+      provider.streamSimple(
+        model,
+        {
+          messages: [
+            { role: "user", content: "First", timestamp: Date.now() },
+            cursorAssistant("Response"),
+            { role: "user", content: "Second", timestamp: Date.now() },
+          ],
+        },
+        options,
+      ),
+    );
+
+    expect(events.at(-1)).toMatchObject({
+      type: "done",
+      message: {
+        usage: {
+          input: 2_880,
+          output: 200,
+          reasoning: 50,
+        },
+      },
+    });
+  });
+
+  it("keeps alternating text and thinking blocks in stream order", async () => {
+    const agent = {
+      agentId: "agent-1",
+      send: vi.fn(async (_prompt: unknown, options: { onDelta: Function }) => {
+        for (const update of [
+          { type: "text-delta", text: "Before" },
+          { type: "thinking-delta", text: "Think" },
+          { type: "thinking-completed" },
+          { type: "text-delta", text: "After" },
+        ]) {
+          await options.onDelta({ update });
+        }
+        return finishedRun();
+      }),
+    };
+    const { provider } = await loadSdkProvider(agent);
+
+    const events = await collectEvents(
+      provider.streamSimple(
+        model,
+        { messages: [{ role: "user", content: "Run", timestamp: Date.now() }] },
+        { apiKey: "test-key", sessionId: "session-1" },
+      ),
+    );
+
+    expect(events.at(-1)).toMatchObject({
+      type: "done",
+      message: {
+        content: [
+          { type: "text", text: "Before" },
+          { type: "thinking", thinking: "Think" },
+          { type: "text", text: "After" },
+        ],
+      },
+    });
+  });
+
+  it("renders completed Cursor tools as non-executable transcript cards", async () => {
+    const agent = {
+      agentId: "agent-1",
+      send: vi.fn(async (_prompt: unknown, options: { onDelta: Function }) => {
+        await options.onDelta({
+          update: {
+            type: "tool-call-completed",
+            callId: "call-1",
+            toolCall: {
+              type: "shell",
+              args: { command: "pnpm test" },
+              result: {
+                status: "success",
+                value: { exitCode: 0, stdout: "passed", stderr: "" },
+              },
+            },
+          },
+        });
+        return finishedRun();
+      }),
+    };
+    const { provider, eventHandlers, appendEntry } = await loadSdkProvider(agent);
+
+    const rawEvents: AssistantMessageEvent[] = [];
+    for await (const event of provider.streamSimple(
+      model,
+      { messages: [{ role: "user", content: "Run tests", timestamp: Date.now() }] },
+      { apiKey: "test-key", sessionId: "session-1" },
+    )) {
+      rawEvents.push(event);
+    }
+    const finalMessage = (rawEvents.at(-1) as { type: "done"; message: unknown }).message;
+
+    expect(appendEntry).not.toHaveBeenCalled();
+    await eventHandlers.get("turn_end")?.({ message: finalMessage });
+    expect(appendEntry).toHaveBeenCalledWith(
+      "cursor-tool",
+      expect.objectContaining({
+        summary: "shell: pnpm test",
+        status: "success",
+        preview: expect.stringContaining("passed"),
+      }),
+    );
+    expect(
+      rawEvents.some(
+        (event) =>
+          event.type === "text_delta" && (event as { delta: string }).delta.includes("> tool"),
+      ),
+    ).toBe(false);
   });
 
   it("starts a new SDK conversation after cursor-reset", async () => {

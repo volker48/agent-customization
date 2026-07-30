@@ -7,12 +7,12 @@
  * harness; pi renders the transcript.
  *
  * Transports (billing is identical — both draw from your plan's usage pools):
- *   1. SDK (primary)  - @cursor/sdk with CURSOR_API_KEY. Adds thinking deltas and
- *                       per-run token usage. Persists the Cursor agent ID to disk,
- *                       so conversations resume across pi restarts.
+ *   1. SDK (primary)  - @cursor/sdk with CURSOR_API_KEY. Adds thinking deltas,
+ *                       images, and current-turn token usage. Persists the Cursor
+ *                       agent ID to disk, so conversations resume across pi restarts.
  *   2. CLI (fallback) - spawns `cursor-agent` in print mode, authenticated by your
- *                       existing browser login (`cursor-agent login`). Used when
- *                       CURSOR_API_KEY is unset or the SDK is not installed.
+ *                       existing browser login (`cursor-agent login`). Text-only;
+ *                       used when CURSOR_API_KEY is unset or the SDK is not installed.
  *
  * Commands:
  *   /cursor-status  - which transport is active + auth check
@@ -40,12 +40,22 @@ import {
   type Model,
   type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
-import type { Agent, Cursor as CursorNamespace, InteractionUpdate, SDKAgent } from "@cursor/sdk";
+import { Box, Text } from "@earendil-works/pi-tui";
+import type {
+  Agent,
+  Cursor as CursorNamespace,
+  InteractionUpdate,
+  SDKAgent,
+  SDKImage,
+  SDKUserMessage,
+  TokenUsage,
+} from "@cursor/sdk";
 
 const execFileAsync = promisify(execFile);
 
 const CLI = process.env.CURSOR_AGENT_BIN ?? "cursor-agent";
 const PROVIDER = "cursor";
+const TOOL_ENTRY_TYPE = "cursor-tool";
 const STATE_DIR = join(homedir(), ".pi", "agent", "cursor-bridge");
 
 type SdkModule = { Agent: typeof Agent; Cursor: typeof CursorNamespace };
@@ -65,28 +75,44 @@ const FALLBACK_MODELS: CursorModelInfo[] = [
   { id: "composer-2", name: "Composer 2" },
 ];
 
-function extractText(content: unknown): string {
+function extractText(content: unknown, imagePlaceholder?: string): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   const parts: string[] = [];
   for (const block of content as Array<{ type?: string; text?: string }>) {
     if (block?.type === "text" && typeof block.text === "string") parts.push(block.text);
-    else if (block?.type === "image") parts.push("[image omitted: cursor bridge is text-only]");
+    else if (block?.type === "image" && imagePlaceholder) parts.push(imagePlaceholder);
   }
   return parts.join("\n");
 }
 
-function buildPrompt(context: Context, isFirstTurn: boolean): string {
+function extractImages(content: unknown): SDKImage[] {
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((block: unknown) => {
+    if (!block || typeof block !== "object") return [];
+    const image = block as { type?: string; data?: string; mimeType?: string };
+    if (image.type !== "image" || typeof image.data !== "string" || !image.mimeType) return [];
+    return [{ data: image.data, mimeType: image.mimeType }];
+  });
+}
+
+function lastUserContent(context: Context): { content: unknown; index: number } {
   const messages = context.messages ?? [];
-  const lastUserIndex =
-    messages
-      .map((m, i) => ({ m, i }))
-      .filter(({ m }) => m.role === "user")
-      .pop()?.i ?? -1;
-  const lastUserText =
-    lastUserIndex >= 0
-      ? extractText((messages[lastUserIndex] as { content?: unknown }).content)
-      : "";
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role === "user") return { content: message.content, index };
+  }
+  return { content: "", index: -1 };
+}
+
+function buildPrompt(
+  context: Context,
+  isFirstTurn: boolean,
+  currentImagePlaceholder?: string,
+): string {
+  const messages = context.messages ?? [];
+  const { content: currentUserContent, index: lastUserIndex } = lastUserContent(context);
+  const lastUserText = extractText(currentUserContent, currentImagePlaceholder);
 
   if (!isFirstTurn) return lastUserText;
 
@@ -100,7 +126,10 @@ function buildPrompt(context: Context, isFirstTurn: boolean): string {
     // mid-session or transcript replay after restart): ship the transcript.
     prompt.push("This conversation continues from another agent. Transcript so far:", "");
     for (const msg of messages.slice(0, lastUserIndex)) {
-      const text = extractText((msg as { content?: unknown }).content);
+      const text = extractText(
+        (msg as { content?: unknown }).content,
+        "[image omitted from transcript replay]",
+      );
       if (!text) continue;
       const label =
         msg.role === "user" ? "User" : msg.role === "assistant" ? "Assistant" : "Tool result";
@@ -114,6 +143,13 @@ function buildPrompt(context: Context, isFirstTurn: boolean): string {
   if (prompt.length === 0) return lastUserText;
   prompt.push(`User: ${lastUserText}`);
   return prompt.join("\n");
+}
+
+function buildSdkMessage(context: Context, isFirstTurn: boolean): string | SDKUserMessage {
+  const { content } = lastUserContent(context);
+  const images = extractImages(content);
+  const text = buildPrompt(context, isFirstTurn) || "(see attached image)";
+  return images.length > 0 ? { text, images } : text;
 }
 
 function summarizeToolCall(toolCall: unknown): string {
@@ -144,6 +180,109 @@ function summarizeToolCall(toolCall: unknown): string {
   const name = kind.replace(/ToolCall$/, "");
   const target = args.path ?? args.command ?? args.pattern ?? args.query ?? "";
   return target ? `${name}: ${String(target)}` : name;
+}
+
+interface CursorToolEntry {
+  summary: string;
+  status: "success" | "error";
+  preview: string;
+  details: string;
+}
+
+type ToolActivitySink = (message: AssistantMessage, entry: CursorToolEntry) => void;
+
+function containsErrorStatus(value: unknown, depth = 0): boolean {
+  if (!value || typeof value !== "object" || depth > 5) return false;
+  const record = value as Record<string, unknown>;
+  if (record.status === "error") return true;
+  return Object.values(record).some((item) => containsErrorStatus(item, depth + 1));
+}
+
+function collectPreviewText(value: unknown, depth = 0): string[] {
+  if (!value || typeof value !== "object" || depth > 5) return [];
+  const lines: string[] = [];
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (
+      typeof item === "string" &&
+      ["stdout", "stderr", "content", "text", "message", "path"].includes(key) &&
+      item.trim()
+    ) {
+      lines.push(item.trim());
+    } else if (typeof item === "object") {
+      lines.push(...collectPreviewText(item, depth + 1));
+    }
+  }
+  return lines;
+}
+
+function createToolEntry(toolCall: unknown): CursorToolEntry {
+  const details = JSON.stringify(toolCall, null, 2) ?? String(toolCall);
+  const previewText = collectPreviewText(toolCall).join("\n");
+  const preview = (previewText || details).slice(0, 1200);
+  return {
+    summary: summarizeToolCall(toolCall),
+    status: containsErrorStatus(toolCall) ? "error" : "success",
+    preview:
+      preview.length < (previewText || details).length ? `${preview}\n...[truncated]` : preview,
+    details: details.length > 8000 ? `${details.slice(0, 8000)}\n...[truncated]` : details,
+  };
+}
+
+function estimateContentTokens(content: unknown): number {
+  if (typeof content === "string") return Math.ceil(content.length / 4);
+  if (!Array.isArray(content)) return 0;
+  let tokens = 0;
+  for (const block of content as Array<Record<string, unknown>>) {
+    if (block?.type === "image") tokens += 1200;
+    else if (typeof block?.text === "string") tokens += Math.ceil(block.text.length / 4);
+    else if (typeof block?.thinking === "string") tokens += Math.ceil(block.thinking.length / 4);
+    else if (block?.type === "toolCall") {
+      tokens += Math.ceil(JSON.stringify(block.arguments ?? {}).length / 4);
+    }
+  }
+  return tokens;
+}
+
+function estimateVisibleContextTokens(context: Context, output: AssistantMessage): number {
+  let tokens = context.systemPrompt ? Math.ceil(context.systemPrompt.length / 4) : 0;
+  for (const message of context.messages ?? []) {
+    tokens += estimateContentTokens((message as { content?: unknown }).content);
+  }
+  tokens += estimateContentTokens(output.content);
+  return Math.max(1, tokens);
+}
+
+function applyCursorUsage(output: AssistantMessage, usage: TokenUsage): void {
+  // Cursor aggregates every internal agent request in a turn. Pi's cache-miss
+  // detector assumes one provider request, so separate cache buckets create
+  // false re-billing notices. Preserve total prompt volume in input instead.
+  output.usage.input = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+  output.usage.output = usage.outputTokens;
+  output.usage.cacheRead = 0;
+  output.usage.cacheWrite = 0;
+  output.usage.reasoning = usage.reasoningTokens;
+}
+
+function sumTurnUsage(usages: TokenUsage[]): TokenUsage | undefined {
+  if (usages.length === 0) return undefined;
+  return usages.reduce<TokenUsage>(
+    (total, usage) => ({
+      inputTokens: total.inputTokens + usage.inputTokens,
+      outputTokens: total.outputTokens + usage.outputTokens,
+      cacheReadTokens: total.cacheReadTokens + usage.cacheReadTokens,
+      cacheWriteTokens: total.cacheWriteTokens + usage.cacheWriteTokens,
+      reasoningTokens: (total.reasoningTokens ?? 0) + (usage.reasoningTokens ?? 0),
+      totalTokens: total.totalTokens + usage.totalTokens,
+    }),
+    {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
+      totalTokens: 0,
+    },
+  );
 }
 
 function hasCursorHistory(context: Context): boolean {
@@ -303,7 +442,8 @@ async function ensureSdkAgent(
 function streamSdk(
   model: Model<never>,
   context: Context,
-  options?: SimpleStreamOptions,
+  options: SimpleStreamOptions | undefined,
+  onToolActivity: ToolActivitySink,
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
 
@@ -336,7 +476,7 @@ function streamSdk(
         resume,
         options?.sessionId,
       );
-      const prompt = buildPrompt(context, !continued);
+      const prompt = buildSdkMessage(context, !continued);
       if (options?.signal?.aborted) {
         if (!continued) {
           const stateKey = activeSdkStateKey;
@@ -350,20 +490,18 @@ function streamSdk(
       let textOpen = false;
       let thinkingIndex = -1;
       let thinkingOpen = false;
+      const turnUsages: TokenUsage[] = [];
 
-      const openText = () => {
-        if (textOpen) return;
-        output.content.push({ type: "text", text: "" });
-        textIndex = output.content.length - 1;
-        stream.push({ type: "text_start", contentIndex: textIndex, partial: output });
-        textOpen = true;
-      };
-      const openThinking = () => {
-        if (thinkingOpen) return;
-        output.content.push({ type: "thinking", thinking: "" });
-        thinkingIndex = output.content.length - 1;
-        stream.push({ type: "thinking_start", contentIndex: thinkingIndex, partial: output });
-        thinkingOpen = true;
+      const closeText = () => {
+        if (!textOpen) return;
+        const block = output.content[textIndex] as { type: "text"; text: string };
+        stream.push({
+          type: "text_end",
+          contentIndex: textIndex,
+          content: block.text,
+          partial: output,
+        });
+        textOpen = false;
       };
       const closeThinking = () => {
         if (!thinkingOpen) return;
@@ -376,13 +514,28 @@ function streamSdk(
         });
         thinkingOpen = false;
       };
+      const openText = () => {
+        if (textOpen) return;
+        closeThinking();
+        output.content.push({ type: "text", text: "" });
+        textIndex = output.content.length - 1;
+        stream.push({ type: "text_start", contentIndex: textIndex, partial: output });
+        textOpen = true;
+      };
+      const openThinking = () => {
+        if (thinkingOpen) return;
+        closeText();
+        output.content.push({ type: "thinking", thinking: "" });
+        thinkingIndex = output.content.length - 1;
+        stream.push({ type: "thinking_start", contentIndex: thinkingIndex, partial: output });
+        thinkingOpen = true;
+      };
 
       const run = await agent.send(prompt, {
         model: { id: model.id },
         onDelta: ({ update }: { update: InteractionUpdate }) => {
           switch (update.type) {
             case "text-delta": {
-              closeThinking();
               openText();
               const block = output.content[textIndex] as { type: "text"; text: string };
               block.text += update.text;
@@ -409,20 +562,26 @@ function streamSdk(
             case "thinking-completed":
               closeThinking();
               break;
-            case "tool-call-started": {
+            case "tool-call-started":
+              closeText();
               closeThinking();
-              openText();
-              const marker = `\n\n> tool ${summarizeToolCall(update.toolCall)}\n\n`;
-              const block = output.content[textIndex] as { type: "text"; text: string };
-              block.text += marker;
-              stream.push({
-                type: "text_delta",
-                contentIndex: textIndex,
-                delta: marker,
-                partial: output,
-              });
               break;
-            }
+            case "tool-call-completed":
+              onToolActivity(output, createToolEntry(update.toolCall));
+              break;
+            case "turn-ended":
+              if (update.usage) {
+                const usage = {
+                  ...update.usage,
+                  totalTokens:
+                    update.usage.inputTokens +
+                    update.usage.outputTokens +
+                    update.usage.cacheReadTokens +
+                    update.usage.cacheWriteTokens,
+                };
+                turnUsages.push(usage);
+              }
+              break;
           }
         },
       });
@@ -448,22 +607,13 @@ function streamSdk(
       }
 
       closeThinking();
-      if (textOpen) {
-        const block = output.content[textIndex] as { type: "text"; text: string };
-        stream.push({
-          type: "text_end",
-          contentIndex: textIndex,
-          content: block.text,
-          partial: output,
-        });
-      }
+      closeText();
 
-      if (result.usage) {
-        output.usage.input = result.usage.inputTokens;
-        output.usage.output = result.usage.outputTokens;
-        output.usage.cacheRead = result.usage.cacheReadTokens;
-        output.usage.cacheWrite = result.usage.cacheWriteTokens;
-        output.usage.totalTokens = result.usage.totalTokens;
+      const currentUsage = sumTurnUsage(turnUsages);
+      if (currentUsage) applyCursorUsage(output, currentUsage);
+      else if (result.usage) applyCursorUsage(output, result.usage);
+      if (currentUsage || result.usage) {
+        output.usage.totalTokens = estimateVisibleContextTokens(context, output);
       }
 
       output.stopReason = "stop";
@@ -517,7 +667,8 @@ async function discoverCliModels(): Promise<CursorModelInfo[]> {
 function streamCli(
   model: Model<never>,
   context: Context,
-  options?: SimpleStreamOptions,
+  options: SimpleStreamOptions | undefined,
+  onToolActivity: ToolActivitySink,
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
 
@@ -530,7 +681,11 @@ function streamCli(
     }
 
     const resume = hasCursorHistory(context) ? activeCursorChatId : undefined;
-    const prompt = buildPrompt(context, !resume);
+    const prompt = buildPrompt(
+      context,
+      !resume,
+      "[attached image unavailable over Cursor CLI transport]",
+    );
 
     const args = [
       "--print",
@@ -628,8 +783,8 @@ function streamCli(
               }
 
               case "tool_call":
-                if (event.subtype === "started") {
-                  pushDelta(`\n\n> tool ${summarizeToolCall(event.tool_call)}\n\n`);
+                if (event.subtype === "completed") {
+                  onToolActivity(output, createToolEntry(event.tool_call));
                 }
                 break;
 
@@ -711,6 +866,32 @@ export default async function (pi: ExtensionAPI) {
     models = FALLBACK_MODELS;
   }
 
+  pi.registerEntryRenderer<CursorToolEntry>(TOOL_ENTRY_TYPE, (entry, { expanded }, theme) => {
+    const icon = entry.data.status === "error" ? "✗" : "✓";
+    const background = entry.data.status === "error" ? "toolErrorBg" : "toolSuccessBg";
+    const box = new Box(1, 0, (text) => theme.bg(background, text));
+    let content = theme.fg("toolTitle", `${icon} ${entry.data.summary}`);
+    const body = expanded ? entry.data.details : entry.data.preview;
+    if (body) content += `\n${theme.fg("toolOutput", body)}`;
+    box.addChild(new Text(content, 0, 0));
+    return box;
+  });
+
+  const pendingToolEntries = new WeakMap<AssistantMessage, CursorToolEntry[]>();
+  const onToolActivity: ToolActivitySink = (message, entry) => {
+    const entries = pendingToolEntries.get(message) ?? [];
+    entries.push(entry);
+    pendingToolEntries.set(message, entries);
+  };
+  pi.on("turn_end", (event) => {
+    if (event.message.role !== "assistant" || event.message.provider !== PROVIDER) return;
+    const entries = pendingToolEntries.get(event.message) ?? [];
+    pendingToolEntries.delete(event.message);
+    for (const entry of entries) pi.appendEntry(TOOL_ENTRY_TYPE, entry);
+  });
+
+  const stream = transport === "sdk" ? streamSdk : streamCli;
+
   pi.registerProvider(PROVIDER, {
     name: "Cursor (subscription)",
     baseUrl: transport === "sdk" ? "cursor-sdk://local" : "cursor-agent://local",
@@ -719,13 +900,23 @@ export default async function (pi: ExtensionAPI) {
     models: models.map((m) => ({
       id: m.id,
       name: m.name,
-      reasoning: false,
-      input: ["text"] as Array<"text">,
+      reasoning: true,
+      thinkingLevelMap: {
+        off: null,
+        minimal: "auto",
+        low: "auto",
+        medium: "auto",
+        high: "auto",
+        xhigh: null,
+        max: null,
+      },
+      input: (transport === "sdk" ? ["text", "image"] : ["text"]) as Array<"text" | "image">,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 200_000,
       maxTokens: 8192,
     })),
-    streamSimple: (transport === "sdk" ? streamSdk : streamCli) as never,
+    streamSimple: ((model: Model<never>, context: Context, options?: SimpleStreamOptions) =>
+      stream(model, context, options, onToolActivity)) as never,
   });
 
   pi.registerCommand("cursor-status", {
