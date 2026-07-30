@@ -130,6 +130,7 @@ async function loadCliProvider(cursorAgentBin: string) {
 
   let provider: { baseUrl: string; streamSimple: Function } | undefined;
   const appendEntry = vi.fn();
+  const commands = new Map<string, { handler: Function }>();
   const { default: cursorExtension } = await import("../pi-extensions/cursor/index.js");
   await cursorExtension({
     registerProvider(id: string, config: unknown) {
@@ -137,7 +138,9 @@ async function loadCliProvider(cursorAgentBin: string) {
         provider = config as { baseUrl: string; streamSimple: Function };
       }
     },
-    registerCommand: vi.fn(),
+    registerCommand(name: string, command: { handler: Function }) {
+      commands.set(name, command);
+    },
     on: vi.fn(),
     registerEntryRenderer: vi.fn(),
     appendEntry,
@@ -145,7 +148,7 @@ async function loadCliProvider(cursorAgentBin: string) {
   } as never);
 
   if (!provider) throw new Error("cursor provider was not registered");
-  return { provider, appendEntry };
+  return { provider, appendEntry, commands };
 }
 
 async function collectEvents(stream: AsyncIterable<AssistantMessageEvent>) {
@@ -218,6 +221,22 @@ describe("Cursor provider", () => {
       },
     });
     expect(registerEntryRenderer).toHaveBeenCalledWith("cursor-tool", expect.any(Function));
+  });
+
+  it("reports the selected transport and authentication status", async () => {
+    const agent = {
+      agentId: "agent-1",
+      send: vi.fn(async () => finishedRun()),
+    };
+    const { commands } = await loadSdkProvider(agent);
+    const notify = vi.fn();
+
+    await commands.get("cursor-status")?.handler("", { ui: { notify } });
+
+    expect(notify).toHaveBeenCalledWith(
+      "transport: sdk (forced via PI_CURSOR_TRANSPORT)\nCURSOR_API_KEY: set",
+      "info",
+    );
   });
 
   it("forwards attached images through the SDK", async () => {
@@ -707,6 +726,55 @@ describe("Cursor provider", () => {
     expect(events.at(-1)).toMatchObject({ type: "error", reason: "aborted" });
   });
 
+  it("resumes CLI chats and clears them with cursor-reset", async () => {
+    const cursorAgentBin = join(home, "cursor-agent");
+    const argsLog = join(home, "args.log");
+    await writeFile(
+      cursorAgentBin,
+      [
+        "#!/bin/bash",
+        "set -euo pipefail",
+        'if [[ "${1:-}" == "models" ]]; then printf "grok-4.5\\n"; exit 0; fi',
+        `if [[ " $* " == *" --resume cli-chat-1 "* ]]; then printf 'resume\\n'; else printf 'fresh\\n'; fi >> ${JSON.stringify(argsLog)}`,
+        `printf '%s\\n' '${JSON.stringify({
+          type: "system",
+          subtype: "init",
+          session_id: "cli-chat-1",
+        })}'`,
+        `printf '%s\\n' '${JSON.stringify({ type: "result", is_error: false })}'`,
+      ].join("\n"),
+    );
+    await chmod(cursorAgentBin, 0o755);
+    const { provider, commands } = await loadCliProvider(cursorAgentBin);
+    const options = { sessionId: "session-1" };
+
+    await collectEvents(
+      provider.streamSimple(
+        model,
+        { messages: [{ role: "user", content: "First", timestamp: Date.now() }] },
+        options,
+      ),
+    );
+    const continuedContext: Context = {
+      messages: [
+        { role: "user", content: "First", timestamp: Date.now() },
+        cursorAssistant("Response"),
+        { role: "user", content: "Second", timestamp: Date.now() },
+      ],
+    };
+    await collectEvents(provider.streamSimple(model, continuedContext, options));
+    await commands.get("cursor-reset")?.handler("", {
+      cwd: process.cwd(),
+      sessionManager: { getSessionId: () => "session-1" },
+      ui: { notify: vi.fn() },
+    });
+    await collectEvents(provider.streamSimple(model, continuedContext, options));
+
+    const invocations = (await readFile(argsLog, "utf8")).trim().split("\n");
+    expect(invocations).toHaveLength(3);
+    expect(invocations).toEqual(["fresh", "resume", "fresh"]);
+  });
+
   it("renders CLI tool cards before the assistant output", async () => {
     const cursorAgentBin = join(home, "cursor-agent");
     await writeFile(
@@ -789,6 +857,67 @@ describe("Cursor provider", () => {
       reason: "error",
       error: { errorMessage: "simulated Grok failure" },
     });
+  });
+
+  it("disposes the active SDK agent when a new extension instance uses another session", async () => {
+    const agentA = {
+      agentId: "agent-a",
+      send: vi.fn(async () => finishedRun()),
+      [Symbol.asyncDispose]: vi.fn(async () => undefined),
+    };
+    const agentB = {
+      agentId: "agent-b",
+      send: vi.fn(async () => finishedRun()),
+      [Symbol.asyncDispose]: vi.fn(async () => undefined),
+    };
+    const sdk = {
+      Agent: {
+        create: vi.fn().mockResolvedValueOnce(agentA).mockResolvedValueOnce(agentB),
+        resume: vi.fn(),
+      },
+      Cursor: {
+        models: {
+          list: vi.fn(async () => [{ id: model.id, displayName: model.name }]),
+        },
+      },
+    };
+    vi.doMock("@cursor/sdk", () => sdk);
+    const { default: cursorExtension } = await import("../pi-extensions/cursor/index.js");
+
+    const registerInstance = async () => {
+      let provider: { streamSimple: Function } | undefined;
+      await cursorExtension({
+        registerProvider(id: string, config: unknown) {
+          if (id === "cursor") provider = config as { streamSimple: Function };
+        },
+        registerCommand: vi.fn(),
+        registerEntryRenderer: vi.fn(),
+        appendEntry: vi.fn(),
+        exec: vi.fn(async () => ({ stdout: "", stderr: "", code: 0 })),
+      } as never);
+      if (!provider) throw new Error("cursor provider was not registered");
+      return provider;
+    };
+
+    const providerA = await registerInstance();
+    await collectEvents(
+      providerA.streamSimple(
+        model,
+        { messages: [{ role: "user", content: "A", timestamp: Date.now() }] },
+        { apiKey: "test-key", sessionId: "session-a" },
+      ),
+    );
+    const providerB = await registerInstance();
+    await collectEvents(
+      providerB.streamSimple(
+        model,
+        { messages: [{ role: "user", content: "B", timestamp: Date.now() }] },
+        { apiKey: "test-key", sessionId: "session-b" },
+      ),
+    );
+
+    expect(agentA[Symbol.asyncDispose]).toHaveBeenCalledOnce();
+    expect(sdk.Agent.create).toHaveBeenCalledTimes(2);
   });
 
   it("keeps persisted SDK conversations isolated by Pi session", async () => {
