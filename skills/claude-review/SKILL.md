@@ -1,6 +1,7 @@
 ---
 name: claude-review
 description: Runs an independent Claude Code /code-review from the current repository and turns findings into actionable fixes. Use when the user asks for a Claude review, second-opinion review, /code-review, or after non-trivial code changes where an external review could catch correctness, security, or integration issues.
+disable-model-invocation: true
 ---
 
 # Claude Review
