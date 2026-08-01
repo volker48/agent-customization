@@ -1,6 +1,7 @@
 ---
 name: fusion
 description: Bundle curated repository files into a self-contained prompt and hand it to the multi-model Fusion panel for a second opinion (e.g. "does this refactor plan cohere?", "is this design sound?"). Use when a Fusion panel needs real code as evidence, since the panel and judge have no filesystem access.
+disable-model-invocation: true
 ---
 
 # Fusion bundle
