@@ -59,8 +59,7 @@ say so briefly instead of guessing.
 
 - "The aforementioned methodology leverages a multifaceted approach to
   optimize throughput." →
-  "This method uses several approaches to improve the rate at which work is
-  completed."
+  "This method uses one approach with several parts to optimize throughput."
 - "It should be noted that the system is currently unable to function in the
   absence of electrical power." → "The system currently cannot work without
   electrical power."
