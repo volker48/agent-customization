@@ -1,6 +1,12 @@
 ---
 name: lol-wut
-description: "Rewrite the agent's last message in simplified English using the Big Three standards (ASD-STE100, Caterpillar Technical English, Plain English): short active sentences, plain words, one term per concept, no jargon, and no dropped meaning. Use when the user asks to simplify, rephrase, or 'lol-wut' the previous response."
+description: >-
+  Rewrite the agent's last message in simplified English using the Big Three
+  (ASD-STE100, Caterpillar Technical English, Plain English): short active
+  sentences, plain words, one term per concept, no jargon, no dropped meaning.
+  Copy literal technical content (paths, URLs, code, commands, identifiers,
+  citations, negation, warnings, qualifiers) unchanged. Use when the user asks
+  to simplify, rephrase, or 'lol-wut' the previous response.
 disable-model-invocation: true
 ---
 
@@ -23,18 +29,25 @@ meaning and nuance — simplify the language, never the content.
    - **Cut filler.** Drop hedging and empty words.
    - **Define on first use.** Spell out acronyms; define technical terms once.
    - **Stay concrete.** Prefer the specific number, name, or step.
+   - **Copy literal content unchanged.** Keep file paths, URLs, code, commands,
+     identifiers, citations, and quotes exactly as written.
+   - **Keep caveats and qualifiers.** Preserve negation, modality, conditions,
+     warnings, and time or safety qualifiers ("currently", "without power").
 
-4. Check the rewrite still holds every fact, number, and instruction.
+4. Confirm the rewrite keeps every fact, number, and instruction, including
+   literal technical content and qualifiers.
 
 ## Examples
 
-- "The aforementioned methodology leverages a multifaceted approach to optimize throughput." →
-  "This method uses several steps to get more work done."
-- "It should be noted that the system is currently unable to function in the absence of electrical power." →
-  "The system needs power to work."
+- "The aforementioned methodology leverages a multifaceted approach to optimize
+  throughput." → "This method uses several steps to get more work done."
+- "It should be noted that the system is currently unable to function in the
+  absence of electrical power." → "The system currently cannot work without
+  electrical power."
 
 ## Gotchas
 
 - Don't talk down (baby talk) or strip technical accuracy for brevity.
-- Don't change facts, numbers, or instructions.
+- Don't change facts, numbers, instructions, or literal technical content.
+- Don't drop negation, warnings, or time/safety qualifiers.
 - Don't just compress — clarity, not word count.
