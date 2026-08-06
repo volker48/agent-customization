@@ -23,6 +23,18 @@ This is an editorial rewrite, not a new answer. It uses selected ideas from
 ASD-STE100, Caterpillar Technical English, and plain-language guidance. It does
 not enforce an approved-word dictionary or certify compliance with any standard.
 
+## Write from one human to another
+
+One guiding principle is that the rewrite should sound like one human talking
+to another human. AI-written prose is often unusually dense. It can compress too
+many ideas, qualifications, and abstractions into a small space, which makes the
+text hard to understand even when every sentence is technically correct.
+
+Rewrite that prose as a thoughtful person would explain it to another person.
+Make the reader's work easier. Slow down where the logic needs room, state the
+point plainly, and use structure when it helps. Keep the full technical meaning,
+but do not preserve density merely because it appeared in the source.
+
 ## Source and output
 
 - The source is the last assistant response before this skill invocation.
