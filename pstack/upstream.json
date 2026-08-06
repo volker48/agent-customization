@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "repository": "https://github.com/cursor/plugins.git",
+  "subtree": "pstack",
+  "requestedRef": "main",
+  "commit": "14d9dfa06283faa94bf9931d3e98c189bc375680",
+  "tree": "fcf05c22075400ea23c584961a6422af7acbe434"
+}

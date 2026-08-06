@@ -1,0 +1,7 @@
+{
+  "version": 2,
+  "paths": {
+    "agents": "28f769fdcedf33853de9845537ed49996f46b207",
+    "skills/setup-pstack": "8fd669f0bab6c8807e06696d80220943f8c16226"
+  }
+}

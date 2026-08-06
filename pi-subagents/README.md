@@ -9,7 +9,8 @@ These package-owned definitions shadow only the builtin `pi-subagents` roles who
 - `agents/reviewer.md` keeps the repository's intentional non-mutating `bash` guidance.
 - `agents/oracle.md` gives high-effort forked Oracle reviews a 15-minute default runtime.
 - Bundled definitions remain authoritative for roles without prompt or launch-default customizations.
-- `~/.pi/agent/settings.json` owns local model, thinking, and tool overrides for every role.
+- `pstack/pi/agents/poteto-agent.md` separately publishes the namespaced `pstack.poteto` fan-out role; its upstream source and update flow are documented in `pstack/README.md`.
+- `~/.pi/agent/settings.json` owns local model, thinking, and tool overrides for the builtin-compatible roles. pstack role routing defaults live in `pstack/pi/model-defaults.json`, with optional user overrides in `pstack.json` under `$PI_CODING_AGENT_DIR` (default `~/.pi/agent`).
 
 The Markdown intentionally omits `tools` and `thinking`. `subagents.agentOverrides` fills those unset fields while explicit prompt frontmatter remains package-owned.
 
@@ -21,7 +22,7 @@ The tool overrides preserve each upstream allowlist and translate tools that dif
 
 ## Discovery
 
-The repository's `package.json` publishes this directory through `pi.subagents.agents`. Because `agent-customization` is already installed as a Pi package, no separate installer or user-scope symlinks are required. Package definitions override builtins with the same runtime name; user and project definitions can still override this package.
+The repository's `package.json` publishes this directory and `pstack/pi/agents` through `pi.subagents.agents`. Because `agent-customization` is already installed as a Pi package, no separate installer or user-scope symlinks are required. Package definitions override builtins with the same runtime name; user and project definitions can still override this package.
 
 Restart Pi or use `/reload`, then verify with:
 

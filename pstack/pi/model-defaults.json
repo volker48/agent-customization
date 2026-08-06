@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "roles": {
+    "feature, refactoring": "openai-codex/gpt-5.6-luna:xhigh",
+    "bug-fix": "openai-codex/gpt-5.6-sol:xhigh",
+    "perf-issue": "openai-codex/gpt-5.6-sol:xhigh",
+    "hillclimb": "openai-codex/gpt-5.6-sol:xhigh",
+    "judgment and prose": "openai-codex/gpt-5.6-sol:xhigh",
+    "hardest tasks": "openai-codex/gpt-5.6-sol:xhigh",
+    "how explorer": "openai-codex/gpt-5.6-luna:high",
+    "how explainer": "openai-codex/gpt-5.6-sol:high",
+    "how critics": [
+      "openai-codex/gpt-5.6-sol:xhigh",
+      "anthropic/claude-opus-4-8:high",
+      "openrouter/minimax/minimax-m2.7",
+      "openrouter/moonshotai/kimi-k2.6"
+    ],
+    "why investigators": "openai-codex/gpt-5.6-luna:high",
+    "why synthesizer": "openai-codex/gpt-5.6-sol:xhigh",
+    "reflect tooling": "openai-codex/gpt-5.6-sol:high",
+    "reflect judgment, divergent, synthesizer": "openai-codex/gpt-5.6-sol:xhigh",
+    "arena runners": [
+      "openai-codex/gpt-5.6-sol:xhigh",
+      "anthropic/claude-opus-4-8:high",
+      "openrouter/minimax/minimax-m2.7",
+      "openrouter/moonshotai/kimi-k2.6"
+    ],
+    "arena cross-judge pool": [
+      "anthropic/claude-opus-4-8:high",
+      "openai-codex/gpt-5.6-sol:xhigh"
+    ],
+    "swarm workers": "openai-codex/gpt-5.6-luna:xhigh",
+    "architect runners": [
+      "openai-codex/gpt-5.6-sol:xhigh",
+      "anthropic/claude-opus-4-8:high",
+      "openrouter/minimax/minimax-m2.7",
+      "openrouter/moonshotai/kimi-k2.6"
+    ],
+    "interrogate reviewers": [
+      "openai-codex/gpt-5.6-sol:xhigh",
+      "anthropic/claude-opus-4-8:high",
+      "openrouter/minimax/minimax-m2.7",
+      "openrouter/moonshotai/kimi-k2.6"
+    ]
+  }
+}

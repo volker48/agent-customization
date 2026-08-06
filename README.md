@@ -193,6 +193,18 @@ The installed `agent-customization` Pi package exposes these definitions through
 `pi.subagents.agents`; no user-scope symlinks are required. See
 [`pi-subagents/README.md`](pi-subagents/README.md) for provenance and update guidance.
 
+### Pi: pstack (`pstack/`, `pi-extensions/pstack.ts`)
+
+Vendors Cursor's pstack skills at a pinned upstream commit and generates a Pi-adapted skill
+surface. The extension adds Cursor-style aliases such as `/poteto-mode`, a sticky per-session
+mode, a branch-aware `pstack_tasks` checklist, and model-role injection from
+`pstack.json` under `$PI_CODING_AGENT_DIR` (default `~/.pi/agent`). The package also publishes the bounded fan-out subagent
+`pstack.poteto`.
+
+Run `pnpm pstack:sync` to pull upstream changes and regenerate the Pi surface. Do not edit
+`pstack/upstream/` or `pstack/pi/` directly. See [`pstack/README.md`](pstack/README.md) for
+usage, model setup, capability mappings, and update review steps.
+
 ### Pi: RTK (`pi-extensions/rtk.ts`)
 
 Intercepts `bash` tool calls and delegates command rewriting to `rtk rewrite <command>`. Only rewrites when RTK returns a different non-empty command. Supports `PI_RTK_BIN` or Pi's `--rtk-bin` flag for binary overrides.

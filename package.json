@@ -22,7 +22,9 @@
     "test:fusion": "vitest run tests/fusion.test.ts tests/fusion-*.test.ts",
     "test:fusion:e2e": "FUSION_E2E=1 vitest run tests/fusion.e2e.test.ts",
     "verify:rtk": "node scripts/verify-rtk-extension.mjs",
-    "validate:rtk": "node scripts/verify-rtk-extension.mjs"
+    "validate:rtk": "node scripts/verify-rtk-extension.mjs",
+    "pstack:sync": "node scripts/sync-pstack.mjs",
+    "pstack:check": "node scripts/sync-pstack.mjs --check"
   },
   "dependencies": {
     "@mozilla/readability": "0.6.0",
@@ -53,14 +55,16 @@
       "./pi-extensions"
     ],
     "skills": [
-      "./skills"
+      "./skills",
+      "./pstack/pi/skills"
     ],
     "prompts": [
       "./prompts"
     ],
     "subagents": {
       "agents": [
-        "./pi-subagents/agents"
+        "./pi-subagents/agents",
+        "./pstack/pi/agents"
       ]
     }
   }

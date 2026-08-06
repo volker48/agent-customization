@@ -10,7 +10,7 @@ describe("Pi subagent overrides", () => {
     const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
     const agentDirectory = packageJson.pi?.subagents?.agents;
 
-    expect(agentDirectory).toEqual(["./pi-subagents/agents"]);
+    expect(agentDirectory).toEqual(["./pi-subagents/agents", "./pstack/pi/agents"]);
     expect(
       readdirSync(join(root, "pi-subagents", "agents"))
         .filter((name) => name.endsWith(".md"))
