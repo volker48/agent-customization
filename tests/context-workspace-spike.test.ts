@@ -7,19 +7,15 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   compact,
   createAgentSession,
-  createExtensionRuntime,
   DefaultResourceLoader,
   estimateTokens,
-  ExtensionRunner,
   ModelRuntime,
   SessionManager,
   sessionEntryToContextMessages,
   SettingsManager,
   type ContextEvent,
-  type Extension,
   type ExtensionContext,
   type ExtensionFactory,
-  type ModelRegistry,
   type SessionBeforeCompactEvent,
 } from "@earendil-works/pi-coding-agent";
 import { createFauxCore, fauxAssistantMessage, type Context } from "@earendil-works/pi-ai";
@@ -30,6 +26,8 @@ type ReadonlySessionManager = ExtensionContext["sessionManager"];
 const LARGE_PAYLOAD_MARKER = "CONTEXT_WORKSPACE_LARGE_PAYLOAD";
 const LARGE_PAYLOAD = `${LARGE_PAYLOAD_MARKER}:${"x".repeat(120_000)}`;
 const ARCHIVED_FILE_PATH = "/archived-diagnostics.txt";
+const SPIKE_MODEL_LIMITS = { contextWindow: 50_000, maxTokens: 1_000 } as const;
+const MAX_FAUX_RESPONSES = 8;
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -114,35 +112,6 @@ function contextMessageFingerprint(message: AgentMessage): string {
   return JSON.stringify(stableMessage);
 }
 
-async function providerBoundMessages(
-  session: SessionManager,
-  archivedEntryIds: ReadonlySet<string>,
-): Promise<AgentMessage[]> {
-  const runtime = createExtensionRuntime();
-  const contextHandler = (event: ContextEvent, ctx: ExtensionContext) => ({
-    messages: projectArchivedEntries(ctx.sessionManager, event.messages, archivedEntryIds),
-  });
-  const extension = {
-    path: "<context-workspace-spike>",
-    resolvedPath: "<context-workspace-spike>",
-    sourceInfo: {},
-    handlers: new Map([["context", [contextHandler]]]),
-    tools: new Map(),
-    messageRenderers: new Map(),
-    commands: new Map(),
-    flags: new Map(),
-    shortcuts: new Map(),
-  } as unknown as Extension;
-  const runner = new ExtensionRunner(
-    [extension],
-    runtime,
-    session.getCwd(),
-    session,
-    {} as ModelRegistry,
-  );
-  return runner.emitContext(session.buildSessionContext().messages);
-}
-
 function messageText(messages: AgentMessage[]): string {
   return JSON.stringify(messages);
 }
@@ -164,9 +133,53 @@ function persistedEntryLine(sessionFile: string, entryId: string): string {
   return line;
 }
 
+function captureEntrySnapshot(sessionManager: SessionManager, entryId: string) {
+  const sessionFile = sessionManager.getSessionFile();
+  if (!sessionFile) throw new Error("persisted session file missing");
+  return {
+    sessionFile,
+    serialized: JSON.stringify(sessionManager.getEntry(entryId)),
+    persistedLine: persistedEntryLine(sessionFile, entryId),
+  };
+}
+
+function expectExactLifecycleRecovery(
+  root: string,
+  sessionManager: SessionManager,
+  assistantEntryId: string,
+  toolResultId: string,
+  snapshot: ReturnType<typeof captureEntrySnapshot>,
+  forkDirectory: string,
+) {
+  expect(JSON.stringify(sessionManager.getEntry(toolResultId))).toBe(snapshot.serialized);
+  expect(persistedEntryLine(snapshot.sessionFile, toolResultId)).toBe(snapshot.persistedLine);
+  const reloaded = SessionManager.open(snapshot.sessionFile);
+  expect(JSON.stringify(reloaded.getEntry(toolResultId))).toBe(snapshot.serialized);
+  const forked = SessionManager.forkFrom(snapshot.sessionFile, root, join(root, forkDirectory));
+  expect(JSON.stringify(forked.getEntry(toolResultId))).toBe(snapshot.serialized);
+  const forkedSessionFile = forked.getSessionFile();
+  if (!forkedSessionFile) throw new Error("forked session file missing");
+  expect(persistedEntryLine(forkedSessionFile, toolResultId)).toBe(snapshot.persistedLine);
+  reloaded.branch(assistantEntryId);
+  expect(JSON.stringify(reloaded.getEntry(toolResultId))).toBe(snapshot.serialized);
+  expect(persistedEntryLine(snapshot.sessionFile, toolResultId)).toBe(snapshot.persistedLine);
+}
+
 interface ObservedCompaction {
   reason: SessionBeforeCompactEvent["reason"];
   nativeInput: string;
+}
+
+interface RuntimeHarnessOptions {
+  reserveTokens?: number;
+  keepRecentTokens?: number;
+  customCompaction?: boolean;
+}
+
+interface HarnessObservations {
+  providerContexts: Context[];
+  contextHandlerUsages: Array<ReturnType<ExtensionContext["getContextUsage"]>>;
+  observedCompactions: ObservedCompaction[];
 }
 
 async function createPersistedSession() {
@@ -178,24 +191,13 @@ async function createPersistedSession() {
   };
 }
 
-async function createRuntimeHarness(
-  root: string,
-  sessionManager: SessionManager,
-  archivedEntryIds: ReadonlySet<string>,
-  options: {
-    reserveTokens?: number;
-    keepRecentTokens?: number;
-    customCompaction?: boolean;
-  } = {},
-) {
-  const providerContexts: Context[] = [];
-  const contextHandlerUsages: Array<ReturnType<ExtensionContext["getContextUsage"]>> = [];
-  const observedCompactions: ObservedCompaction[] = [];
+function createSpikeFaux(providerContexts: Context[]) {
   const faux = createFauxCore({
     api: "context-workspace-spike",
     provider: "context-workspace-spike",
-    models: [{ id: "spike", contextWindow: 50_000, maxTokens: 1_000 }],
+    models: [{ id: "spike", ...SPIKE_MODEL_LIMITS }],
   });
+  // Echo only the payload marker, never the file path: path assertions must come from fileOps.
   const response = (context: Context) => {
     providerContexts.push(structuredClone(context));
     const containsArchive = messageText(context.messages as AgentMessage[]).includes(
@@ -203,8 +205,11 @@ async function createRuntimeHarness(
     );
     return fauxAssistantMessage(containsArchive ? LARGE_PAYLOAD_MARKER : "ok");
   };
-  faux.setResponses(Array.from({ length: 8 }, () => response));
+  faux.setResponses(Array.from({ length: MAX_FAUX_RESPONSES }, () => response));
+  return faux;
+}
 
+async function createSpikeModelRuntime(root: string, faux: ReturnType<typeof createFauxCore>) {
   const modelRuntime = await ModelRuntime.create({
     authPath: join(root, "auth.json"),
     modelsPath: null,
@@ -223,68 +228,99 @@ async function createRuntimeHarness(
         reasoning: false,
         input: ["text"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 50_000,
-        maxTokens: 1_000,
+        ...SPIKE_MODEL_LIMITS,
       },
     ],
   });
   await modelRuntime.setRuntimeApiKey("context-workspace-spike", randomUUID());
   const model = modelRuntime.getModel("context-workspace-spike", "spike");
   if (!model) throw new Error("faux model missing");
+  return { modelRuntime, model };
+}
 
-  const extension: ExtensionFactory = (pi) => {
+async function runMessageOnlyCompactionProbe(
+  event: SessionBeforeCompactEvent,
+  ctx: ExtensionContext,
+  archivedEntryIds: ReadonlySet<string>,
+  observedCompactions: ObservedCompaction[],
+) {
+  observedCompactions.push({
+    reason: event.reason,
+    nativeInput: messageText([
+      ...event.preparation.messagesToSummarize,
+      ...event.preparation.turnPrefixMessages,
+    ]),
+  });
+  if (!ctx.model) throw new Error("compaction model missing");
+  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+  if (auth.ok === false) throw new Error(auth.error);
+  const provider = ctx.modelRegistry.getRegisteredProviderConfig(ctx.model.provider);
+  const messagesToSummarize = projectArchivedEntries(
+    ctx.sessionManager,
+    event.preparation.messagesToSummarize,
+    archivedEntryIds,
+  );
+  const turnPrefixMessages = projectArchivedEntries(
+    ctx.sessionManager,
+    event.preparation.turnPrefixMessages,
+    archivedEntryIds,
+  );
+  // This probe deliberately alters only the message arrays. Keeping native derived fields proves
+  // that unprojected fileOps still leak into the summary.
+  const preparation = { ...event.preparation, messagesToSummarize, turnPrefixMessages };
+  return {
+    compaction: await compact(
+      preparation,
+      ctx.model,
+      auth.apiKey,
+      auth.headers,
+      undefined,
+      ctx.signal,
+      undefined,
+      provider?.streamSimple,
+      auth.env,
+    ),
+  };
+}
+
+function createSpikeExtension(
+  archivedEntryIds: ReadonlySet<string>,
+  options: RuntimeHarnessOptions,
+  observations: HarnessObservations,
+): ExtensionFactory {
+  return (pi) => {
     pi.on("context", (event, ctx) => {
-      contextHandlerUsages.push(ctx.getContextUsage());
+      observations.contextHandlerUsages.push(ctx.getContextUsage());
       return {
         messages: projectArchivedEntries(ctx.sessionManager, event.messages, archivedEntryIds),
       };
     });
     if (options.customCompaction) {
-      pi.on("session_before_compact", async (event, ctx) => {
-        observedCompactions.push({
-          reason: event.reason,
-          nativeInput: messageText([
-            ...event.preparation.messagesToSummarize,
-            ...event.preparation.turnPrefixMessages,
-          ]),
-        });
-        if (!ctx.model) throw new Error("compaction model missing");
-        const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-        if (auth.ok === false) throw new Error(auth.error);
-        const provider = ctx.modelRegistry.getRegisteredProviderConfig(ctx.model.provider);
-        const messagesToSummarize = projectArchivedEntries(
-          ctx.sessionManager,
-          event.preparation.messagesToSummarize,
+      pi.on("session_before_compact", (event, ctx) =>
+        runMessageOnlyCompactionProbe(
+          event,
+          ctx,
           archivedEntryIds,
-        );
-        const turnPrefixMessages = projectArchivedEntries(
-          ctx.sessionManager,
-          event.preparation.turnPrefixMessages,
-          archivedEntryIds,
-        );
-        // Deliberately preserve native derived fields: this probe proves that projecting only the
-        // message arrays is insufficient because unprojected fileOps still leak into the summary.
-        const preparation = {
-          ...event.preparation,
-          messagesToSummarize,
-          turnPrefixMessages,
-        };
-        return {
-          compaction: await compact(
-            preparation,
-            ctx.model,
-            auth.apiKey,
-            auth.headers,
-            undefined,
-            ctx.signal,
-            undefined,
-            provider?.streamSimple,
-            auth.env,
-          ),
-        };
-      });
+          observations.observedCompactions,
+        ),
+      );
     }
   };
+}
+
+async function createRuntimeHarness(
+  root: string,
+  sessionManager: SessionManager,
+  archivedEntryIds: ReadonlySet<string>,
+  options: RuntimeHarnessOptions = {},
+) {
+  const observations: HarnessObservations = {
+    providerContexts: [],
+    contextHandlerUsages: [],
+    observedCompactions: [],
+  };
+  const faux = createSpikeFaux(observations.providerContexts);
+  const { modelRuntime, model } = await createSpikeModelRuntime(root, faux);
   const settingsManager = SettingsManager.inMemory({
     compaction: {
       enabled: true,
@@ -296,7 +332,12 @@ async function createRuntimeHarness(
     cwd: root,
     agentDir: root,
     settingsManager,
-    extensionFactories: [{ name: "context-workspace-spike", factory: extension }],
+    extensionFactories: [
+      {
+        name: "context-workspace-spike",
+        factory: createSpikeExtension(archivedEntryIds, options, observations),
+      },
+    ],
     noSkills: true,
     noPromptTemplates: true,
     noThemes: true,
@@ -314,24 +355,28 @@ async function createRuntimeHarness(
     noTools: "all",
   });
   await session.bindExtensions({ mode: "print" });
-  return { session, providerContexts, contextHandlerUsages, observedCompactions };
+  return { session, ...observations };
 }
 
 describe("Context Workspace Pi 0.80.8 architecture spike", () => {
   it("removes an archived 30k-token tool result from provider-bound context", async () => {
-    const session = SessionManager.inMemory("/context-workspace-spike");
-    const { assistantEntryId, toolResultId } = appendLargeToolExchange(session);
-    const toolResult = session.getEntry(toolResultId);
+    const { root, sessionManager } = await createPersistedSession();
+    const { assistantEntryId, toolResultId } = appendLargeToolExchange(sessionManager);
+    const toolResult = sessionManager.getEntry(toolResultId);
 
     expect(toolResult?.type).toBe("message");
     if (toolResult?.type !== "message") throw new Error("tool result fixture missing");
     expect(estimateTokens(toolResult.message)).toBeGreaterThanOrEqual(30_000);
 
-    const projected = await providerBoundMessages(
-      session,
+    const harness = await createRuntimeHarness(
+      root,
+      sessionManager,
       new Set([assistantEntryId, toolResultId]),
     );
+    await harness.session.prompt("Continue after hiding the diagnostic exchange.");
 
+    expect(harness.providerContexts).toHaveLength(1);
+    const projected = harness.providerContexts[0].messages as AgentMessage[];
     expect(messageText(projected)).not.toContain(LARGE_PAYLOAD_MARKER);
     expect(messageText(projected)).not.toContain("generate-diagnostics");
   });
@@ -416,7 +461,8 @@ describe("Context Workspace Pi 0.80.8 architecture spike", () => {
     expect(harness.contextHandlerUsages[0]?.tokens ?? 0).toBeGreaterThanOrEqual(
       estimateTokens(toolResult.message),
     );
-    expect(usage?.tokens).not.toBeNull();
+    expect(usage).toBeDefined();
+    expect(usage?.tokens).toEqual(expect.any(Number));
     expect(usage?.tokens ?? Number.POSITIVE_INFINITY).toBeLessThan(
       estimateTokens(toolResult.message),
     );
@@ -470,10 +516,7 @@ describe("Context Workspace Pi 0.80.8 architecture spike", () => {
   it("keeps exact entries but leaks archived file metadata after manual compaction", async () => {
     const { root, sessionManager } = await createPersistedSession();
     const { assistantEntryId, toolResultId } = appendLargeToolExchange(sessionManager);
-    const original = JSON.stringify(sessionManager.getEntry(toolResultId));
-    const sessionFile = sessionManager.getSessionFile();
-    if (!sessionFile) throw new Error("persisted session file missing");
-    const originalLine = persistedEntryLine(sessionFile, toolResultId);
+    const snapshot = captureEntrySnapshot(sessionManager, toolResultId);
     sessionManager.appendMessage({
       role: "user",
       content: "recent".repeat(1_000),
@@ -497,31 +540,20 @@ describe("Context Workspace Pi 0.80.8 architecture spike", () => {
     const compactedContext = messageText(sessionManager.buildSessionContext().messages);
     expect(compactedContext).not.toContain(LARGE_PAYLOAD_MARKER);
     expect(compactedContext).toContain(ARCHIVED_FILE_PATH);
-    expect(JSON.stringify(sessionManager.getEntry(toolResultId))).toBe(original);
-    expect(persistedEntryLine(sessionFile, toolResultId)).toBe(originalLine);
-
-    const reloaded = SessionManager.open(sessionFile);
-    expect(JSON.stringify(reloaded.getEntry(toolResultId))).toBe(original);
-    expect(persistedEntryLine(sessionFile, toolResultId)).toBe(originalLine);
-
-    const forked = SessionManager.forkFrom(sessionFile, root, join(root, "forked-sessions"));
-    expect(JSON.stringify(forked.getEntry(toolResultId))).toBe(original);
-    const forkedSessionFile = forked.getSessionFile();
-    if (!forkedSessionFile) throw new Error("forked session file missing");
-    expect(persistedEntryLine(forkedSessionFile, toolResultId)).toBe(originalLine);
-
-    reloaded.branch(assistantEntryId);
-    expect(JSON.stringify(reloaded.getEntry(toolResultId))).toBe(original);
-    expect(persistedEntryLine(sessionFile, toolResultId)).toBe(originalLine);
+    expectExactLifecycleRecovery(
+      root,
+      sessionManager,
+      assistantEntryId,
+      toolResultId,
+      snapshot,
+      "forked-sessions",
+    );
   });
 
   it("keeps entries but leaks file metadata after threshold compaction", async () => {
     const { root, sessionManager } = await createPersistedSession();
     const { assistantEntryId, toolResultId } = appendLargeToolExchange(sessionManager);
-    const original = JSON.stringify(sessionManager.getEntry(toolResultId));
-    const sessionFile = sessionManager.getSessionFile();
-    if (!sessionFile) throw new Error("persisted session file missing");
-    const originalLine = persistedEntryLine(sessionFile, toolResultId);
+    const snapshot = captureEntrySnapshot(sessionManager, toolResultId);
     const harness = await createRuntimeHarness(
       root,
       sessionManager,
@@ -543,25 +575,13 @@ describe("Context Workspace Pi 0.80.8 architecture spike", () => {
     const compactedContext = messageText(sessionManager.buildSessionContext().messages);
     expect(compactedContext).not.toContain(LARGE_PAYLOAD_MARKER);
     expect(compactedContext).toContain(ARCHIVED_FILE_PATH);
-    expect(JSON.stringify(sessionManager.getEntry(toolResultId))).toBe(original);
-    expect(persistedEntryLine(sessionFile, toolResultId)).toBe(originalLine);
-
-    const reloaded = SessionManager.open(sessionFile);
-    expect(JSON.stringify(reloaded.getEntry(toolResultId))).toBe(original);
-    expect(persistedEntryLine(sessionFile, toolResultId)).toBe(originalLine);
-
-    const forked = SessionManager.forkFrom(
-      sessionFile,
+    expectExactLifecycleRecovery(
       root,
-      join(root, "threshold-forked-sessions"),
+      sessionManager,
+      assistantEntryId,
+      toolResultId,
+      snapshot,
+      "threshold-forked-sessions",
     );
-    expect(JSON.stringify(forked.getEntry(toolResultId))).toBe(original);
-    const forkedSessionFile = forked.getSessionFile();
-    if (!forkedSessionFile) throw new Error("forked session file missing");
-    expect(persistedEntryLine(forkedSessionFile, toolResultId)).toBe(originalLine);
-
-    reloaded.branch(assistantEntryId);
-    expect(JSON.stringify(reloaded.getEntry(toolResultId))).toBe(original);
-    expect(persistedEntryLine(sessionFile, toolResultId)).toBe(originalLine);
   });
 });

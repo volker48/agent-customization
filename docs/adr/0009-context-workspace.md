@@ -81,10 +81,11 @@ enough. `CompactionPreparation.fileOps` has already been derived from the unproj
 reintroduced in both manual and threshold summaries even when the raw archived payload is absent
 from the summarizer request.
 
-Pi's package root exports `compact()` and the `FileOperations` type, but not the canonical
-`createFileOps()` or `extractFileOpsFromMessage()` helpers used internally. Recomputing `fileOps`
-would duplicate private behavior for tool parsing, previous-compaction carry-forward, and future
-changes. Deep-importing an unexported module is equally unstable. Both approaches are rejected.
+The `@earendil-works/pi-coding-agent` package root exports `compact()` and the `FileOperations`
+type, but not the canonical `createFileOps()` or `extractFileOpsFromMessage()` helpers used
+internally. Recomputing `fileOps` would duplicate private behavior for tool parsing,
+previous-compaction carry-forward, and future changes. Deep-importing an unexported module is
+equally unstable. Both approaches are rejected.
 
 ### Exact recovery
 
@@ -119,7 +120,9 @@ split-turn, file-operation, authentication, model, or provider-stream behavior. 
 
 It also must not cancel native compaction or return a partial hook result that filters message
 arrays while retaining unprojected derived metadata. If the required public contract is
-unavailable, the correct behavior is observe-only.
+unavailable, the correct behavior is observe-only. The test-only `session_before_compact` handler
+under `customCompaction: true` deliberately demonstrates this prohibited partial projection; it is
+a failure probe, not a sanctioned implementation.
 
 ## Consequences
 
