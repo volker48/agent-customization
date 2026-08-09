@@ -163,7 +163,7 @@ export type SessionEntryLike = {
 type ToolCall = {
   id: string;
   name: string;
-  arguments?: Record<string, unknown>;
+  arguments?: { [key: string]: unknown };
   timestamp?: string;
 };
 
@@ -179,7 +179,7 @@ function capsuleError(result: CapsuleResult<unknown>): CapsuleError {
   throw new Error("Expected a failed capsule result");
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+function isRecord(value: unknown): value is { [key: string]: unknown } {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
@@ -516,7 +516,7 @@ export function extractSafeResourceFacts(
       const resultText = textParts(results.get(call.id)?.message?.content).join("\n").trim();
       if (match && resultText && resultText.length <= MAX_GITHUB_JSON_LENGTH) {
         try {
-          const data = JSON.parse(resultText) as Record<string, unknown>;
+          const data = JSON.parse(resultText) as { [key: string]: unknown };
           const title = sanitizeText(data.title, MAX_ENTRY).value;
           const number = typeof data.number === "number" ? data.number : undefined;
           const url = safeUrl(data.url);
@@ -1685,7 +1685,7 @@ function renderCollectionDrift(section: {
 }): string[] {
   if (section.status === "unchanged") return [`Unchanged (${section.unchangedCount} entries).`];
   const lines = section.changes.flatMap((rawChange) => {
-    const change = rawChange as Record<string, unknown>;
+    const change = rawChange as { [key: string]: unknown };
     if ("blocker" in change) return [`- ${change.kind}: ${String(change.blocker)}`];
     const before = change.before === undefined ? undefined : renderDriftValue(change.before);
     const after = change.after === undefined ? undefined : renderDriftValue(change.after);
@@ -1752,7 +1752,7 @@ const TOP_LEVEL_KEYS = new Set([
   "exclusions",
 ]);
 
-function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+function hasOnlyKeys(value: { [key: string]: unknown }, keys: readonly string[]): boolean {
   return Object.keys(value).every((key) => keys.includes(key));
 }
 

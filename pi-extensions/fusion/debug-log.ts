@@ -5,7 +5,7 @@ import type { FusionConfig, FusionProgressEvent, FusionResult } from "./types.js
 
 export interface FusionDebugLogger {
   readonly path: string;
-  log(event: string, details?: Record<string, unknown>): void;
+  log(event: string, details?: { [key: string]: unknown }): void;
   flush(): Promise<void>;
 }
 
@@ -50,11 +50,11 @@ export function createFusionDebugLogger(
   return logger;
 }
 
-export function progressLogDetails(event: FusionProgressEvent): Record<string, unknown> {
+export function progressLogDetails(event: FusionProgressEvent): { [key: string]: unknown } {
   return event;
 }
 
-export function resultLogDetails(result: FusionResult): Record<string, unknown> {
+export function resultLogDetails(result: FusionResult): { [key: string]: unknown } {
   return {
     status: result.status,
     judge: result.judge,

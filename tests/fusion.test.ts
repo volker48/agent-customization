@@ -69,7 +69,7 @@ function textMessage(text: string): AssistantMessage {
 function toolCallMessage(
   id: string,
   name: string,
-  args: Record<string, unknown>,
+  args: { [key: string]: unknown },
 ): AssistantMessage {
   return assistant([{ type: "toolCall", id, name, arguments: args }], "toolUse");
 }

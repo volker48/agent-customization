@@ -60,7 +60,7 @@ export interface FailedPanelResponse {
   status: "error";
   error: string;
   elapsedMs: number;
-  errorDetails?: Record<string, unknown>;
+  errorDetails?: { [key: string]: unknown };
 }
 
 export type AnyPanelResponse = PanelResponse | FailedPanelResponse;
@@ -117,7 +117,7 @@ export type FusionProgressEvent =
       contentChars?: number;
       toolCalls?: ToolUseSummary[];
       error?: string;
-      errorDetails?: Record<string, unknown>;
+      errorDetails?: { [key: string]: unknown };
     }
   | { phase: "meta-failed"; model: ModelRef; error: string }
   | { phase: "judge-started"; model: ModelRef }

@@ -203,6 +203,6 @@ function textFromBlock(block: unknown): string {
   return "";
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+function isRecord(value: unknown): value is { [key: string]: unknown } {
   return typeof value === "object" && value !== null;
 }

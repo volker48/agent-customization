@@ -10,7 +10,7 @@ const baseConfig: FusionConfig = {
   maxToolCalls: 4,
 };
 
-function toolCall(name: string, args: Record<string, unknown>): ToolCall {
+function toolCall(name: string, args: { [key: string]: unknown }): ToolCall {
   return { type: "toolCall", id: `${name}-1`, name, arguments: args };
 }
 

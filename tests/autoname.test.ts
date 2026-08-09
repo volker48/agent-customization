@@ -506,7 +506,7 @@ describe("autoname extension", () => {
     autonameExtension(pi as never);
     await getCommand().handler("", context);
 
-    const request = vi.mocked(complete).mock.calls[0]?.[1] as unknown as Record<string, unknown>;
+    const request = vi.mocked(complete).mock.calls[0]?.[1] as unknown as { [key: string]: unknown };
     const serializedRequest = JSON.stringify(request);
 
     expect(request).not.toHaveProperty("systemPrompt");

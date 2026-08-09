@@ -48,7 +48,7 @@ export interface ExaSearchDetails {
   resolvedSearchType?: string;
   searchTimeMs?: number;
   textMaxCharacters?: number;
-  costDollars?: Record<string, unknown>;
+  costDollars?: { [key: string]: unknown };
   truncated: boolean;
 }
 
@@ -65,7 +65,7 @@ interface ExaSearchResponse {
   requestId: string;
   resolvedSearchType?: string;
   searchTime?: number;
-  costDollars?: Record<string, unknown>;
+  costDollars?: { [key: string]: unknown };
 }
 
 interface ExaSearchOptions {

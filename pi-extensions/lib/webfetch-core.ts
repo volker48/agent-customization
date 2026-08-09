@@ -902,11 +902,11 @@ function isGithubRateLimitResponse(response: Response, message: string): boolean
   return response.status === 403 && (remaining === "0" || /rate limit/i.test(message));
 }
 
-function readRecord(value: unknown, label: string): Record<string, unknown> {
+function readRecord(value: unknown, label: string): { [key: string]: unknown } {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} was not an object`);
   }
-  return value as Record<string, unknown>;
+  return value as { [key: string]: unknown };
 }
 
 function readString(value: unknown): string {
@@ -934,9 +934,9 @@ function parseGithubIssuePayload(value: unknown): GitHubIssuePayload {
   };
 }
 
-function readRecordOrEmpty(value: unknown): Record<string, unknown> {
+function readRecordOrEmpty(value: unknown): { [key: string]: unknown } {
   return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
+    ? (value as { [key: string]: unknown })
     : {};
 }
 

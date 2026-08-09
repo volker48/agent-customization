@@ -16,7 +16,7 @@ export interface ModelRunResult {
 export class FusionModelRunError extends Error {
   constructor(
     message: string,
-    readonly details: Record<string, unknown>,
+    readonly details: { [key: string]: unknown },
   ) {
     super(message);
     this.name = "FusionModelRunError";
@@ -155,7 +155,7 @@ function modelRunError(
   );
 }
 
-function assistantDiagnostics(assistant: AssistantMessage): Record<string, unknown> {
+function assistantDiagnostics(assistant: AssistantMessage): { [key: string]: unknown } {
   return {
     api: assistant.api,
     provider: assistant.provider,

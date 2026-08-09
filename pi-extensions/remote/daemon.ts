@@ -653,9 +653,9 @@ function stringListFrom(value: unknown): string[] | null {
     : null;
 }
 
-function capsuleErrorFrom(
-  value: Record<string, unknown>,
-): CapsuleControlError | "oversized" | null {
+function capsuleErrorFrom(value: {
+  [key: string]: unknown;
+}): CapsuleControlError | "oversized" | null {
   const codes: CapsuleControlError["code"][] = [
     "cancelled",
     "io",
@@ -695,7 +695,7 @@ function isNonNegativeInt(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+function isRecord(value: unknown): value is { [key: string]: unknown } {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 

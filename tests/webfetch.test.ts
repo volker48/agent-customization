@@ -20,7 +20,7 @@ type WebFetchParams = {
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
   isError?: boolean;
-  details?: Record<string, unknown>;
+  details?: { [key: string]: unknown };
 };
 
 type RegisteredTool = {

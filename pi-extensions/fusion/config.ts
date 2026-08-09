@@ -43,7 +43,7 @@ const REASONING_KEYS = ["effort"] as const;
 const WEB_SEARCH_KEYS = ["numResults", "textMaxCharacters", "excludedDomains"] as const;
 const WEBFETCH_KEYS = ["strategy", "maxChars", "blockedDomains"] as const;
 
-type JsonObject = Record<string, unknown>;
+type JsonObject = { [key: string]: unknown };
 
 export function defaultConfigPath(): string {
   return process.env.PI_FUSION_CONFIG?.trim() || join(homedir(), ".pi", "agent", "fusion.json");
