@@ -164,7 +164,7 @@ function extractToolText(value: unknown): string {
     return value;
   }
 
-  if (isRecord(value) && "content" in value) {
+  if (hasField(value, "content")) {
     return extractText(value.content);
   }
 
@@ -184,25 +184,28 @@ function extractText(value: unknown): string {
 }
 
 function textFromBlock(block: unknown): string {
-  if (!isRecord(block)) {
+  if (!hasField(block, "type")) {
     return "";
   }
 
-  if (block.type === "text" && typeof block.text === "string") {
+  if (block.type === "text" && "text" in block && typeof block.text === "string") {
     return block.text;
   }
 
-  if (block.type === "thinking" && typeof block.thinking === "string") {
+  if (block.type === "thinking" && "thinking" in block && typeof block.thinking === "string") {
     return block.thinking;
   }
 
-  if (block.type === "toolCall" && typeof block.name === "string") {
+  if (block.type === "toolCall" && "name" in block && typeof block.name === "string") {
     return `Tool call: ${block.name}`;
   }
 
   return "";
 }
 
-function isRecord(value: unknown): value is { [key: string]: unknown } {
-  return typeof value === "object" && value !== null;
+function hasField<const K extends string>(
+  value: unknown,
+  field: K,
+): value is { [P in K]: unknown } {
+  return typeof value === "object" && value !== null && field in value;
 }

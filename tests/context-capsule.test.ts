@@ -901,6 +901,39 @@ describe("Context Capsule application service", () => {
     );
   });
 
+  it("rejects repository-state evidence with object details missing an exit code", () => {
+    const snapshot = extractSessionEvidence(
+      [
+        {
+          type: "message",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "status-missing-exit",
+                name: "bash",
+                arguments: { command: "git status --short" },
+              },
+            ],
+          },
+        },
+        {
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolCallId: "status-missing-exit",
+            content: " M src/unknown-outcome.ts",
+            details: { durationMs: 10 },
+          },
+        },
+      ],
+      "/work/project",
+    );
+
+    expect(snapshot.observedChanges).toEqual([]);
+  });
+
   it("recognizes explicit zero-failure validation output as passed", () => {
     const cases = [
       "10 passed, 0 failed",

@@ -172,6 +172,19 @@ describe("remote Unix-socket IPC", () => {
     try {
       const rawClient = await connectRawSocket(socketPath);
       await writeRawFrame(rawClient, "not-json\n");
+      await writeRawFrame(
+        rawClient,
+        `${JSON.stringify({ sessionId: 42, type: "register", payload: {} })}\n`,
+      );
+      await writeRawFrame(
+        rawClient,
+        `${JSON.stringify({ sessionId: "", type: "register", payload: {} })}\n`,
+      );
+      await writeRawFrame(
+        rawClient,
+        `${JSON.stringify({ sessionId: null, type: "unknown", payload: {} })}\n`,
+      );
+      await writeRawFrame(rawClient, `${JSON.stringify({ sessionId: null, type: "register" })}\n`);
       rawClient.destroy();
 
       const extension = await connectIpcExtension(socketPath, {
@@ -184,6 +197,7 @@ describe("remote Unix-socket IPC", () => {
         name: "Work session",
         cwd: "/repo",
       });
+      expect(daemon.registry.has("")).toBe(false);
       await extension.close();
     } finally {
       await daemon.close();

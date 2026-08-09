@@ -475,11 +475,16 @@ function capsuleResultFrom(
     capsuleErrorResult(requestId, "oversized");
 
   if (
-    !isRecord(payload) ||
-    (payload.operation !== undefined && payload.operation !== CAPSULE_OPERATION)
-  )
+    !isPlainObject(payload) ||
+    ("operation" in payload &&
+      payload.operation !== undefined &&
+      payload.operation !== CAPSULE_OPERATION)
+  ) {
     return malformed();
-  if (payload.supported === false && payload.capability === CAPSULE_CAPABILITY) {
+  }
+  const supported = "supported" in payload ? payload.supported : undefined;
+  const capability = "capability" in payload ? payload.capability : undefined;
+  if (supported === false && capability === CAPSULE_CAPABILITY) {
     const result: CapsuleControlResult<CapsuleProjection> = {
       operation: CAPSULE_OPERATION,
       requestId,
@@ -488,21 +493,21 @@ function capsuleResultFrom(
     };
     return capsuleResultWithinLimit(result) ? result : oversized();
   }
-  if (payload.supported !== true) return malformed();
-  if (isRecord(payload.error)) {
-    const error = capsuleErrorFrom(payload.error);
+  if (supported !== true) return malformed();
+  const errorValue = "error" in payload ? payload.error : undefined;
+  const error = capsuleErrorFrom(errorValue);
+  if (error) {
     if (error === "oversized") return oversized();
-    if (error) {
-      const result: CapsuleControlResult<CapsuleProjection> = {
-        operation: CAPSULE_OPERATION,
-        requestId,
-        supported: true,
-        error,
-      };
-      return capsuleResultWithinLimit(result) ? result : oversized();
-    }
+    const result: CapsuleControlResult<CapsuleProjection> = {
+      operation: CAPSULE_OPERATION,
+      requestId,
+      supported: true,
+      error,
+    };
+    return capsuleResultWithinLimit(result) ? result : oversized();
   }
-  const projection = capsuleProjectionFrom(payload.capsule);
+  const capsuleValue = "capsule" in payload ? payload.capsule : undefined;
+  const projection = capsuleProjectionFrom(capsuleValue);
   if (projection === "oversized") return oversized();
   if (projection === "unsafe") return capsuleErrorResult(requestId, "unsafe");
   if (projection) {
@@ -518,7 +523,25 @@ function capsuleResultFrom(
 }
 
 function capsuleProjectionFrom(value: unknown): CapsuleProjection | "oversized" | "unsafe" | null {
-  if (!isRecord(value)) return null;
+  if (
+    !hasFields(value, [
+      "capsuleId",
+      "objective",
+      "nextAction",
+      "schemaVersion",
+      "revision",
+      "constraints",
+      "blockers",
+      "risks",
+      "decisions",
+      "validation",
+      "redactions",
+      "truncated",
+      "maxPayloadBytes",
+    ])
+  ) {
+    return null;
+  }
   if (
     typeof value.capsuleId !== "string" ||
     typeof value.objective !== "string" ||
@@ -598,11 +621,10 @@ function capsuleProjectionFrom(value: unknown): CapsuleProjection | "oversized" 
 }
 
 function decisionFrom(value: unknown): CapsuleProjection["decisions"][number] | null {
-  if (
-    !isRecord(value) ||
-    typeof value.statement !== "string" ||
-    (value.status !== "confirmed" && value.status !== "proposed" && value.status !== "unknown")
-  ) {
+  if (!hasFields(value, ["statement", "status"]) || typeof value.statement !== "string") {
+    return null;
+  }
+  if (value.status !== "confirmed" && value.status !== "proposed" && value.status !== "unknown") {
     return null;
   }
   return { statement: value.statement, status: value.status };
@@ -610,35 +632,40 @@ function decisionFrom(value: unknown): CapsuleProjection["decisions"][number] | 
 
 function validationFrom(value: unknown): CapsuleProjection["validation"][number] | null {
   if (
-    !isRecord(value) ||
+    !hasFields(value, ["command", "outcome", "evidence"]) ||
     typeof value.command !== "string" ||
-    (value.outcome !== "passed" &&
-      value.outcome !== "failed" &&
-      value.outcome !== "blocked" &&
-      value.outcome !== "unknown") ||
-    typeof value.evidence !== "string" ||
-    (value.observedAt !== undefined && typeof value.observedAt !== "string")
+    typeof value.evidence !== "string"
   ) {
     return null;
   }
+  if (
+    value.outcome !== "passed" &&
+    value.outcome !== "failed" &&
+    value.outcome !== "blocked" &&
+    value.outcome !== "unknown"
+  ) {
+    return null;
+  }
+  const observedAtValue = "observedAt" in value ? value.observedAt : undefined;
+  if (observedAtValue !== undefined && typeof observedAtValue !== "string") return null;
+  const observedAt = typeof observedAtValue === "string" ? observedAtValue : undefined;
   return {
     command: value.command,
     outcome: value.outcome,
     evidence: value.evidence,
-    ...(value.observedAt === undefined ? {} : { observedAt: value.observedAt as string }),
+    ...(observedAt === undefined ? {} : { observedAt }),
   };
 }
 
 function redactionFrom(value: unknown): CapsuleProjection["redactions"][number] | null {
+  if (!hasFields(value, ["category", "count"]) || !isNonNegativeInt(value.count)) return null;
   if (
-    !isRecord(value) ||
-    (value.category !== "secret" &&
-      value.category !== "raw-tool-output" &&
-      value.category !== "ignored-path" &&
-      value.category !== "oversized" &&
-      value.category !== "unsupported" &&
-      value.category !== "untrusted") ||
-    !isNonNegativeInt(value.count)
+    value.category !== "secret" &&
+    value.category !== "raw-tool-output" &&
+    value.category !== "ignored-path" &&
+    value.category !== "oversized" &&
+    value.category !== "unsupported" &&
+    value.category !== "untrusted"
   ) {
     return null;
   }
@@ -653,9 +680,9 @@ function stringListFrom(value: unknown): string[] | null {
     : null;
 }
 
-function capsuleErrorFrom(value: {
-  [key: string]: unknown;
-}): CapsuleControlError | "oversized" | null {
+function capsuleErrorFrom(value: unknown): CapsuleControlError | "oversized" | null {
+  if (!isPlainObject(value) || !("code" in value)) return null;
+  const message = "message" in value ? value.message : undefined;
   const codes: CapsuleControlError["code"][] = [
     "cancelled",
     "io",
@@ -668,10 +695,7 @@ function capsuleErrorFrom(value: {
     "unsupported-version",
   ];
   if (!codes.includes(value.code as CapsuleControlError["code"])) return null;
-  if (
-    typeof value.message === "string" &&
-    Buffer.byteLength(value.message, "utf8") > CAPSULE_MAX_ERROR_BYTES
-  ) {
+  if (typeof message === "string" && Buffer.byteLength(message, "utf8") > CAPSULE_MAX_ERROR_BYTES) {
     return "oversized";
   }
   const code = value.code as CapsuleControlError["code"];
@@ -695,8 +719,15 @@ function isNonNegativeInt(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-function isRecord(value: unknown): value is { [key: string]: unknown } {
+function isPlainObject(value: unknown): value is object {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasFields<const K extends string>(
+  value: unknown,
+  fields: readonly K[],
+): value is { [P in K]: unknown } {
+  return isPlainObject(value) && fields.every((field) => field in value);
 }
 
 function isAbortError(error: unknown): boolean {

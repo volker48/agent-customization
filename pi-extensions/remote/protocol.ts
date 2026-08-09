@@ -75,14 +75,19 @@ export function capsuleControlRequest(sessionId: string): CapsuleControlRequest 
 }
 
 export function parseCapsuleControlRequest(payload: unknown): CapsuleControlRequest | null {
-  if (!isRecord(payload) || payload.operation !== CAPSULE_OPERATION) return null;
-  return typeof payload.sessionId === "string" && payload.sessionId.length > 0
-    ? { operation: CAPSULE_OPERATION, sessionId: payload.sessionId }
-    : null;
+  if (
+    !hasFields(payload, ["operation", "sessionId"]) ||
+    payload.operation !== CAPSULE_OPERATION ||
+    typeof payload.sessionId !== "string" ||
+    payload.sessionId.length === 0
+  ) {
+    return null;
+  }
+  return { operation: CAPSULE_OPERATION, sessionId: payload.sessionId };
 }
 
 export function isCapsuleControlRequest(payload: unknown): boolean {
-  return isRecord(payload) && payload.operation === CAPSULE_OPERATION;
+  return hasFields(payload, ["operation"]) && payload.operation === CAPSULE_OPERATION;
 }
 
 export function encodeFrame(envelope: Envelope): string {
@@ -91,18 +96,48 @@ export function encodeFrame(envelope: Envelope): string {
 
 export function decodeFrame(frame: string): Envelope {
   const line = frame.endsWith("\n") ? frame.slice(0, -1) : frame;
-  return JSON.parse(line) as Envelope;
+  return parseEnvelope(JSON.parse(line));
 }
 
 export function decodeFrames(input: string): Envelope[] {
   return input
     .split("\n")
     .filter((line) => line.length > 0)
-    .map((line) => JSON.parse(line) as Envelope);
+    .map((line) => parseEnvelope(JSON.parse(line)));
 }
 
-function isRecord(value: unknown): value is { [key: string]: unknown } {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+function hasFields<const K extends string>(
+  value: unknown,
+  fields: readonly K[],
+): value is { [P in K]: unknown } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    fields.every((field) => field in value)
+  );
+}
+
+function parseEnvelope(value: unknown): Envelope {
+  if (!hasFields(value, ["sessionId", "type", "payload"]) || !isMessageType(value.type)) {
+    throw new Error("Remote frame is not a valid envelope");
+  }
+  const sessionId = parseSessionId(value.sessionId);
+  return { sessionId, type: value.type, payload: value.payload };
+}
+
+function parseSessionId(value: unknown): string | null {
+  if (value === null) return null;
+  if (typeof value === "string" && value.length > 0) return value;
+  throw new Error("Remote frame sessionId must be null or a non-empty string");
+}
+
+function isMessageType(value: unknown): value is MessageType {
+  return (
+    typeof value === "string" &&
+    (CONTROL_MESSAGE_TYPES.some((type) => type === value) ||
+      PER_SESSION_MESSAGE_TYPES.some((type) => type === value))
+  );
 }
 
 export function routeEnvelope(envelope: Envelope): RoutedEnvelope {

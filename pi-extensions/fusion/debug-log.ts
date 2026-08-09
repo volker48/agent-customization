@@ -3,9 +3,34 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { FusionConfig, FusionProgressEvent, FusionResult } from "./types.js";
 
+interface CommandStartedDetails {
+  promptChars: number;
+  capsuleRevision?: string;
+  judge: string;
+  models: string[];
+  maxToolCalls: number;
+}
+
+interface SynthesisTriggeredDetails {
+  activeModel?: string;
+  recovery: boolean;
+}
+
+interface FusionFailedDetails {
+  error: string;
+}
+
+type FusionDebugLogArgs =
+  | [event: "command-started", details: CommandStartedDetails]
+  | [event: "progress", details: ReturnType<typeof progressLogDetails>]
+  | [event: "result", details: ReturnType<typeof resultLogDetails>]
+  | [event: "synthesis-triggered", details: SynthesisTriggeredDetails]
+  | [event: "failed", details: FusionFailedDetails]
+  | [event: "cancelled"];
+
 export interface FusionDebugLogger {
   readonly path: string;
-  log(event: string, details?: { [key: string]: unknown }): void;
+  log(...args: FusionDebugLogArgs): void;
   flush(): Promise<void>;
 }
 
@@ -27,7 +52,8 @@ export function createFusionDebugLogger(
 
   const logger: FusionDebugLogger = {
     path,
-    log(event, details = {}) {
+    log(...args) {
+      const [event, details = {}] = args;
       const entry = {
         timestamp: new Date().toISOString(),
         runId,
@@ -50,11 +76,22 @@ export function createFusionDebugLogger(
   return logger;
 }
 
-export function progressLogDetails(event: FusionProgressEvent): { [key: string]: unknown } {
+export function progressLogDetails(event: FusionProgressEvent): FusionProgressEvent {
   return event;
 }
 
-export function resultLogDetails(result: FusionResult): { [key: string]: unknown } {
+interface ResultLogDetails {
+  status: FusionResult["status"];
+  judge: string;
+  elapsedMs: number;
+  responseCount: number;
+  successCount: number;
+  error?: string;
+  confidence: FusionResult["confidence"];
+  capsuleRevision?: string;
+}
+
+export function resultLogDetails(result: FusionResult): ResultLogDetails {
   return {
     status: result.status,
     judge: result.judge,

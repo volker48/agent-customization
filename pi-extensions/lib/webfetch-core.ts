@@ -888,7 +888,11 @@ async function readJsonApiErrorMessage(response: Response): Promise<string> {
     const text = await response.text();
     if (!text) return "";
     try {
-      return readString(readRecordOrEmpty(JSON.parse(text)).message) || text;
+      const payload = readJsonObject(
+        JSON.parse(text),
+        "GitHub error payload",
+      ) as GithubApiErrorJson;
+      return readString(payload.message) || text;
     } catch {
       return text;
     }
@@ -902,11 +906,59 @@ function isGithubRateLimitResponse(response: Response, message: string): boolean
   return response.status === 403 && (remaining === "0" || /rate limit/i.test(message));
 }
 
-function readRecord(value: unknown, label: string): { [key: string]: unknown } {
+interface GithubApiErrorJson {
+  message?: unknown;
+}
+
+interface GithubUserJson {
+  login?: unknown;
+}
+
+interface GithubPullRequestJson {
+  merged_at?: unknown;
+}
+
+interface GithubLabelJson {
+  name?: unknown;
+}
+
+interface GithubIssueJson {
+  number?: unknown;
+  title?: unknown;
+  state?: unknown;
+  user?: unknown;
+  labels?: unknown;
+  created_at?: unknown;
+  updated_at?: unknown;
+  comments?: unknown;
+  body?: unknown;
+  pull_request?: unknown;
+}
+
+interface GithubCommentJson {
+  user?: unknown;
+  created_at?: unknown;
+  body?: unknown;
+}
+
+interface GithubRepositoryJson {
+  description?: unknown;
+  default_branch?: unknown;
+  language?: unknown;
+  topics?: unknown;
+  homepage?: unknown;
+}
+
+interface GithubRepositoryTreeEntryJson {
+  name?: unknown;
+  type?: unknown;
+}
+
+function readJsonObject(value: unknown, label: string): object {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} was not an object`);
   }
-  return value as { [key: string]: unknown };
+  return value;
 }
 
 function readString(value: unknown): string {
@@ -918,42 +970,44 @@ function readNumber(value: unknown): number {
 }
 
 function parseGithubIssuePayload(value: unknown): GitHubIssuePayload {
-  const object = readRecord(value, "GitHub issue payload");
-  const user = readRecord(object.user, "GitHub issue user");
+  const issue = readJsonObject(value, "GitHub issue payload") as GithubIssueJson;
+  const user = readJsonObject(issue.user, "GitHub issue user") as GithubUserJson;
+  const pullRequest =
+    issue.pull_request === undefined
+      ? undefined
+      : (readJsonObject(issue.pull_request, "GitHub pull request") as GithubPullRequestJson);
   return {
-    number: readNumber(object.number),
-    title: readString(object.title),
-    state: readString(object.state),
+    number: readNumber(issue.number),
+    title: readString(issue.title),
+    state: readString(issue.state),
     userLogin: readString(user.login),
-    labels: parseGithubLabels(object.labels),
-    createdAt: readString(object.created_at),
-    updatedAt: readString(object.updated_at),
-    comments: readNumber(object.comments),
-    body: readString(object.body),
-    pullRequestMergedAt: readString(readRecordOrEmpty(object.pull_request).merged_at) || undefined,
+    labels: parseGithubLabels(issue.labels),
+    createdAt: readString(issue.created_at),
+    updatedAt: readString(issue.updated_at),
+    comments: readNumber(issue.comments),
+    body: readString(issue.body),
+    pullRequestMergedAt: readString(pullRequest?.merged_at) || undefined,
   };
-}
-
-function readRecordOrEmpty(value: unknown): { [key: string]: unknown } {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as { [key: string]: unknown })
-    : {};
 }
 
 function parseGithubLabels(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
-  return value.map((label) => readString(readRecordOrEmpty(label).name)).filter(Boolean);
+  return value
+    .map((label) =>
+      readString((readJsonObject(label, "GitHub issue label") as GithubLabelJson).name),
+    )
+    .filter(Boolean);
 }
 
 function parseGithubComments(value: unknown): GitHubCommentPayload[] {
   if (!Array.isArray(value)) throw new Error("GitHub comments payload was not an array");
   return value.map((comment) => {
-    const object = readRecord(comment, "GitHub comment payload");
-    const user = readRecord(object.user, "GitHub comment user");
+    const payload = readJsonObject(comment, "GitHub comment payload") as GithubCommentJson;
+    const user = readJsonObject(payload.user, "GitHub comment user") as GithubUserJson;
     return {
       userLogin: readString(user.login),
-      createdAt: readString(object.created_at),
-      body: readString(object.body),
+      createdAt: readString(payload.created_at),
+      body: readString(payload.body),
     };
   });
 }
@@ -964,13 +1018,13 @@ function parseGithubStringArray(value: unknown): string[] {
 }
 
 function parseGithubRepositoryPayload(value: unknown): GitHubRepositoryPayload {
-  const object = readRecord(value, "GitHub repository payload");
+  const repository = readJsonObject(value, "GitHub repository payload") as GithubRepositoryJson;
   return {
-    description: readString(object.description),
-    defaultBranch: readString(object.default_branch),
-    language: readString(object.language),
-    topics: parseGithubStringArray(object.topics),
-    homepage: readString(object.homepage),
+    description: readString(repository.description),
+    defaultBranch: readString(repository.default_branch),
+    language: readString(repository.language),
+    topics: parseGithubStringArray(repository.topics),
+    homepage: readString(repository.homepage),
   };
 }
 
@@ -978,8 +1032,11 @@ function parseGithubRepositoryTree(value: unknown): GitHubRepositoryTreeEntry[] 
   if (!Array.isArray(value)) throw new Error("GitHub repository contents payload was not an array");
   return value
     .map((entry) => {
-      const object = readRecord(entry, "GitHub repository contents entry");
-      return { name: readString(object.name), type: readString(object.type) };
+      const payload = readJsonObject(
+        entry,
+        "GitHub repository contents entry",
+      ) as GithubRepositoryTreeEntryJson;
+      return { name: readString(payload.name), type: readString(payload.type) };
     })
     .filter((entry) => entry.name && (entry.type === "file" || entry.type === "dir"));
 }
@@ -1162,14 +1219,27 @@ async function fetchGitLabJson(url: string, signal?: AbortSignal): Promise<unkno
   }
 }
 
+interface GitLabProjectJson {
+  path_with_namespace?: unknown;
+  description?: unknown;
+  default_branch?: unknown;
+  topics?: unknown;
+  web_url?: unknown;
+}
+
+interface GitLabRepositoryTreeEntryJson {
+  name?: unknown;
+  type?: unknown;
+}
+
 function parseGitLabProjectPayload(value: unknown): GitLabProjectPayload {
-  const object = readRecord(value, "GitLab project payload");
+  const project = readJsonObject(value, "GitLab project payload") as GitLabProjectJson;
   return {
-    pathWithNamespace: readString(object.path_with_namespace),
-    description: readString(object.description),
-    defaultBranch: readString(object.default_branch),
-    topics: parseGithubStringArray(object.topics),
-    webUrl: readString(object.web_url),
+    pathWithNamespace: readString(project.path_with_namespace),
+    description: readString(project.description),
+    defaultBranch: readString(project.default_branch),
+    topics: parseGithubStringArray(project.topics),
+    webUrl: readString(project.web_url),
   };
 }
 
@@ -1177,10 +1247,13 @@ function parseGitLabRepositoryTree(value: unknown): GitLabRepositoryTreeEntry[] 
   if (!Array.isArray(value)) throw new Error("GitLab repository tree payload was not an array");
   return value
     .map((entry) => {
-      const object = readRecord(entry, "GitLab repository tree entry");
+      const payload = readJsonObject(
+        entry,
+        "GitLab repository tree entry",
+      ) as GitLabRepositoryTreeEntryJson;
       const type: GitLabRepositoryTreeEntry["type"] =
-        readString(object.type) === "tree" ? "dir" : "file";
-      return { name: readString(object.name), type };
+        readString(payload.type) === "tree" ? "dir" : "file";
+      return { name: readString(payload.name), type };
     })
     .filter((entry) => entry.name);
 }

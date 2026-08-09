@@ -114,7 +114,7 @@ export default function rtkExtension(pi: ExtensionAPI) {
 
     const existingDetails =
       event.details && typeof event.details === "object" && !Array.isArray(event.details)
-        ? (event.details as { [key: string]: unknown })
+        ? event.details
         : {};
 
     return {

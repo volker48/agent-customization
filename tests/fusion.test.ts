@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { AssistantMessage, Api, Message, Model } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Api, Message, Model, ToolCall } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 
 import { loadFusionConfig, validateFusionConfig } from "../pi-extensions/fusion/config.js";
@@ -66,11 +66,7 @@ function textMessage(text: string): AssistantMessage {
   return assistant([{ type: "text", text }], "stop");
 }
 
-function toolCallMessage(
-  id: string,
-  name: string,
-  args: { [key: string]: unknown },
-): AssistantMessage {
+function toolCallMessage(id: string, name: string, args: ToolCall["arguments"]): AssistantMessage {
   return assistant([{ type: "toolCall", id, name, arguments: args }], "toolUse");
 }
 
@@ -274,8 +270,20 @@ describe("debug logging", () => {
     const path = join(dir, "debug.jsonl");
     try {
       const logger = createFusionDebugLogger(path, "run-1");
-      logger.log("command-started", { promptChars: 12, model: "a/b" });
-      logger.log("result", { confidence: "high", status: "ok" });
+      logger.log("command-started", {
+        promptChars: 12,
+        judge: "judge/model",
+        models: ["panel/model"],
+        maxToolCalls: 4,
+      });
+      logger.log("result", {
+        confidence: "high",
+        status: "ok",
+        judge: "judge/model",
+        elapsedMs: 100,
+        responseCount: 1,
+        successCount: 1,
+      });
       await logger.flush();
 
       const lines = (await readFile(path, "utf8")).trim().split("\n");
@@ -421,17 +429,19 @@ describe("bounded tool loop", () => {
     ).rejects.toThrow(/Empty response/);
   });
 
-  it("includes provider error diagnostics for errored assistant messages", async () => {
+  it("preserves provider error diagnostics for errored assistant messages", async () => {
     const message = textMessage("");
     message.stopReason = "error";
     message.errorMessage = "provider said no";
-    message.diagnostics = [
-      {
-        type: "provider_transport_failure",
-        timestamp: 1,
-        error: { name: "Error", message: "socket closed", code: "ECONNRESET" },
-      },
-    ];
+    const diagnostic = {
+      type: "provider_transport_failure",
+      timestamp: 1,
+      error: { name: "Error", message: "socket closed", code: "ECONNRESET" },
+      providerMetadata: { retryAfterMs: 250 },
+    } as NonNullable<AssistantMessage["diagnostics"]>[number] & {
+      providerMetadata: { retryAfterMs: number };
+    };
+    message.diagnostics = [diagnostic];
 
     await expect(
       completeWithTools({

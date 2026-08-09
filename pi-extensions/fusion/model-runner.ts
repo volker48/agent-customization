@@ -2,6 +2,7 @@ import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { AssistantMessage, Message, Tool, ToolCall } from "@earendil-works/pi-ai";
 import type {
   CompletionClient,
+  FusionModelRunDiagnostics,
   FusionReasoning,
   FusionTool,
   ResolvedModel,
@@ -16,7 +17,7 @@ export interface ModelRunResult {
 export class FusionModelRunError extends Error {
   constructor(
     message: string,
-    readonly details: { [key: string]: unknown },
+    readonly details: FusionModelRunDiagnostics,
   ) {
     super(message);
     this.name = "FusionModelRunError";
@@ -155,7 +156,7 @@ function modelRunError(
   );
 }
 
-function assistantDiagnostics(assistant: AssistantMessage): { [key: string]: unknown } {
+function assistantDiagnostics(assistant: AssistantMessage): FusionModelRunDiagnostics {
   return {
     api: assistant.api,
     provider: assistant.provider,

@@ -1,5 +1,7 @@
-const INSTRUCTION =
-  "convert each instance to strongly typed domain types that have been parsed at the earliest time possible and as close to the io boundary the data originated from";
+const INSTRUCTION = [
+  "convert each instance to strongly typed domain types that have been parsed at the",
+  "earliest time possible and as close to the io boundary the data originated from",
+].join(" ");
 
 function isRecordStringUnknown(node) {
   const parameters = node.typeParameters?.params ?? node.typeArguments?.params ?? [];

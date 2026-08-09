@@ -38,11 +38,8 @@ vi.mock("../pi-extensions/fusion/orchestrator.js", () => ({
   })),
 }));
 
-const {
-  default: fusionExtension,
-  FusionInputError,
-  resolvePrompt,
-} = await import("../pi-extensions/fusion/index.js");
+const { default: fusionExtension, resolvePrompt } =
+  await import("../pi-extensions/fusion/index.js");
 
 const temporaryDirectories: string[] = [];
 afterEach(async () => {
