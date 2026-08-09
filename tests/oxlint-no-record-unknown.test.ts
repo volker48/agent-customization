@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 
@@ -78,6 +78,7 @@ describe("custom Record<string, unknown> oxlint rule", () => {
     const result = runRepositoryLint(fixture);
 
     expect(result.status).toBe(1);
+    expect(result.output).toContain(relative(repoRoot, fixture));
     expect(result.output).toContain(instruction);
   });
 
