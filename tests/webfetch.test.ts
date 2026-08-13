@@ -6,26 +6,15 @@ import TurndownService from "turndown";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import webfetchExtension from "../pi-extensions/webfetch.js";
-
-type WebFetchParams = {
-  url: string;
-  maxChars?: number;
-  mode?: "full" | "probe";
-  strategy?: "direct" | "smart";
-  accept?: string;
-  headers?: Record<string, string>;
-  raw?: boolean;
-};
-
-type ToolResult = {
-  content: Array<{ type: "text"; text: string }>;
-  isError?: boolean;
-  details?: Record<string, unknown>;
-};
+import type { WebFetchInput, WebFetchToolResult } from "../pi-extensions/lib/webfetch-core.js";
 
 type RegisteredTool = {
   name: string;
-  execute: (toolCallId: string, params: WebFetchParams, signal: AbortSignal) => Promise<ToolResult>;
+  execute: (
+    toolCallId: string,
+    params: WebFetchInput,
+    signal: AbortSignal,
+  ) => Promise<WebFetchToolResult>;
 };
 
 type WebFetchTestDetails = {
@@ -614,8 +603,7 @@ describe("webfetch extension", () => {
       "</body></html>",
     ].join("");
     vi.spyOn(globalThis, "fetch").mockImplementation(
-      async () =>
-        new Response(html, { status: 200, headers: { "Content-Type": "text/html" } }),
+      async () => new Response(html, { status: 200, headers: { "Content-Type": "text/html" } }),
     );
 
     const { pi, getTool } = createMockPi();
@@ -1084,9 +1072,7 @@ describe("webfetch extension", () => {
     expect(output).toContain("Issue body text.");
     expect(output).toContain("**@maintainer** (2024-01-03T00:00:00Z):");
     expect(output).toContain("Comment body text.");
-    expect(details.alternateUrlUsed).toBe(
-      "https://api.github.com/repos/acme/widgets/issues/42",
-    );
+    expect(details.alternateUrlUsed).toBe("https://api.github.com/repos/acme/widgets/issues/42");
     expect(details.smartNotes?.[0]).toContain("REST API");
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       "https://api.github.com/repos/acme/widgets/issues/42",
@@ -1096,6 +1082,32 @@ describe("webfetch extension", () => {
     );
     expect(firstHeaders.Authorization).toBeUndefined();
     expect(firstHeaders["User-Agent"]).toBe("pi-webfetch");
+  });
+
+  it("falls back from malformed GitHub API payloads", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(Response.json([]))
+      .mockResolvedValueOnce(
+        new Response("<html><body><h1>Malformed payload fallback</h1></body></html>", {
+          status: 200,
+          headers: { "Content-Type": "text/html" },
+        }),
+      );
+
+    const { pi, getTool } = createMockPi();
+    webfetchExtension(pi as never);
+
+    const result = await getTool().execute(
+      "call_github_issue_malformed",
+      { url: "https://github.com/acme/widgets/issues/42" },
+      new AbortController().signal,
+    );
+    const details = result.details as WebFetchTestDetails;
+
+    expect(result.content[0]?.text).toContain("Malformed payload fallback");
+    expect(details.smartNotes?.join(" ")).toContain("GitHub issue payload was not an object");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("falls back from GitHub API failures without leaking token to HTML fetch", async () => {

@@ -43,6 +43,15 @@ describe("remote wire protocol", () => {
     expect(decodeFrames(`${encodeFrame(first)}${encodeFrame(second)}`)).toEqual([first, second]);
   });
 
+  it.each([
+    { sessionId: 42, type: "event", payload: {} },
+    { sessionId: "", type: "event", payload: {} },
+    { sessionId: "session-1", type: "unknown", payload: {} },
+    { sessionId: "session-1", type: "event" },
+  ])("rejects malformed envelopes at the JSONL boundary: %o", (frame) => {
+    expect(() => decodeFrame(`${JSON.stringify(frame)}\n`)).toThrow(/frame|sessionId|envelope/);
+  });
+
   it("would break if framing used a generic line reader", () => {
     const envelope: Envelope = {
       sessionId: "session-1",

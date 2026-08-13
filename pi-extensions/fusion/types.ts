@@ -45,6 +45,24 @@ export interface ToolUseSummary {
   ok: boolean;
 }
 
+export type FusionContentDiagnostic =
+  | { type: "text"; chars: number }
+  | { type: "thinking" }
+  | { type: "toolCall"; name: string; id: string };
+
+export interface FusionModelRunDiagnostics {
+  api: AssistantMessage["api"];
+  provider: AssistantMessage["provider"];
+  model: string;
+  responseModel?: string;
+  responseId?: string;
+  stopReason: AssistantMessage["stopReason"];
+  errorMessage?: string;
+  usage: AssistantMessage["usage"];
+  diagnostics?: AssistantMessage["diagnostics"];
+  content: FusionContentDiagnostic[];
+}
+
 export interface PanelResponse {
   model: ModelRef;
   runId: string;
@@ -60,7 +78,7 @@ export interface FailedPanelResponse {
   status: "error";
   error: string;
   elapsedMs: number;
-  errorDetails?: Record<string, unknown>;
+  errorDetails?: FusionModelRunDiagnostics;
 }
 
 export type AnyPanelResponse = PanelResponse | FailedPanelResponse;
@@ -117,7 +135,7 @@ export type FusionProgressEvent =
       contentChars?: number;
       toolCalls?: ToolUseSummary[];
       error?: string;
-      errorDetails?: Record<string, unknown>;
+      errorDetails?: FusionModelRunDiagnostics;
     }
   | { phase: "meta-failed"; model: ModelRef; error: string }
   | { phase: "judge-started"; model: ModelRef }

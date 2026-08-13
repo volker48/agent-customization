@@ -160,12 +160,24 @@ export type SessionEntryLike = {
   };
 };
 
-type ToolCall = {
+type ToolCallBase = {
   id: string;
-  name: string;
-  arguments?: Record<string, unknown>;
   timestamp?: string;
 };
+
+type ToolCall =
+  | (ToolCallBase & {
+      name: "read" | "edit" | "write";
+      path?: unknown;
+    })
+  | (ToolCallBase & {
+      name: "webfetch";
+      url?: unknown;
+    })
+  | (ToolCallBase & {
+      name: "bash";
+      command?: unknown;
+    });
 
 const ok = <T>(value: T): CapsuleResult<T> => ({ ok: true, value });
 const fail = (
@@ -179,15 +191,28 @@ function capsuleError(result: CapsuleResult<unknown>): CapsuleError {
   throw new Error("Expected a failed capsule result");
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+function isPlainObject(value: unknown): value is object {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasFields<const K extends string>(
+  value: unknown,
+  fields: readonly K[],
+): value is { [P in K]: unknown } {
+  return isPlainObject(value) && fields.every((field) => field in value);
 }
 
 function textParts(content: unknown): string[] {
   if (typeof content === "string") return [content];
   if (!Array.isArray(content)) return [];
   return content.flatMap((part) => {
-    if (!isRecord(part) || part.type !== "text" || typeof part.text !== "string") return [];
+    if (
+      !hasFields(part, ["type", "text"]) ||
+      part.type !== "text" ||
+      typeof part.text !== "string"
+    ) {
+      return [];
+    }
     return [part.text];
   });
 }
@@ -450,27 +475,42 @@ function firstMarkdownHeading(content: unknown): string | undefined {
   return sanitizeText(source.match(/^#\s+(.+)$/m)?.[1], MAX_ENTRY).value;
 }
 
+function parseToolCall(part: unknown, timestamp?: string): ToolCall | undefined {
+  if (
+    !hasFields(part, ["type", "id", "name"]) ||
+    part.type !== "toolCall" ||
+    typeof part.id !== "string" ||
+    typeof part.name !== "string"
+  ) {
+    return undefined;
+  }
+
+  const argumentsValue = "arguments" in part ? part.arguments : undefined;
+  const args = isPlainObject(argumentsValue) ? argumentsValue : undefined;
+  const base: ToolCallBase = { id: part.id, timestamp };
+  if (part.name === "read" || part.name === "edit" || part.name === "write") {
+    return { ...base, name: part.name, path: args && "path" in args ? args.path : undefined };
+  }
+  if (part.name === "webfetch") {
+    return { ...base, name: part.name, url: args && "url" in args ? args.url : undefined };
+  }
+  if (part.name === "bash") {
+    return {
+      ...base,
+      name: part.name,
+      command: args && "command" in args ? args.command : undefined,
+    };
+  }
+  return undefined;
+}
+
 function toolCalls(entries: readonly SessionEntryLike[]): ToolCall[] {
   return entries.flatMap((entry) => {
     if (entry.type !== "message" || entry.message?.role !== "assistant") return [];
     const content = Array.isArray(entry.message.content) ? entry.message.content : [];
     return content.flatMap((part) => {
-      if (
-        !isRecord(part) ||
-        part.type !== "toolCall" ||
-        typeof part.id !== "string" ||
-        typeof part.name !== "string"
-      ) {
-        return [];
-      }
-      return [
-        {
-          id: part.id,
-          name: part.name,
-          arguments: isRecord(part.arguments) ? part.arguments : undefined,
-          timestamp: entry.timestamp,
-        },
-      ];
+      const call = parseToolCall(part, entry.timestamp);
+      return call ? [call] : [];
     });
   });
 }
@@ -490,6 +530,21 @@ function toolResults(entries: readonly SessionEntryLike[]): Map<string, SessionE
  * Returns the narrow resource metadata shared by Autoname and Context Capsules.
  * It never returns arbitrary tool output, edit/write content, URL credentials, or URL queries.
  */
+interface GithubViewJson {
+  title?: unknown;
+  number?: unknown;
+  url?: unknown;
+}
+
+function parseGithubView(value: unknown): GithubViewJson | undefined {
+  if (!isPlainObject(value)) return undefined;
+  return {
+    title: "title" in value ? value.title : undefined,
+    number: "number" in value ? value.number : undefined,
+    url: "url" in value ? value.url : undefined,
+  };
+}
+
 export function extractSafeResourceFacts(
   entries: readonly SessionEntryLike[],
   _cwd: string,
@@ -500,23 +555,24 @@ export function extractSafeResourceFacts(
   for (const call of toolCalls(entries)) {
     let fact: string | undefined;
     if (call.name === "read" || call.name === "edit" || call.name === "write") {
-      const path = resourcePath(call.arguments?.path, _cwd);
+      const path = resourcePath(call.path, _cwd);
       const heading =
         call.name === "read" && path && [".md", ".mdx"].includes(extname(path).toLowerCase())
           ? firstMarkdownHeading(results.get(call.id)?.message?.content)
           : undefined;
       if (path) fact = `${call.name}: ${path}${heading ? ` — ${heading}` : ""}`;
     } else if (call.name === "webfetch") {
-      const url = safeUrl(call.arguments?.url);
+      const url = safeUrl(call.url);
       const heading = firstMarkdownHeading(results.get(call.id)?.message?.content);
       if (url) fact = `webfetch: ${url}${heading ? ` — ${heading}` : ""}`;
     } else if (call.name === "bash") {
-      const command = typeof call.arguments?.command === "string" ? call.arguments.command : "";
+      const command = typeof call.command === "string" ? call.command : "";
       const match = command.match(/\bgh\s+(issue|pr)\s+view\b[^\n;]*--json\b/);
       const resultText = textParts(results.get(call.id)?.message?.content).join("\n").trim();
       if (match && resultText && resultText.length <= MAX_GITHUB_JSON_LENGTH) {
         try {
-          const data = JSON.parse(resultText) as Record<string, unknown>;
+          const data = parseGithubView(JSON.parse(resultText));
+          if (!data) continue;
           const title = sanitizeText(data.title, MAX_ENTRY).value;
           const number = typeof data.number === "number" ? data.number : undefined;
           const url = safeUrl(data.url);
@@ -647,15 +703,32 @@ function commandCanMaskValidationFailure(command: string): boolean {
   return /[;|&\n\r`]/.test(withoutSafeAnd) || command.includes("$(");
 }
 
+interface ToolExecutionDetails {
+  killed?: unknown;
+  interrupted?: unknown;
+  signal?: unknown;
+  exitCode?: unknown;
+}
+
+function parseToolExecutionDetails(value: unknown): ToolExecutionDetails | undefined {
+  if (!isPlainObject(value)) return undefined;
+  return {
+    killed: "killed" in value ? value.killed : undefined,
+    interrupted: "interrupted" in value ? value.interrupted : undefined,
+    signal: "signal" in value ? value.signal : undefined,
+    exitCode: "exitCode" in value ? value.exitCode : undefined,
+  };
+}
+
 function validationOutcome(
   result: SessionEntryLike | undefined,
   command: string,
 ): CapsuleValidation["outcome"] {
   if (!result) return "unknown";
-  const details = result.message?.details;
+  const details = parseToolExecutionDetails(result.message?.details);
   const output = textParts(result.message?.content).join("\n");
   if (
-    isRecord(details) &&
+    details &&
     (details.killed === true || details.interrupted === true || details.signal !== undefined)
   ) {
     return "blocked";
@@ -692,7 +765,7 @@ function validationOutcome(
   const hasFailure = hasNonZeroFailure || /\b(?:failed|failure|error)\b/i.test(normalizedOutput);
   if (hasFailure || result.message?.isError) return "failed";
 
-  if (isRecord(details) && typeof details.exitCode === "number") {
+  if (details && typeof details.exitCode === "number") {
     if (details.exitCode !== 0) return "failed";
     return commandCanMaskValidationFailure(command) ? "unknown" : "passed";
   }
@@ -781,8 +854,8 @@ export function extractSessionEvidence(
   const resources: CapsuleResource[] = [];
   const observedChanges: CapsuleObservedChange[] = [];
   for (const call of toolCalls(entries)) {
-    if (!["read", "edit", "write"].includes(call.name)) continue;
-    if (call.arguments?.path !== undefined && !capsulePath(call.arguments.path, cwd)) {
+    if (call.name !== "read" && call.name !== "edit" && call.name !== "write") continue;
+    if (call.path !== undefined && !capsulePath(call.path, cwd)) {
       addExclusion(exclusions, "ignored-path");
     }
   }
@@ -814,7 +887,7 @@ export function extractSessionEvidence(
   const results = toolResults(entries);
   for (const call of toolCalls(entries)) {
     if (call.name !== "edit" && call.name !== "write") continue;
-    const path = capsulePath(call.arguments?.path, cwd);
+    const path = capsulePath(call.path, cwd);
     const result = results.get(call.id);
     if (!path || result?.message?.isError !== false) continue;
     if (!observedChanges.some((item) => item.path === path)) {
@@ -824,21 +897,18 @@ export function extractSessionEvidence(
   // A recorded `git status`/`git diff --name-only` is repository observation,
   // not authorship provenance. No subprocess is started by capsule generation.
   for (const call of toolCalls(entries)) {
-    if (call.name !== "bash" || typeof call.arguments?.command !== "string") continue;
-    if (!repositoryStateCommand(call.arguments.command)) continue;
+    if (call.name !== "bash" || typeof call.command !== "string") continue;
+    if (!repositoryStateCommand(call.command)) continue;
     const result = results.get(call.id);
-    if (
-      !result ||
-      result.message?.isError ||
-      (result.message?.details &&
-        isRecord(result.message.details) &&
-        result.message.details.exitCode !== 0)
-    )
+    if (!result || result.message?.isError) continue;
+    const rawDetails = result.message?.details;
+    if (isPlainObject(rawDetails) && parseToolExecutionDetails(rawDetails)?.exitCode !== 0) {
       continue;
+    }
     for (const path of observedRepositoryPaths(
       textParts(result.message?.content).join("\n"),
       cwd,
-      !/\bgit\s+diff\s+--name-only\b/i.test(call.arguments.command),
+      !/\bgit\s+diff\s+--name-only\b/i.test(call.command),
     )) {
       if (!observedChanges.some((item) => item.path === path)) {
         observedChanges.push({ path, status: "observed", provenance: "none" });
@@ -848,14 +918,14 @@ export function extractSessionEvidence(
 
   const validation: CapsuleValidation[] = [];
   for (const call of toolCalls(entries)) {
-    if (call.name !== "bash" || typeof call.arguments?.command !== "string") continue;
-    if (!isValidationCommand(call.arguments.command)) continue;
-    const command = sanitizeText(call.arguments.command, MAX_COMMAND);
+    if (call.name !== "bash" || typeof call.command !== "string") continue;
+    if (!isValidationCommand(call.command)) continue;
+    const command = sanitizeText(call.command, MAX_COMMAND);
     addExclusion(exclusions, "secret", command.redactions);
     addExclusion(exclusions, "oversized", command.truncated ? 1 : 0);
     if (!command.value) continue;
     const result = results.get(call.id);
-    const outcome = validationOutcome(result, call.arguments.command);
+    const outcome = validationOutcome(result, call.command);
     validation.push({
       command: command.value,
       outcome,
@@ -1046,7 +1116,9 @@ function validPinCategory(value: unknown): value is CapsulePinCategory {
 }
 
 function normalizePin(value: unknown): CapsulePin | undefined {
-  if (!isRecord(value) || !validPinCategory(value.category)) return undefined;
+  if (!hasFields(value, ["category", "statement"]) || !validPinCategory(value.category)) {
+    return undefined;
+  }
   if (typeof value.statement !== "string") return undefined;
   const sanitized = sanitizeText(value.statement, MAX_ENTRY);
   // Persisted facts must already be canonical and safe. Never silently turn a
@@ -1068,7 +1140,7 @@ export function selectCapsuleFacts(capsule: Capsule): CapsuleFact[] {
 
 /** Validate persisted state; malformed custom entries are ignored, never promoted to context. */
 export function validateCapsulePinState(input: unknown): CapsuleResult<CapsulePinState> {
-  if (!isRecord(input) || input.version !== 1 || !Array.isArray(input.pins)) {
+  if (!hasFields(input, ["version", "pins"]) || input.version !== 1 || !Array.isArray(input.pins)) {
     return fail("malformed", "Context Capsule pin state is malformed.");
   }
   if (input.pins.length > CAPSULE_PIN_MAX_COUNT) {
@@ -1655,44 +1727,59 @@ export async function proposeCapsuleRefresh(
 
 function renderDriftValue(value: unknown): string {
   if (typeof value === "string") return value;
-  if (isRecord(value) && "command" in value) {
+  if (hasFields(value, ["command"])) {
     const validation = value as CapsuleValidation;
     return `\`${validation.command}\` — ${validation.outcome}; ${validation.evidence}${validation.observedAt ? `; observed ${validation.observedAt}` : ""}`;
   }
-  if (isRecord(value) && "statement" in value) {
+  if (hasFields(value, ["statement"])) {
     const decision = value as CapsuleDecision;
     return `[${decision.status}] ${decision.statement}`;
   }
-  if (isRecord(value) && "path" in value) {
+  if (hasFields(value, ["path"])) {
     const observed = value as CapsuleObservedChange;
     return `${observed.path} — ${observed.status}; provenance: ${observed.provenance}`;
   }
-  if (isRecord(value) && "kind" in value && "value" in value) {
+  if (hasFields(value, ["kind", "value"])) {
     const resource = value as CapsuleResource;
     return `[${resource.kind}] ${resource.value}${resource.detail ? ` — ${resource.detail}` : ""}`;
   }
-  if (isRecord(value) && "category" in value) {
+  if (hasFields(value, ["category"])) {
     const exclusion = value as CapsuleExclusion;
     return `${exclusion.category}: ${exclusion.count}`;
   }
   return JSON.stringify(value);
 }
 
-function renderCollectionDrift(section: {
+type RenderableDriftValue =
+  | string
+  | CapsuleValidation
+  | CapsuleDecision
+  | CapsuleObservedChange
+  | CapsuleResource
+  | CapsuleExclusion;
+
+type RenderableDriftChange =
+  | CollectionDriftChange<RenderableDriftValue>
+  | DecisionDriftChange
+  | ValidationDriftChange
+  | BlockerDriftChange;
+
+interface RenderableCollectionDrift {
   status: "unchanged" | "changed";
   unchangedCount: number;
-  changes: readonly unknown[];
-}): string[] {
+  changes: readonly RenderableDriftChange[];
+}
+
+function renderCollectionDrift(section: RenderableCollectionDrift): string[] {
   if (section.status === "unchanged") return [`Unchanged (${section.unchangedCount} entries).`];
-  const lines = section.changes.flatMap((rawChange) => {
-    const change = rawChange as Record<string, unknown>;
-    if ("blocker" in change) return [`- ${change.kind}: ${String(change.blocker)}`];
+  const lines = section.changes.flatMap((change) => {
+    if ("blocker" in change) return [`- ${change.kind}: ${change.blocker}`];
     const before = change.before === undefined ? undefined : renderDriftValue(change.before);
     const after = change.after === undefined ? undefined : renderDriftValue(change.after);
     if (before !== undefined && after !== undefined) {
-      return [`- ${String(change.kind)}:`, `  - before: ${before}`, `  - after: ${after}`];
+      return [`- ${change.kind}:`, `  - before: ${before}`, `  - after: ${after}`];
     }
-    return [`- ${String(change.kind)}: ${after ?? before ?? ""}`];
+    return [`- ${change.kind}: ${after ?? before ?? ""}`];
   });
   if (section.unchangedCount) lines.push(`Unchanged entries collapsed: ${section.unchangedCount}.`);
   return lines;
@@ -1726,7 +1813,7 @@ export function renderCapsuleDrift(proposal: CapsuleRefreshProposal): string {
       if (scalar.status === "unchanged") lines.push("Unchanged.");
       else lines.push(`- before: ${scalar.before}`, `- after: ${scalar.after}`);
     } else {
-      lines.push(...renderCollectionDrift(section as never));
+      lines.push(...renderCollectionDrift(section as RenderableCollectionDrift));
     }
   }
   return lines.join("\n");
@@ -1752,7 +1839,7 @@ const TOP_LEVEL_KEYS = new Set([
   "exclusions",
 ]);
 
-function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+function hasOnlyKeys(value: object, keys: readonly string[]): boolean {
   return Object.keys(value).every((key) => keys.includes(key));
 }
 
@@ -1798,13 +1885,36 @@ function validateStringList(value: unknown, field: string): CapsuleResult<string
 }
 
 export function validateCapsule(input: unknown): CapsuleResult<Capsule> {
-  if (!isRecord(input)) return fail("malformed", "Capsule must be a JSON object.");
+  if (!hasFields(input, ["schemaVersion"])) {
+    return fail("malformed", "Capsule must be a JSON object with all required fields.");
+  }
   if (input.schemaVersion !== CONTEXT_CAPSULE_SCHEMA) {
     return fail(
       "unsupported-version",
       `Unsupported capsule schemaVersion; expected ${CONTEXT_CAPSULE_SCHEMA}.`,
       "schemaVersion",
     );
+  }
+  if (
+    !hasFields(input, [
+      "kind",
+      "capsuleId",
+      "revision",
+      "createdAt",
+      "source",
+      "objective",
+      "constraints",
+      "decisions",
+      "resources",
+      "observedChanges",
+      "validation",
+      "blockers",
+      "risks",
+      "nextAction",
+      "exclusions",
+    ])
+  ) {
+    return fail("malformed", "Capsule must be a JSON object with all required fields.");
   }
   if (Object.keys(input).some((key) => !TOP_LEVEL_KEYS.has(key))) {
     return fail("malformed", "Capsule contains unknown top-level fields.");
@@ -1824,25 +1934,29 @@ export function validateCapsule(input: unknown): CapsuleResult<Capsule> {
     return fail("unsafe", "objective and nextAction must be non-empty bounded safe text.");
   }
 
-  if (!isRecord(input.source) || !hasOnlyKeys(input.source, ["sessionId", "sessionFile", "cwd"])) {
+  if (
+    !hasFields(input.source, ["sessionId", "cwd"]) ||
+    !hasOnlyKeys(input.source, ["sessionId", "sessionFile", "cwd"])
+  ) {
     return fail("malformed", "source must contain only sessionId, sessionFile, and cwd.", "source");
   }
+  const sourceSessionFile = "sessionFile" in input.source ? input.source.sessionFile : undefined;
   if (
     !validPlainText(input.source.sessionId, MAX_ENTRY) ||
     !validPlainText(input.source.cwd, MAX_SESSION_PATH) ||
-    (input.source.sessionFile !== undefined &&
-      !validPlainText(input.source.sessionFile, MAX_SESSION_PATH))
+    (sourceSessionFile !== undefined && !validPlainText(sourceSessionFile, MAX_SESSION_PATH))
   ) {
     return fail("unsafe", "source contains invalid or unsafe lineage metadata.", "source");
   }
 
-  if (input.predecessor !== undefined) {
+  const predecessor = "predecessor" in input ? input.predecessor : undefined;
+  if (predecessor !== undefined) {
     if (
-      !isRecord(input.predecessor) ||
-      !hasOnlyKeys(input.predecessor, ["capsuleId", "revision"]) ||
-      !validCapsuleId(input.predecessor.capsuleId) ||
-      !Number.isSafeInteger(input.predecessor.revision) ||
-      (input.predecessor.revision as number) < 1
+      !hasFields(predecessor, ["capsuleId", "revision"]) ||
+      !hasOnlyKeys(predecessor, ["capsuleId", "revision"]) ||
+      !validCapsuleId(predecessor.capsuleId) ||
+      !Number.isSafeInteger(predecessor.revision) ||
+      (predecessor.revision as number) < 1
     ) {
       return fail(
         "malformed",
@@ -1865,7 +1979,7 @@ export function validateCapsule(input: unknown): CapsuleResult<Capsule> {
   }
   for (const value of input.decisions) {
     if (
-      !isRecord(value) ||
+      !hasFields(value, ["statement", "status"]) ||
       !hasOnlyKeys(value, ["statement", "status"]) ||
       !validPlainText(value.statement, MAX_ENTRY) ||
       !["confirmed", "proposed", "unknown"].includes(value.status as string)
@@ -1879,11 +1993,11 @@ export function validateCapsule(input: unknown): CapsuleResult<Capsule> {
   }
   for (const value of input.resources) {
     if (
-      !isRecord(value) ||
+      !hasFields(value, ["kind", "value"]) ||
       !hasOnlyKeys(value, ["kind", "value", "detail"]) ||
       !["path", "url", "github"].includes(value.kind as string) ||
       !validPlainText(value.value, value.kind === "url" ? MAX_URL : MAX_PATH) ||
-      (value.detail !== undefined && !validPlainText(value.detail, MAX_ENTRY))
+      ("detail" in value && value.detail !== undefined && !validPlainText(value.detail, MAX_ENTRY))
     ) {
       return fail("unsafe", "Invalid or unsafe resource entry.", "resources");
     }
@@ -1911,7 +2025,7 @@ export function validateCapsule(input: unknown): CapsuleResult<Capsule> {
   }
   for (const value of input.observedChanges) {
     if (
-      !isRecord(value) ||
+      !hasFields(value, ["path", "status", "provenance"]) ||
       !hasOnlyKeys(value, ["path", "status", "provenance"]) ||
       !validPlainText(value.path, MAX_PATH) ||
       capsulePath(value.path, input.source.cwd as string) !== value.path ||
@@ -1927,12 +2041,12 @@ export function validateCapsule(input: unknown): CapsuleResult<Capsule> {
   }
   for (const value of input.validation) {
     if (
-      !isRecord(value) ||
+      !hasFields(value, ["command", "outcome", "evidence"]) ||
       !hasOnlyKeys(value, ["command", "outcome", "evidence", "observedAt"]) ||
       !validPlainText(value.command, MAX_COMMAND) ||
       !validPlainText(value.evidence, MAX_ENTRY) ||
       !["passed", "failed", "blocked", "unknown"].includes(value.outcome as string) ||
-      (value.observedAt !== undefined && !validIsoDate(value.observedAt))
+      ("observedAt" in value && value.observedAt !== undefined && !validIsoDate(value.observedAt))
     ) {
       return fail("malformed", "Invalid validation evidence entry.", "validation");
     }
@@ -1943,7 +2057,7 @@ export function validateCapsule(input: unknown): CapsuleResult<Capsule> {
   }
   for (const value of input.exclusions) {
     if (
-      !isRecord(value) ||
+      !hasFields(value, ["category", "count"]) ||
       !hasOnlyKeys(value, ["category", "count"]) ||
       ![
         "secret",
@@ -2214,7 +2328,8 @@ export async function loadCapsule(
     }
     return parseCapsule(raw);
   } catch (error) {
-    const code = isRecord(error) && error.code === "ENOENT" ? "not-found" : "io";
+    const code =
+      error instanceof Error && "code" in error && error.code === "ENOENT" ? "not-found" : "io";
     const message = error instanceof Error ? error.message : String(error);
     return fail(code, `Unable to load capsule: ${message}`);
   }

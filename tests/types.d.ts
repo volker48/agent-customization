@@ -1,6 +1,11 @@
 declare module "turndown" {
+  type TurndownOptions = {
+    headingStyle?: "setext" | "atx";
+    codeBlockStyle?: "indented" | "fenced";
+  };
+
   export default class TurndownService {
-    constructor(options?: Record<string, unknown>);
+    constructor(options?: TurndownOptions);
     use(plugin: unknown): void;
     turndown(html: string): string;
   }

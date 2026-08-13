@@ -1,7 +1,7 @@
 import { unlink } from "node:fs/promises";
 import { createServer, createConnection, type Server, type Socket } from "node:net";
 
-import { decodeFrames, type MessageType } from "./protocol.js";
+import { CONTROL_MESSAGE_TYPES, PER_SESSION_MESSAGE_TYPES, type MessageType } from "./protocol.js";
 
 export type IpcMessageType =
   | MessageType
@@ -11,6 +11,17 @@ export type IpcMessageType =
   | "sync"
   | "pairing_info"
   | "capsule";
+
+const IPC_MESSAGE_TYPES: ReadonlySet<string> = new Set([
+  ...CONTROL_MESSAGE_TYPES,
+  ...PER_SESSION_MESSAGE_TYPES,
+  "register",
+  "session_shutdown",
+  "daemon_stop",
+  "sync",
+  "pairing_info",
+  "capsule",
+]);
 
 export type PairingInfo = { ticket: string; code: string };
 
@@ -495,10 +506,23 @@ function parseBufferedFrames(input: string): { envelopes: IpcEnvelope[]; remaini
 
 function parseFrameLine(line: string): IpcEnvelope[] {
   try {
-    return decodeFrames(line) as IpcEnvelope[];
+    const value: unknown = JSON.parse(line);
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return [];
+    if (!("sessionId" in value) || !("type" in value) || !("payload" in value)) return [];
+    const sessionId = value.sessionId;
+    let parsedSessionId: string | null;
+    if (sessionId === null) parsedSessionId = null;
+    else if (typeof sessionId === "string" && sessionId.length > 0) parsedSessionId = sessionId;
+    else return [];
+    if (!isIpcMessageType(value.type)) return [];
+    return [{ sessionId: parsedSessionId, type: value.type, payload: value.payload }];
   } catch {
     return [];
   }
+}
+
+function isIpcMessageType(value: unknown): value is IpcMessageType {
+  return typeof value === "string" && IPC_MESSAGE_TYPES.has(value);
 }
 
 function resolveSessionWaiters(

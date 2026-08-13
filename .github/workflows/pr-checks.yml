@@ -42,7 +42,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Lint
+      - name: Lint (including custom type restrictions)
         run: pnpm lint
 
       - name: Check formatting

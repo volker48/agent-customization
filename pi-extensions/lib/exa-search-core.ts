@@ -38,6 +38,18 @@ export interface ExaSearchInput {
   excludeDomains?: string[];
 }
 
+export interface ExaSearchCost {
+  total?: number;
+  search?: {
+    neural?: number;
+    keyword?: number;
+  };
+  contents?: {
+    text?: number;
+    summary?: number;
+  };
+}
+
 export interface ExaSearchDetails {
   query: string;
   error?: string;
@@ -48,7 +60,7 @@ export interface ExaSearchDetails {
   resolvedSearchType?: string;
   searchTimeMs?: number;
   textMaxCharacters?: number;
-  costDollars?: Record<string, unknown>;
+  costDollars?: ExaSearchCost;
   truncated: boolean;
 }
 
@@ -65,7 +77,39 @@ interface ExaSearchResponse {
   requestId: string;
   resolvedSearchType?: string;
   searchTime?: number;
-  costDollars?: Record<string, unknown>;
+  costDollars?: ExaSearchCost;
+}
+
+interface ExaSearchResponseJson {
+  results?: unknown;
+  requestId?: unknown;
+  resolvedSearchType?: unknown;
+  searchTime?: unknown;
+  costDollars?: unknown;
+}
+
+interface ExaSearchResultJson {
+  title?: unknown;
+  url?: unknown;
+  publishedDate?: unknown;
+  score?: unknown;
+  text?: unknown;
+}
+
+interface ExaSearchCostJson {
+  total?: unknown;
+  search?: unknown;
+  contents?: unknown;
+}
+
+interface ExaSearchOperationCostJson {
+  neural?: unknown;
+  keyword?: unknown;
+}
+
+interface ExaContentsCostJson {
+  text?: unknown;
+  summary?: unknown;
 }
 
 interface ExaSearchOptions {
@@ -83,6 +127,112 @@ export interface WebSearchToolResult {
   content: Array<{ type: "text"; text: string }>;
   details: ExaSearchDetails;
   isError?: boolean;
+}
+
+function parseExaSearchResponse(value: unknown): ExaSearchResponse {
+  const raw = readExaSearchResponseInput(value);
+  if (!Array.isArray(raw.results)) {
+    throw new Error("Invalid Exa response: results must be an array");
+  }
+  if (typeof raw.requestId !== "string" || !raw.requestId) {
+    throw new Error("Invalid Exa response: requestId must be a string");
+  }
+
+  return {
+    results: raw.results.map(parseExaSearchResult),
+    requestId: raw.requestId,
+    resolvedSearchType: readExaOptionalString(raw.resolvedSearchType, "resolvedSearchType"),
+    searchTime: readExaOptionalNumber(raw.searchTime, "searchTime"),
+    costDollars: parseExaSearchCost(raw.costDollars),
+  };
+}
+
+function parseExaSearchResult(value: unknown, index: number): ExaSearchResult {
+  const raw = readExaSearchResultInput(value, index);
+  const url = raw.url;
+  if (typeof url !== "string" || !url) {
+    throw new Error(`Invalid Exa response: result ${index + 1} url must be a string`);
+  }
+  const title = readExaResultTitle(raw.title, index);
+
+  return {
+    title,
+    url,
+    publishedDate: readExaOptionalString(raw.publishedDate, "publishedDate"),
+    score: readExaOptionalNumber(raw.score, "score"),
+    text: readExaOptionalString(raw.text, "text"),
+  };
+}
+
+function parseExaSearchCost(value: unknown): ExaSearchCost | undefined {
+  if (value === undefined) return undefined;
+  const raw = readExaSearchCostInput(value);
+  const search = raw.search === undefined ? undefined : readExaSearchOperationCostInput(raw.search);
+  const contents = raw.contents === undefined ? undefined : readExaContentsCostInput(raw.contents);
+  return {
+    total: readExaOptionalNumber(raw.total, "costDollars.total"),
+    search: search
+      ? {
+          neural: readExaOptionalNumber(search.neural, "costDollars.search.neural"),
+          keyword: readExaOptionalNumber(search.keyword, "costDollars.search.keyword"),
+        }
+      : undefined,
+    contents: contents
+      ? {
+          text: readExaOptionalNumber(contents.text, "costDollars.contents.text"),
+          summary: readExaOptionalNumber(contents.summary, "costDollars.contents.summary"),
+        }
+      : undefined,
+  };
+}
+
+function readExaSearchResponseInput(value: unknown): ExaSearchResponseJson {
+  return readExaObject(value, "response") as ExaSearchResponseJson;
+}
+
+function readExaSearchResultInput(value: unknown, index: number): ExaSearchResultJson {
+  return readExaObject(value, `result ${index + 1}`) as ExaSearchResultJson;
+}
+
+function readExaSearchCostInput(value: unknown): ExaSearchCostJson {
+  return readExaObject(value, "costDollars") as ExaSearchCostJson;
+}
+
+function readExaSearchOperationCostInput(value: unknown): ExaSearchOperationCostJson {
+  return readExaObject(value, "costDollars.search") as ExaSearchOperationCostJson;
+}
+
+function readExaContentsCostInput(value: unknown): ExaContentsCostJson {
+  return readExaObject(value, "costDollars.contents") as ExaContentsCostJson;
+}
+
+function readExaObject(value: unknown, label: string): object {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`Invalid Exa response: ${label} must be an object`);
+  }
+  return value;
+}
+
+function readExaResultTitle(value: unknown, index: number): string | null {
+  if (value === null) return null;
+  if (typeof value === "string") return value;
+  throw new Error(`Invalid Exa response: result ${index + 1} title must be a string or null`);
+}
+
+function readExaOptionalString(value: unknown, label: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") {
+    throw new Error(`Invalid Exa response: ${label} must be a string`);
+  }
+  return value;
+}
+
+function readExaOptionalNumber(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`Invalid Exa response: ${label} must be a finite number`);
+  }
+  return value;
 }
 
 function summarizeText(text: string, maxLength: number): string {
@@ -224,7 +374,7 @@ async function searchExa(
     throw new Error(`Exa API error: ${message}`);
   }
 
-  return (await response.json()) as ExaSearchResponse;
+  return parseExaSearchResponse(await response.json());
 }
 
 function textResult(
