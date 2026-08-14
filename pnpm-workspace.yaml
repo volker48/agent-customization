@@ -1,4 +1,6 @@
 auditConfig: {}
+overrides:
+  "@connectrpc/connect-node>undici": 6.28.0
 allowBuilds:
   "@google/genai": false
   esbuild: false

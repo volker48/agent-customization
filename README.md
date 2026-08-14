@@ -18,6 +18,7 @@ pi-extensions/         # Pi agent extensions (TypeScript)
   webfetch.ts          # Generic web fetch tool
   rtk.ts               # RTK bash rewrite hook
   fusion/              # Multi-model Fusion panel and judge command
+  cursor/              # Cursor subscription models as a pi provider (SDK + CLI bridge)
 
 pi-subagents/          # Package-owned prompt overrides for selected pi-subagents roles
   agents/              # Customized prompts published through the Pi package manifest
@@ -206,6 +207,80 @@ binary question decomposition inspired by the BinEval framework: see
 (arXiv:2606.27226).
 
 [bineval]: https://arxiv.org/abs/2606.27226
+
+### Pi: Cursor bridge (`pi-extensions/cursor/`)
+
+Use the models available in your Cursor subscription as a pi model provider. Cursor
+exposes no raw model-inference API, so this extension bridges at the agent level:
+each pi turn drives a Cursor agent run. The **Cursor agent does the file/shell work
+with its own harness** — pi's built-in tools are bypassed while a `cursor/*` model
+is active. Completed Cursor tool activity is shown as non-executable success/error
+cards in the pi transcript; those cards are observational and never cause pi to run
+the tool a second time. Assistant text and thinking are buffered until the Cursor
+run finishes so the final response appears after its tool cards.
+
+**Setup:**
+
+```bash
+pnpm install   # installs @cursor/sdk (SDK transport dependency)
+```
+
+Then pick one authentication method:
+
+| Transport      | Auth                                                                                      | Notes                                                                                                                 |
+| -------------- | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| SDK (primary)  | `export CURSOR_API_KEY=...` from [Dashboard → API Keys](https://cursor.com/dashboard/api) | Adds thinking content, direct image attachments, current-turn token usage, and conversation resume across pi restarts |
+| CLI (fallback) | `cursor-agent login` (browser OAuth, same login as the Cursor app)                        | Used automatically when `CURSOR_API_KEY` is unset; print mode suppresses thinking and direct image attachments        |
+
+Both transports bill identically: runs draw from your plan's normal usage pools at
+the same rates as IDE usage (SDK runs appear under the "SDK" tag in the team usage
+dashboard). `composer-2.5` draws from the generous first-party pool and is the
+frugal default.
+
+**Usage:**
+
+```bash
+pi --model cursor/composer-2.5      # start on a Cursor model
+pi                                  # or switch later with /model (Ctrl+L)
+```
+
+Inside pi, select any `cursor/*` model from the `/model` picker — the catalog is
+discovered from your account at startup (`Cursor.models.list()` or
+`cursor-agent models`). Chat as usual; multi-turn context is preserved by resuming
+the same underlying Cursor conversation.
+
+**Commands:**
+
+- `/cursor-status` — show the active transport and authentication state
+- `/cursor-reset` — drop the bridged Cursor conversation (next message starts
+  fresh). Use after rewinding/forking pi history, which the Cursor side cannot see
+
+**Environment variables:**
+
+| Variable              | Default        | Description                                                                                                            |
+| --------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `CURSOR_API_KEY`      | unset          | User API key; enables the SDK transport                                                                                |
+| `PI_CURSOR_TRANSPORT` | auto           | Force `sdk` or `cli`                                                                                                   |
+| `CURSOR_AGENT_BIN`    | `cursor-agent` | CLI binary name/path override (CLI transport)                                                                          |
+| `PI_CURSOR_NO_FORCE`  | unset          | Set to `1` to omit `--force` from CLI runs (shell/write tools will then fail — approvals are impossible in print mode) |
+
+**Limitations:** direct image attachments require the SDK transport. With CLI
+transport, include a workspace image path in the prompt so Cursor can read it with
+its own tools; pi image blocks cannot be forwarded directly. Cursor controls its
+own automatic reasoning, so pi's thinking-level selector preserves native TUI
+styling but does not change Cursor's reasoning effort. Cursor does not expose a
+reliable current/maximum context-window measurement: SDK usage is aggregate token
+volume for the current agent turn, while pi's context percentage is estimated from
+the visible bridged transcript so internal Cursor model calls cannot drive it above
+100%. Cache read/write volume is folded into prompt input because pi's single-request
+cache-miss heuristic is incompatible with Cursor's multi-request agent turns. Usage
+numbers require the SDK transport; subscription cost remains
+`$0` in pi because the SDK does not expose synchronous per-run billing cost.
+
+There is no pi tool execution while bridged. Because assistant output is buffered
+to preserve transcript ordering, it does not appear token-by-token during the
+Cursor run. The bridged Cursor conversation can diverge if you edit pi history
+mid-session — recover with `/cursor-reset`.
 
 ### CLI: babysit
 
