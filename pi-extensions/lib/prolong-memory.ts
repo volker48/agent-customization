@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { BigIntStats } from "node:fs";
-import { appendFile, chmod, lstat, mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { constants, type BigIntStats } from "node:fs";
+import { chmod, lstat, mkdir, open, rename, rm, rmdir, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 export type BranchEntry = {
@@ -23,6 +23,11 @@ export type FileSignature = {
   size: bigint;
   modified: bigint;
   changed: bigint;
+};
+
+type ObjectIdentity = {
+  device: bigint;
+  inode: bigint;
 };
 
 export type ProlongMemoryOptions = {
@@ -59,6 +64,16 @@ function signaturesEqual(left: FileSignature, right: FileSignature): boolean {
   );
 }
 
+function objectIdentitiesEqual(left: ObjectIdentity, right: ObjectIdentity): boolean {
+  return left.device === right.device && left.inode === right.inode;
+}
+
+function assertSignaturesEqual(expected: FileSignature, actual: FileSignature): void {
+  if (!signaturesEqual(expected, actual)) {
+    throw new Error("PRO-LONG log changed during synchronization");
+  }
+}
+
 async function readSignature(path: string): Promise<FileSignature | undefined> {
   try {
     const metadata = await lstat(path, { bigint: true });
@@ -85,6 +100,53 @@ async function ensurePrivateDirectoryPath(path: string): Promise<void> {
     throw new Error(`Refusing unsafe PRO-LONG directory: ${path}`);
   }
   await chmod(path, 0o700);
+}
+
+async function readPrivateDirectoryIdentity(path: string): Promise<ObjectIdentity | undefined> {
+  try {
+    const metadata = await lstat(path, { bigint: true });
+    const ownedByCurrentUser =
+      typeof process.getuid !== "function" || metadata.uid === BigInt(process.getuid());
+    if (metadata.isSymbolicLink() || !metadata.isDirectory() || !ownedByCurrentUser) {
+      throw new Error(`Refusing unsafe PRO-LONG directory: ${path}`);
+    }
+    return { device: metadata.dev, inode: metadata.ino };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function privateDirectoryOpenFlags(): number {
+  if (typeof constants.O_DIRECTORY !== "number" || typeof constants.O_NOFOLLOW !== "number") {
+    throw new Error("Safe descriptor-relative PRO-LONG cleanup is unavailable on this platform");
+  }
+  return constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
+}
+
+async function descriptorDirectoryPath(handle: Awaited<ReturnType<typeof open>>): Promise<string> {
+  const path = join("/proc/self/fd", String(handle.fd));
+  try {
+    await lstat(path);
+    return path;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    throw new Error("Safe descriptor-relative PRO-LONG cleanup requires Linux procfs", {
+      cause: error,
+    });
+  }
+}
+
+async function validatePrivateDirectoryHandle(
+  handle: Awaited<ReturnType<typeof open>>,
+  path: string,
+): Promise<void> {
+  const metadata = await handle.stat();
+  const ownedByCurrentUser =
+    typeof process.getuid !== "function" || metadata.uid === process.getuid();
+  if (!metadata.isDirectory() || !ownedByCurrentUser) {
+    throw new Error(`Refusing unsafe PRO-LONG directory: ${path}`);
+  }
 }
 
 function isPrefix(previousRecords: readonly string[], nextRecords: readonly string[]): boolean {
@@ -116,10 +178,14 @@ export class ProlongMemory {
 
   private synchronizedRecords: string[] = [];
   private expectedSignature: FileSignature | undefined;
+  private expectedRootIdentity: ObjectIdentity | undefined;
+  private expectedDirectoryIdentity: ObjectIdentity | undefined;
   private readonly readLogSignature: (path: string) => Promise<FileSignature | undefined>;
+  private readonly sessionId: string;
 
   constructor(options: ProlongMemoryOptions) {
     assertSafeSessionId(options.sessionId);
+    this.sessionId = options.sessionId;
     const root = join(options.runtimeDirectory, "pi-prolong");
     this.directoryPath = join(root, options.sessionId);
     this.logPath = join(this.directoryPath, "active-branch.jsonl");
@@ -140,6 +206,7 @@ export class ProlongMemory {
       signaturesEqual(this.expectedSignature, actualSignature);
 
     let mode: ProlongSyncMode;
+    let trustedSignature: FileSignature;
     if (
       !options.forceRebuild &&
       integrityMatches &&
@@ -147,19 +214,27 @@ export class ProlongMemory {
     ) {
       if (this.synchronizedRecords.length === entries.length) {
         mode = "noop";
+        trustedSignature = actualSignature;
       } else {
-        await this.append(entries.slice(this.synchronizedRecords.length));
+        trustedSignature = await this.append(
+          entries.slice(this.synchronizedRecords.length),
+          actualSignature,
+        );
         mode = "append";
       }
     } else {
-      await this.rebuild(entries);
+      trustedSignature = await this.rebuild(entries);
       mode = "rebuild";
     }
 
+    const directoryIdentities = await this.validatePrivateDirectory();
     const synchronizedSignature = await this.readLogSignature(this.logPath);
     if (!synchronizedSignature) throw new Error("PRO-LONG log disappeared after synchronization");
+    assertSignaturesEqual(trustedSignature, synchronizedSignature);
     this.synchronizedRecords = serializedEntries;
     this.expectedSignature = synchronizedSignature;
+    this.expectedRootIdentity = directoryIdentities.root;
+    this.expectedDirectoryIdentity = directoryIdentities.session;
 
     return {
       mode,
@@ -170,9 +245,86 @@ export class ProlongMemory {
   }
 
   async cleanup(): Promise<void> {
-    await rm(this.directoryPath, { recursive: true, force: true });
+    const root = dirname(this.directoryPath);
+    const runtimeDirectory = dirname(root);
+    const runtimeIdentity = await readPrivateDirectoryIdentity(runtimeDirectory);
+    const rootIdentity = await readPrivateDirectoryIdentity(root);
+    const sessionIdentity = await readPrivateDirectoryIdentity(this.directoryPath);
+    const hierarchyExists = runtimeIdentity && rootIdentity && sessionIdentity;
+    if (!hierarchyExists && (this.expectedRootIdentity || this.expectedDirectoryIdentity)) {
+      throw new Error("PRO-LONG directory changed during cleanup");
+    }
+    if (hierarchyExists) {
+      if (
+        !this.expectedRootIdentity ||
+        !this.expectedDirectoryIdentity ||
+        !objectIdentitiesEqual(this.expectedRootIdentity, rootIdentity) ||
+        !objectIdentitiesEqual(this.expectedDirectoryIdentity, sessionIdentity)
+      ) {
+        throw new Error("PRO-LONG directory changed during cleanup");
+      }
+      // Anchor every destructive operation to opened directories. A mutable pathname is used only
+      // to acquire the root handle; descendants are then addressed through that descriptor chain.
+      const rootHandle = await open(root, privateDirectoryOpenFlags());
+      let sessionHandle: Awaited<ReturnType<typeof open>> | undefined;
+      try {
+        await validatePrivateDirectoryHandle(rootHandle, root);
+        const openedRoot = await rootHandle.stat({ bigint: true });
+        if (openedRoot.dev !== rootIdentity.device || openedRoot.ino !== rootIdentity.inode) {
+          throw new Error("PRO-LONG directory changed during cleanup");
+        }
+        const rootDescriptorPath = await descriptorDirectoryPath(rootHandle);
+        const anchoredSessionPath = join(rootDescriptorPath, this.sessionId);
+        sessionHandle = await open(anchoredSessionPath, privateDirectoryOpenFlags());
+        await validatePrivateDirectoryHandle(sessionHandle, this.directoryPath);
+        const openedSession = await sessionHandle.stat({ bigint: true });
+        if (
+          openedSession.dev !== sessionIdentity.device ||
+          openedSession.ino !== sessionIdentity.inode
+        ) {
+          throw new Error("PRO-LONG directory changed during cleanup");
+        }
+        const sessionDescriptorPath = await descriptorDirectoryPath(sessionHandle);
+        const anchoredLogPath = join(sessionDescriptorPath, "active-branch.jsonl");
+        const validatedSignature = await this.readLogSignature(anchoredLogPath);
+        if (validatedSignature) {
+          if (
+            !this.expectedSignature ||
+            !objectIdentitiesEqual(this.expectedSignature, validatedSignature)
+          ) {
+            throw new Error("PRO-LONG log identity changed during cleanup");
+          }
+          const logHandle = await open(anchoredLogPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+          try {
+            const openedSignature = signatureFromStat(await logHandle.stat({ bigint: true }));
+            if (!signaturesEqual(validatedSignature, openedSignature)) {
+              throw new Error("PRO-LONG log changed during cleanup");
+            }
+            await this.validatePrivateDirectory();
+            await unlink(anchoredLogPath);
+          } finally {
+            await logHandle.close();
+          }
+        }
+        await this.validatePrivateDirectory();
+        const openedDirectory = await sessionHandle.stat({ bigint: true });
+        const currentDirectory = await lstat(anchoredSessionPath, { bigint: true });
+        if (
+          openedDirectory.dev !== currentDirectory.dev ||
+          openedDirectory.ino !== currentDirectory.ino
+        ) {
+          throw new Error("PRO-LONG directory changed during cleanup");
+        }
+        await rmdir(anchoredSessionPath);
+      } finally {
+        await sessionHandle?.close();
+        await rootHandle.close();
+      }
+    }
     this.synchronizedRecords = [];
     this.expectedSignature = undefined;
+    this.expectedRootIdentity = undefined;
+    this.expectedDirectoryIdentity = undefined;
   }
 
   private async ensurePrivateDirectory(): Promise<void> {
@@ -183,26 +335,63 @@ export class ProlongMemory {
     await ensurePrivateDirectoryPath(this.directoryPath);
   }
 
-  private async append(entries: readonly BranchEntry[]): Promise<void> {
-    await chmod(this.logPath, 0o600);
+  private async validatePrivateDirectory(): Promise<{
+    root: ObjectIdentity;
+    session: ObjectIdentity;
+  }> {
+    const root = dirname(this.directoryPath);
+    const runtimeDirectory = dirname(root);
+    const runtimeIdentity = await readPrivateDirectoryIdentity(runtimeDirectory);
+    const rootIdentity = await readPrivateDirectoryIdentity(root);
+    const sessionIdentity = await readPrivateDirectoryIdentity(this.directoryPath);
+    if (!runtimeIdentity || !rootIdentity || !sessionIdentity) {
+      throw new Error("PRO-LONG directory disappeared during synchronization");
+    }
+    return { root: rootIdentity, session: sessionIdentity };
+  }
+
+  private async append(
+    entries: readonly BranchEntry[],
+    validatedSignature: FileSignature,
+  ): Promise<FileSignature> {
+    // The idle log is 0400, so first anchor and validate it read-only. After making that inode
+    // writable, open the append descriptor and verify both handles still identify the same file.
+    const validationHandle = await open(this.logPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    let appendHandle: Awaited<ReturnType<typeof open>> | undefined;
+    let writable = false;
     try {
-      await appendFile(this.logPath, serializeBranch(entries), { encoding: "utf8" });
+      const openedSignature = signatureFromStat(await validationHandle.stat({ bigint: true }));
+      assertSignaturesEqual(validatedSignature, openedSignature);
+      await validationHandle.chmod(0o600);
+      writable = true;
+      const writableSignature = signatureFromStat(await validationHandle.stat({ bigint: true }));
+      appendHandle = await open(
+        this.logPath,
+        constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW,
+      );
+      const appendSignature = signatureFromStat(await appendHandle.stat({ bigint: true }));
+      assertSignaturesEqual(writableSignature, appendSignature);
+      await appendHandle.appendFile(serializeBranch(entries), { encoding: "utf8" });
+      await appendHandle.chmod(0o400);
+      writable = false;
+      return signatureFromStat(await appendHandle.stat({ bigint: true }));
     } finally {
-      await chmod(this.logPath, 0o400);
+      if (writable) await validationHandle.chmod(0o400);
+      await appendHandle?.close();
+      await validationHandle.close();
     }
   }
 
-  private async rebuild(entries: readonly BranchEntry[]): Promise<void> {
+  private async rebuild(entries: readonly BranchEntry[]): Promise<FileSignature> {
     const temporaryPath = join(this.directoryPath, `.active-branch-${randomUUID()}.tmp`);
+    const handle = await open(temporaryPath, "wx", 0o600);
     try {
-      await writeFile(temporaryPath, serializeBranch(entries), {
-        encoding: "utf8",
-        flag: "wx",
-        mode: 0o600,
-      });
+      await handle.writeFile(serializeBranch(entries), { encoding: "utf8" });
+      await handle.chmod(0o400);
       await rename(temporaryPath, this.logPath);
-      await chmod(this.logPath, 0o400);
+      return signatureFromStat(await handle.stat({ bigint: true }));
     } finally {
+      await handle.close();
       await rm(temporaryPath, { force: true });
     }
   }

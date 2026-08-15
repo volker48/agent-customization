@@ -24,7 +24,13 @@ function createMemory(): ProlongMemoryPort {
   };
 }
 
-function createPi(options: { flag?: boolean; defaultEnabled?: boolean } = {}) {
+function createPi(
+  options: {
+    flag?: boolean;
+    defaultEnabled?: boolean;
+    createMemory?: (sessionId: string) => ProlongMemoryPort;
+  } = {},
+) {
   const handlers = new Map<string, Handler>();
   const commands = new Map<string, Command>();
   const flags = new Map<string, boolean | string | undefined>([["prolong", options.flag]]);
@@ -50,19 +56,19 @@ function createPi(options: { flag?: boolean; defaultEnabled?: boolean } = {}) {
   };
 
   registerProlongExtension(pi as never, {
-    createMemory: () => memory,
+    createMemory: options.createMemory ?? (() => memory),
     defaultEnabled: () => options.defaultEnabled ?? false,
   });
 
   return { pi, handlers, commands, registeredFlags, branch, memory };
 }
 
-function createContext(branch: unknown[] = []) {
+function createContext(branch: unknown[] = [], sessionId = "session-1") {
   const notifications: Array<{ message: string; level?: string }> = [];
   return {
     context: {
       sessionManager: {
-        getSessionId: () => "session-1",
+        getSessionId: () => sessionId,
         getBranch: () => branch,
       },
       ui: {
@@ -254,6 +260,42 @@ describe("PRO-LONG Pi extension", () => {
     );
 
     expect(runtime.memory.cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it("installs new session memory even when previous projection cleanup fails", async () => {
+    const previousMemory = createMemory();
+    const nextMemory = createMemory();
+    vi.mocked(previousMemory.cleanup).mockRejectedValue(new Error("permission denied"));
+    const createMemoryForSession = vi.fn((sessionId: string) =>
+      sessionId === "session-old" ? previousMemory : nextMemory,
+    );
+    const runtime = createPi({
+      defaultEnabled: true,
+      createMemory: createMemoryForSession,
+    });
+    const oldBranch = [{ type: "message", id: "old-entry" }];
+    const nextBranch = [{ type: "message", id: "next-entry" }];
+    const oldContext = createContext(oldBranch, "session-old");
+    const nextContext = createContext(nextBranch, "session-next");
+
+    await callHandler(runtime.handlers, "session_start", { type: "session_start" }, oldContext);
+    await callHandler(runtime.handlers, "session_start", { type: "session_start" }, nextContext);
+    await callHandler(
+      runtime.handlers,
+      "before_agent_start",
+      { type: "before_agent_start", systemPrompt: "base" },
+      nextContext,
+    );
+
+    expect(createMemoryForSession).toHaveBeenNthCalledWith(1, "session-old");
+    expect(createMemoryForSession).toHaveBeenNthCalledWith(2, "session-next");
+    expect(previousMemory.sync).toHaveBeenCalledTimes(1);
+    expect(nextMemory.sync).toHaveBeenCalledTimes(2);
+    expect(nextMemory.sync).toHaveBeenLastCalledWith(nextBranch, { forceRebuild: false });
+    expect(nextContext.notifications).toContainEqual({
+      level: "warning",
+      message: expect.stringContaining("previous session projection"),
+    });
   });
 
   it("keeps the branch enabled and does not persist off when cleanup fails", async () => {

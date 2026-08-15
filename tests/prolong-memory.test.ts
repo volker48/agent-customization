@@ -208,6 +208,99 @@ describe("PRO-LONG active-branch memory", () => {
     expect(parseBranchJsonl(await readFile(memory.logPath, "utf8"))).toEqual([first, second]);
   });
 
+  it("refuses a log replacement between validation and suffix append", async () => {
+    const runtimeDirectory = await mkdtemp(join(tmpdir(), "prolong-append-race-test-"));
+    temporaryDirectories.push(runtimeDirectory);
+    const first = { type: "message", id: "one" };
+    const second = { type: "message", id: "two" };
+    const attacker = { type: "message", id: "attacker" };
+    let signatureReads = 0;
+    let trustedLogPath = "";
+    const readSignature = vi.fn(async (path: string) => {
+      signatureReads += 1;
+      try {
+        const metadata = await fsPromises.lstat(path, { bigint: true });
+        const signature = {
+          device: metadata.dev,
+          inode: metadata.ino,
+          links: metadata.nlink,
+          size: metadata.size,
+          modified: metadata.mtimeNs,
+          changed: metadata.ctimeNs,
+        };
+        if (signatureReads === 3) {
+          trustedLogPath = join(runtimeDirectory, "validated-active-branch.jsonl");
+          await rename(path, trustedLogPath);
+          await writeFile(path, serializeBranch([attacker]), { mode: 0o400 });
+        }
+        return signature;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw error;
+      }
+    });
+    const memory = new ProlongMemory({
+      runtimeDirectory,
+      sessionId: "append-race-test",
+      readSignature,
+    });
+
+    await memory.sync([first]);
+
+    await expect(memory.sync([first, second])).rejects.toThrow(/changed during synchronization/);
+    expect(parseBranchJsonl(await readFile(memory.logPath, "utf8"))).toEqual([attacker]);
+    expect(parseBranchJsonl(await readFile(trustedLogPath, "utf8"))).toEqual([first]);
+  });
+
+  it("does not accept synchronization through a replaced directory ancestor", async () => {
+    const runtimeDirectory = await mkdtemp(join(tmpdir(), "prolong-ancestor-race-test-"));
+    temporaryDirectories.push(runtimeDirectory);
+    const first = { type: "message", id: "one" };
+    const second = { type: "message", id: "two" };
+    const rootPath = join(runtimeDirectory, "pi-prolong");
+    let signatureReads = 0;
+    let ownedRootPath = "";
+    const readSignature = vi.fn(async (path: string) => {
+      signatureReads += 1;
+      try {
+        const metadata = await fsPromises.lstat(path, { bigint: true });
+        const signature = {
+          device: metadata.dev,
+          inode: metadata.ino,
+          links: metadata.nlink,
+          size: metadata.size,
+          modified: metadata.mtimeNs,
+          changed: metadata.ctimeNs,
+        };
+        if (signatureReads === 3) {
+          ownedRootPath = join(runtimeDirectory, "owned-projection");
+          await rename(rootPath, ownedRootPath);
+          await symlink(ownedRootPath, rootPath, "dir");
+        }
+        return signature;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw error;
+      }
+    });
+    const memory = new ProlongMemory({
+      runtimeDirectory,
+      sessionId: "ancestor-race-test",
+      readSignature,
+    });
+    await memory.sync([first]);
+
+    await expect(memory.sync([first, second])).rejects.toThrow("unsafe PRO-LONG directory");
+    expect(
+      parseBranchJsonl(
+        await readFile(join(ownedRootPath, "ancestor-race-test", "active-branch.jsonl"), "utf8"),
+      ),
+    ).toEqual([first, second]);
+    expect(
+      (memory as unknown as { synchronizedRecords: string[] }).synchronizedRecords,
+    ).toEqual([JSON.stringify(first)]);
+  });
+
   it("refuses a replaced log symlink even when it resolves to the tracked inode", async () => {
     const runtimeDirectory = await mkdtemp(join(tmpdir(), "prolong-log-symlink-test-"));
     temporaryDirectories.push(runtimeDirectory);
@@ -224,7 +317,7 @@ describe("PRO-LONG active-branch memory", () => {
     expect(parseBranchJsonl(await readFile(movedLog, "utf8"))).toEqual([first]);
   });
 
-  it("does not advance in-memory state after a failed synchronization", async () => {
+  it("recovers after an unsafe log-path object is removed", async () => {
     const runtimeDirectory = await mkdtemp(join(tmpdir(), "prolong-retry-test-"));
     temporaryDirectories.push(runtimeDirectory);
     const memory = new ProlongMemory({ runtimeDirectory, sessionId: "retry-test" });
@@ -257,14 +350,12 @@ describe("PRO-LONG active-branch memory", () => {
       changed: bigint;
     };
     let signatureReads = 0;
-    let trustedSignature: Signature | undefined;
     const readSignature = vi.fn(async (path: string): Promise<Signature | undefined> => {
       signatureReads += 1;
       if (signatureReads === 4) throw new Error("injected final signature failure");
-      if (signatureReads === 5) return trustedSignature;
       try {
         const metadata = await fsPromises.lstat(path, { bigint: true });
-        const signature = {
+        return {
           device: metadata.dev,
           inode: metadata.ino,
           links: metadata.nlink,
@@ -272,8 +363,6 @@ describe("PRO-LONG active-branch memory", () => {
           modified: metadata.mtimeNs,
           changed: metadata.ctimeNs,
         };
-        if (signatureReads === 2) trustedSignature = signature;
-        return signature;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
         throw error;
@@ -288,13 +377,19 @@ describe("PRO-LONG active-branch memory", () => {
 
     await memory.sync([first]);
     await expect(memory.sync([first, second])).rejects.toThrow("injected final signature failure");
-    await chmod(memory.logPath, 0o600);
-    await writeFile(memory.logPath, serializeBranch([first]), "utf8");
-    await chmod(memory.logPath, 0o400);
+
+    expect(parseBranchJsonl(await readFile(memory.logPath, "utf8"))).toEqual([first, second]);
+    expect(
+      (
+        memory as unknown as {
+          synchronizedRecords: string[];
+        }
+      ).synchronizedRecords,
+    ).toEqual([JSON.stringify(first)]);
 
     const retry = await memory.sync([first, second]);
 
-    expect(retry.mode).toBe("append");
+    expect(retry.mode).toBe("rebuild");
     expect(parseBranchJsonl(await readFile(memory.logPath, "utf8"))).toEqual([first, second]);
   });
 
@@ -369,5 +464,90 @@ describe("PRO-LONG active-branch memory", () => {
     await expect(stat(join(outsideDirectory, "session-1"))).rejects.toMatchObject({
       code: "ENOENT",
     });
+  });
+
+  it("refuses cleanup through a replaced projection-root symlink", async () => {
+    const runtimeDirectory = await mkdtemp(join(tmpdir(), "prolong-cleanup-race-test-"));
+    const outsideDirectory = await mkdtemp(join(tmpdir(), "prolong-cleanup-outside-test-"));
+    temporaryDirectories.push(runtimeDirectory, outsideDirectory);
+    const memory = new ProlongMemory({ runtimeDirectory, sessionId: "session-1" });
+    const entry = { type: "message", id: "one" };
+    await memory.sync([entry]);
+    const rootPath = join(runtimeDirectory, "pi-prolong");
+    await rename(rootPath, join(runtimeDirectory, "owned-projection"));
+    const outsideSession = join(outsideDirectory, "session-1");
+    const sentinelPath = join(outsideSession, "sentinel.txt");
+    await mkdir(outsideSession);
+    await writeFile(sentinelPath, "keep");
+    await symlink(outsideDirectory, rootPath, "dir");
+
+    await expect(memory.cleanup()).rejects.toThrow("Refusing unsafe PRO-LONG directory");
+    await expect(readFile(sentinelPath, "utf8")).resolves.toBe("keep");
+  });
+
+  it("refuses an ordinary projection-root replacement before cleanup", async () => {
+    const runtimeDirectory = await mkdtemp(join(tmpdir(), "prolong-cleanup-root-swap-test-"));
+    temporaryDirectories.push(runtimeDirectory);
+    const memory = new ProlongMemory({ runtimeDirectory, sessionId: "session-1" });
+    await memory.sync([{ id: "one" }]);
+    const rootPath = join(runtimeDirectory, "pi-prolong");
+    const ownedRootPath = join(runtimeDirectory, "owned-projection");
+    await rename(rootPath, ownedRootPath);
+    await mkdir(join(rootPath, "session-1"), { recursive: true });
+
+    await expect(memory.cleanup()).rejects.toThrow(/directory changed during cleanup/);
+    await expect(stat(join(rootPath, "session-1"))).resolves.toBeDefined();
+    await expect(
+      readFile(join(ownedRootPath, "session-1", "active-branch.jsonl"), "utf8"),
+    ).resolves.toContain('"id":"one"');
+  });
+
+  it("refuses a projection-root replacement during cleanup", async () => {
+    const runtimeDirectory = await mkdtemp(join(tmpdir(), "prolong-cleanup-toctou-test-"));
+    const outsideDirectory = await mkdtemp(join(tmpdir(), "prolong-cleanup-target-test-"));
+    temporaryDirectories.push(runtimeDirectory, outsideDirectory);
+    const rootPath = join(runtimeDirectory, "pi-prolong");
+    const outsideSession = join(outsideDirectory, "session-1");
+    const outsideLog = join(outsideSession, "active-branch.jsonl");
+    await mkdir(outsideSession);
+    await writeFile(outsideLog, serializeBranch([{ id: "outside" }]), { mode: 0o400 });
+    let signatureReads = 0;
+    let ownedRootPath = "";
+    const readSignature = vi.fn(async (path: string) => {
+      signatureReads += 1;
+      try {
+        const metadata = await fsPromises.lstat(path, { bigint: true });
+        const signature = {
+          device: metadata.dev,
+          inode: metadata.ino,
+          links: metadata.nlink,
+          size: metadata.size,
+          modified: metadata.mtimeNs,
+          changed: metadata.ctimeNs,
+        };
+        if (signatureReads === 3) {
+          ownedRootPath = join(runtimeDirectory, "owned-projection");
+          await rename(rootPath, ownedRootPath);
+          await symlink(outsideDirectory, rootPath, "dir");
+        }
+        return signature;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw error;
+      }
+    });
+    const memory = new ProlongMemory({
+      runtimeDirectory,
+      sessionId: "session-1",
+      readSignature,
+    });
+    const entry = { type: "message", id: "one" };
+    await memory.sync([entry]);
+
+    await expect(memory.cleanup()).rejects.toThrow(/unsafe PRO-LONG directory|changed during cleanup/);
+    await expect(readFile(outsideLog, "utf8")).resolves.toBe(serializeBranch([{ id: "outside" }]));
+    await expect(
+      readFile(join(ownedRootPath, "session-1", "active-branch.jsonl"), "utf8"),
+    ).resolves.toBe(serializeBranch([entry]));
   });
 });

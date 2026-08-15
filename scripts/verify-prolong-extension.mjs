@@ -215,6 +215,10 @@ class RpcProcess {
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.exitPromise = new Promise((resolveExit) => {
+      this.child.once("error", (error) => {
+        this.fail(new Error(`Could not spawn Pi RPC process: ${error.message}`, { cause: error }));
+        resolveExit({ code: null, signal: null });
+      });
       this.child.once("close", (code, signal) => {
         try {
           const trailingFrame = parseRpcTrailingFrame(this.stdoutBuffer);

@@ -1,5 +1,10 @@
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
-import { readFile } from "node:fs/promises";
 import {
   assertNoExtensionErrors,
   assertNoToolActivity,
@@ -9,6 +14,7 @@ import {
   parseRpcTrailingFrame,
 } from "../scripts/verify-prolong-extension.mjs";
 
+const execFileAsync = promisify(execFile);
 const logPath = "/runtime/pi-prolong/session/active-branch.jsonl";
 const nonce = "PROLONG-0123456789abcdef";
 
@@ -175,6 +181,39 @@ describe("PRO-LONG verification acceptance helpers", () => {
         },
       ]),
     ).toThrow("extension error");
+  });
+
+  it("reports a missing Pi binary through the verifier failure path", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "prolong-missing-pi-test-"));
+    const verifierPath = fileURLToPath(
+      new URL("../scripts/verify-prolong-extension.mjs", import.meta.url),
+    );
+    try {
+      let failure;
+      try {
+        await execFileAsync(
+          process.execPath,
+          [
+            verifierPath,
+            "--pi-bin",
+            join(directory, "missing-pi"),
+            "--session",
+            join(directory, "session.jsonl"),
+            "--timeout-ms",
+            "1000",
+          ],
+          { cwd: fileURLToPath(new URL("..", import.meta.url)) },
+        );
+      } catch (error) {
+        failure = error;
+      }
+
+      expect(failure).toBeDefined();
+      expect(failure.stderr).toContain("[prolong-verify] FAILURE:");
+      expect(failure.stderr).not.toContain("Unhandled 'error' event");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("validates trailing stdout only after child stdio closes", async () => {

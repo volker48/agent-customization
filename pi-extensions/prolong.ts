@@ -207,7 +207,16 @@ export function registerProlongExtension(
   });
 
   pi.on("session_start", async (_event, context) => {
-    await runtime.memory?.cleanup();
+    const previousMemory = runtime.memory;
+    runtime.memory = undefined;
+    try {
+      await previousMemory?.cleanup();
+    } catch (error) {
+      context.ui.notify(
+        `PRO-LONG could not remove the previous session projection; continuing with new session memory: ${errorMessage(error)}`,
+        "warning",
+      );
+    }
     runtime.memory = dependencies.createMemory(context.sessionManager.getSessionId());
     runtime.enabled =
       readProlongEnabled(context.sessionManager.getBranch()) ?? dependencies.defaultEnabled();

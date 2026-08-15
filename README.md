@@ -216,7 +216,9 @@ The projection lives at `$XDG_RUNTIME_DIR/pi-prolong/<session-id>/active-branch.
 `XDG_RUNTIME_DIR` is unavailable, the extension uses an owner-private directory under the OS
 temporary directory. Directories are mode `0700`, the idle log is mode `0400`, normal forward
 progress appends only the new suffix, and divergence or detected mutation triggers an atomic
-rebuild. The directory is removed on disable and session shutdown.
+rebuild. The directory is removed on disable and session shutdown. Secure cleanup is anchored
+through Linux procfs directory descriptors; if procfs is unavailable, cleanup fails closed rather
+than falling back to recursive pathname removal.
 
 The log can duplicate any source code, terminal output, credentials, or other sensitive material
 already persisted in the Pi session. Enable it only when long-horizon recall justifies that
@@ -231,8 +233,8 @@ pnpm verify:prolong -- --benchmark-only
 ```
 
 The full RPC proof requires an authenticated model and checks manual compaction, omission of the
-random nonce from the compaction summary, a recorded `bash` or `read` call against the exact log
-path, exact nonce recovery, and cleanup:
+random nonce from the compaction summary, a recorded `read` call against the exact log path, exact
+nonce recovery, and cleanup:
 
 ```bash
 pnpm verify:prolong -- --model provider/model --keep-session
