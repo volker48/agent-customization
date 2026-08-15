@@ -1,6 +1,6 @@
 # Agent Customization
 
-Extensions, hooks, plugins, and themes for AI coding agents — currently supporting [Claude Code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview), [OpenCode](https://opencode.ai), and the [Pi agent](https://github.com/badlogic/pi-mono).
+Extensions, hooks, plugins, and themes for AI coding agents — currently supporting [Claude Code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview), [Hermes Agent](https://hermes-agent.nousresearch.com/docs), [OpenCode](https://opencode.ai), and the [Pi agent](https://github.com/badlogic/pi-mono).
 
 ## Repository Structure
 
@@ -11,6 +11,9 @@ claude-hooks/          # Claude Code hooks (Python)
 
 opencode-plugins/      # OpenCode plugins (TypeScript)
   sound-notifications.ts
+
+hermes-plugins/        # Hermes Agent plugins (Python)
+  prolong/             # Private programmatic memory across compression
 
 pi-extensions/         # Pi agent extensions (TypeScript)
   sound-notifications.ts
@@ -166,6 +169,15 @@ All three implementations support:
 
 ## Other Extensions
 
+### Hermes: PRO-LONG (`hermes-plugins/prolong/`)
+
+Materializes the current persisted session trajectory, including soft-archived
+compacted rows, as a private profile-scoped JSONL file. A cache-safe system-prompt
+section tells the model the exact path so it can recover older evidence with ordinary
+file and search tools after active-context compression. See the
+[plugin guide](hermes-plugins/prolong/README.md) and
+[ADR-0009](docs/adr/0009-hermes-prolong-programmatic-memory.md).
+
 ### Pi: Exa Search (`pi-extensions/exa-search.ts`)
 
 Registers an `exa_search` tool that queries the [Exa](https://exa.ai) search API. Returns ranked links with URLs, metadata, and text snippets. Requires `EXA_API_KEY` in your environment.
@@ -235,6 +247,8 @@ pnpm test          # Run tests with vitest
 pnpm test:rtk      # Fast RTK extension regression tests
 pnpm test:rtk:e2e  # Opt-in real RTK integration tests
 pnpm verify:rtk    # Standalone Pi CLI verification using --session and --extension
+pnpm test:hermes-prolong   # Model-free Hermes PRO-LONG tests
+pnpm verify:hermes-prolong # Installed-Hermes contracts, doctor, and benchmark
 ```
 
 Requires Node.js ≥ 22.

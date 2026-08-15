@@ -54,6 +54,9 @@ jobs:
       - name: Run unit tests
         run: pnpm test:unit
 
+      - name: Run Hermes PRO-LONG plugin unit tests
+        run: pnpm test:hermes-prolong
+
   swift-remote-control:
     name: Swift checks and iOS simulator build
     runs-on: macos-26
