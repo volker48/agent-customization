@@ -17,6 +17,7 @@ pi-extensions/         # Pi agent extensions (TypeScript)
   exa-search.ts        # Exa web search tool
   webfetch.ts          # Generic web fetch tool
   rtk.ts               # RTK bash rewrite hook
+  prolong.ts           # PRO-LONG active-branch programmatic memory
   fusion/              # Multi-model Fusion panel and judge command
 
 pi-subagents/          # Package-owned prompt overrides for selected pi-subagents roles
@@ -193,6 +194,50 @@ The installed `agent-customization` Pi package exposes these definitions through
 `pi.subagents.agents`; no user-scope symlinks are required. See
 [`pi-subagents/README.md`](pi-subagents/README.md) for provenance and update guidance.
 
+### Pi: PRO-LONG programmatic memory (`pi-extensions/prolong.ts`)
+
+Exposes the current Pi session's complete persisted active branch as private, ephemeral JSONL so
+the model can recover earlier evidence with ordinary `grep`, `read`, Python, Node, or `jq`
+after that evidence leaves active context. Pi's session tree remains canonical; the extension does
+not summarize entries, add embeddings, mutate provider-bound history, or replace native
+compaction.
+
+PRO-LONG is opt-in. Enable a new session with `--prolong` or `PI_PROLONG=1`, or use branch-local
+commands:
+
+```text
+/prolong on       Enable, persist state, and synchronize the projection
+/prolong off      Disable, persist state, and remove the derived directory
+/prolong status   Report path, entries, bytes, sync mode, and elapsed time
+/prolong refresh  Force an integrity-checked atomic rebuild
+```
+
+The projection lives at `$XDG_RUNTIME_DIR/pi-prolong/<session-id>/active-branch.jsonl`; when
+`XDG_RUNTIME_DIR` is unavailable, the extension uses an owner-private directory under the OS
+temporary directory. Directories are mode `0700`, the idle log is mode `0400`, normal forward
+progress appends only the new suffix, and divergence or detected mutation triggers an atomic
+rebuild. The directory is removed on disable and session shutdown.
+
+The log can duplicate any source code, terminal output, credentials, or other sensitive material
+already persisted in the Pi session. Enable it only when long-horizon recall justifies that
+short-lived duplicate. "Complete" is relative to Pi-persisted active-branch entries; it excludes
+provider-hidden reasoning and data Pi never stored.
+
+Run focused tests and the model-free ARM64-safe benchmark with:
+
+```bash
+pnpm test:prolong
+pnpm verify:prolong -- --benchmark-only
+```
+
+The full RPC proof requires an authenticated model and checks manual compaction, omission of the
+random nonce from the compaction summary, a recorded `bash` or `read` call against the exact log
+path, exact nonce recovery, and cleanup:
+
+```bash
+pnpm verify:prolong -- --model provider/model --keep-session
+```
+
 ### Pi: RTK (`pi-extensions/rtk.ts`)
 
 Intercepts `bash` tool calls and delegates command rewriting to `rtk rewrite <command>`. Only rewrites when RTK returns a different non-empty command. Supports `PI_RTK_BIN` or Pi's `--rtk-bin` flag for binary overrides.
@@ -232,6 +277,8 @@ pnpm typecheck     # TypeScript type checking
 pnpm lint          # Linting with oxlint
 pnpm format        # Format with oxfmt
 pnpm test          # Run tests with vitest
+pnpm test:prolong  # Focused PRO-LONG storage and extension tests
+pnpm verify:prolong -- --benchmark-only # Model-free active-branch benchmark
 pnpm test:rtk      # Fast RTK extension regression tests
 pnpm test:rtk:e2e  # Opt-in real RTK integration tests
 pnpm verify:rtk    # Standalone Pi CLI verification using --session and --extension

@@ -179,6 +179,20 @@ A Pi TUI color scheme (`obsec-dark`, `obsec-light`) in `pi-themes/`.
 A bounded, redacted, versioned context snapshot derived from one Pi session. It carries the session's objective, constraints, key decisions, relevant resources, observed changed paths, validation evidence, blockers, risks, and next action so a related session or workflow can continue without receiving the full transcript. A Context Capsule is portable context, not a session transcript or a claim that Pi caused every observed repository change. After the full term is introduced, **capsule** is the preferred shorthand.
 _Avoid_: memory (implies mutable long-term recall), session export (implies a transcript copy), handoff brief (only one use of a capsule), bundle (a file-content container that a capsule may reference or include)
 
+## Programmatic session memory
+
+**PRO-LONG extension**:
+The opt-in Pi extension that makes the complete Pi-persisted active branch available to the model as private, ephemeral JSONL for ordinary programmatic search. It reuses Pi's session tree, preserves native compaction, and injects only a short transient path hint.
+_Avoid_: memory database, transcript export, summarizer, retrieval service
+
+**Active-branch projection**:
+The derived root-to-current-leaf JSONL created by the PRO-LONG extension. It contains one unchanged Pi `SessionEntry` JSON object per line, appends only a new suffix during forward progress, and atomically rebuilds after divergence, rewind, resume, forced refresh, or detected mutation. It is disposable; Pi's persisted session tree is canonical.
+_Avoid_: canonical log, whole session file (which includes abandoned siblings), cache (does not convey the completeness contract)
+
+**Programmatic read**:
+Model use of ordinary read-only tools such as `grep`, `read`, Python, Node, or `jq` against the active-branch projection. It does not mean embeddings, semantic search, summaries, or model-authored note selection.
+_Avoid_: retrieval pipeline, vector search, memory write
+
 ## Remote control
 
 **Remote control**:
