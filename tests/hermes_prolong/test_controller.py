@@ -761,6 +761,43 @@ class ProlongControllerTests(unittest.TestCase):
             foreign_advertiser.close()
             self.assertFalse(advertised_path.parent.exists())
 
+    def test_descendant_avoids_fileless_advertised_ancestor_fallback(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+
+        class FailingResumedReader(RotatingReader):
+            def snapshot(self, session_id: str, *, previous=None):
+                if session_id == "root":
+                    raise OSError("resumed snapshot unavailable")
+                return super().snapshot(session_id, previous=previous)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            resumed_controller = module.ProlongController(
+                reader=FailingResumedReader(),
+                projection_root=root,
+            )
+            descendant_controller = module.ProlongController(
+                reader=RotatingReader(),
+                projection_root=root,
+            )
+
+            fallback_path = resumed_controller.projection_path("root")
+            self.assertFalse(fallback_path.is_file())
+            descendant_path = descendant_controller.projection_path("tip")
+
+            self.assertNotEqual(descendant_path, fallback_path)
+            self.assertFalse(fallback_path.is_file())
+            self.assertIn(
+                '"id":"tip"',
+                descendant_path.read_text(encoding="utf-8"),
+            )
+
+            descendant_controller.close()
+            self.assertFalse(descendant_path.parent.exists())
+            resumed_controller.close()
+            self.assertFalse(fallback_path.parent.exists())
+
     def test_failed_resumed_ancestor_uses_isolated_fallback_anchor(self) -> None:
         load_plugin_module()
         module = importlib.import_module("test_hermes_prolong_plugin.controller")

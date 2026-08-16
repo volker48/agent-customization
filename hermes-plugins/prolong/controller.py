@@ -252,9 +252,18 @@ class ProlongController:
         try:
             canonical_log.lstat()
         except FileNotFoundError:
-            return canonical_root
+            if not self._anchor_is_advertised(canonical_root, session_id):
+                return canonical_root
+            if session_id != canonical_root and not self._anchor_is_advertised(
+                session_id,
+                session_id,
+            ):
+                return session_id
+            return self._unused_resumed_anchor(session_id)
         if session_id != canonical_root:
-            return session_id
+            if not self._anchor_is_advertised(session_id, session_id):
+                return session_id
+            return self._unused_resumed_anchor(session_id)
         return self._unused_resumed_anchor(session_id)
 
     def projection_path(self, session_id: str) -> Path:
