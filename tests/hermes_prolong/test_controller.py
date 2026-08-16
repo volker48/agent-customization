@@ -798,6 +798,57 @@ class ProlongControllerTests(unittest.TestCase):
             resumed_controller.close()
             self.assertFalse(fallback_path.parent.exists())
 
+    def test_advertisement_is_published_before_root_transaction_release(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            controller = module.ProlongController(
+                reader=RotatingReader(),
+                projection_root=root,
+            )
+            real_mark = controller._mark_advertised
+            mark_entered = threading.Event()
+            allow_mark = threading.Event()
+            paths: dict[str, Path] = {}
+
+            def paused_mark(session_id: str, root_session_id: str) -> None:
+                if session_id == "root":
+                    mark_entered.set()
+                    self.assertTrue(allow_mark.wait(timeout=5))
+                real_mark(session_id, root_session_id)
+
+            controller._mark_advertised = paused_mark
+            ancestor_thread = threading.Thread(
+                target=lambda: paths.setdefault(
+                    "root", controller.projection_path("root")
+                )
+            )
+            descendant_thread = threading.Thread(
+                target=lambda: paths.setdefault(
+                    "tip", controller.projection_path("tip")
+                )
+            )
+
+            ancestor_thread.start()
+            self.assertTrue(mark_entered.wait(timeout=5))
+            descendant_thread.start()
+            descendant_thread.join(timeout=0.1)
+            descendant_was_blocked = descendant_thread.is_alive()
+
+            allow_mark.set()
+            ancestor_thread.join(timeout=5)
+            descendant_thread.join(timeout=5)
+            self.assertTrue(descendant_was_blocked)
+            self.assertFalse(ancestor_thread.is_alive())
+            self.assertFalse(descendant_thread.is_alive())
+            self.assertNotEqual(paths["root"], paths["tip"])
+            self.assertNotIn(
+                '"id":"tip"',
+                paths["root"].read_text(encoding="utf-8"),
+            )
+            controller.close()
+
     def test_failed_resumed_ancestor_uses_isolated_fallback_anchor(self) -> None:
         load_plugin_module()
         module = importlib.import_module("test_hermes_prolong_plugin.controller")
@@ -1676,10 +1727,16 @@ class ProlongControllerTests(unittest.TestCase):
             )
             original_synchronize = controller._synchronize_admitted
 
-            def pausing_synchronize(session_id: str, *, force_rebuild: bool = False):
+            def pausing_synchronize(
+                session_id: str,
+                *,
+                force_rebuild: bool = False,
+                advertise_path: bool = False,
+            ):
                 result = original_synchronize(
                     session_id,
                     force_rebuild=force_rebuild,
+                    advertise_path=advertise_path,
                 )
                 entered.set()
                 if not release.wait(timeout=2):
@@ -1725,10 +1782,16 @@ class ProlongControllerTests(unittest.TestCase):
             )
             original_synchronize = controller._synchronize_admitted
 
-            def pausing_synchronize(session_id: str, *, force_rebuild: bool = False):
+            def pausing_synchronize(
+                session_id: str,
+                *,
+                force_rebuild: bool = False,
+                advertise_path: bool = False,
+            ):
                 result = original_synchronize(
                     session_id,
                     force_rebuild=force_rebuild,
+                    advertise_path=advertise_path,
                 )
                 entered.set()
                 if not release.wait(timeout=2):

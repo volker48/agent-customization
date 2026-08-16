@@ -272,7 +272,7 @@ class ProlongController:
         try:
             with self._operation(safe_id):
                 try:
-                    self._synchronize_admitted(safe_id)
+                    self._synchronize_admitted(safe_id, advertise_path=True)
                     with self._lock:
                         root_session_id = self._session_roots[safe_id]
                 except Exception:
@@ -304,7 +304,7 @@ class ProlongController:
                             fallback_root = known_root
                         self._acquire_anchor_lease(fallback_root)
                         root_session_id = fallback_root
-                self._mark_advertised(safe_id, root_session_id)
+                        self._mark_advertised(safe_id, root_session_id)
                 return log_path_for(self._root(), root_session_id)
         except Exception:
             LOGGER.exception(
@@ -332,6 +332,7 @@ class ProlongController:
         safe_id: str,
         *,
         force_rebuild: bool = False,
+        advertise_path: bool = False,
     ) -> SyncResult:
         canonical_root, lineage = self._lineage_root(safe_id)
         with projection_root_transaction(self._root()):
@@ -361,6 +362,8 @@ class ProlongController:
                     self._snapshots[root_session_id] = snapshot
                     self._session_roots[safe_id] = root_session_id
                     self._last_errors.pop(safe_id, None)
+                if advertise_path:
+                    self._mark_advertised(safe_id, root_session_id)
                 return result
 
     def _resolve_cleanup_root(self, session_id: str) -> str:

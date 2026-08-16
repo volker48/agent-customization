@@ -36,10 +36,12 @@ resumed while a descendant still advertises that root anchor, the resumed ancest
 receives a deterministic synthetic anchor instead of replacing the descendant's
 projection. A compatible prefix is reused only when no other session—whether in this
 controller or another process—still advertises it; internal synchronization alone does
-not freeze a path. Lease probes also cover fileless fallback reservations, so a later
-lineage cannot claim an anchor merely because `trajectory.jsonl` has not been published.
-Failed synchronization retains the safely resolved anchor mapping, so fallback never
-selects an occupied raw session-ID path.
+not freeze a path. Advertisement state is published before the resolving root transaction
+is released, closing same-controller ancestor/descendant admission races. Lease probes
+also cover fileless fallback reservations, so a later lineage cannot claim an anchor
+merely because `trajectory.jsonl` has not been published. Failed synchronization retains
+the safely resolved anchor mapping, so fallback never selects an occupied raw session-ID
+path.
 
 The plugin synchronizes on session start, before model and tool calls, after the
 model call, and at the end of each turn. It uses the canonical database as the
