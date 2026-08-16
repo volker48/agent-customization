@@ -1,6 +1,6 @@
 export default {
   test: {
-    include: ["tests/**/*.test.ts"],
+    include: ["tests/**/*.test.ts", "tests/**/*.test.mjs"],
     exclude: [
       "tests/*.e2e.test.ts",
       "tests/*.baseline.test.ts",

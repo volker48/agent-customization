@@ -194,6 +194,8 @@ describe("PRO-LONG verification acceptance helpers", () => {
         await execFileAsync(
           process.execPath,
           [
+            "--import",
+            "tsx",
             verifierPath,
             "--pi-bin",
             join(directory, "missing-pi"),

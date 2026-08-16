@@ -1,10 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { constants, type BigIntStats } from "node:fs";
-import { chmod, lstat, mkdir, open, rename, rm, rmdir, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, rename, rm, rmdir, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 export type BranchEntry = {
   id: string;
+  parentId?: string | null;
+};
+
+export type ProlongBranchSource = {
+  getLeafEntry(): BranchEntry | undefined;
+  getEntry(id: string): BranchEntry | undefined;
+  getBranch(): readonly BranchEntry[];
 };
 
 export type ProlongSyncMode = "append" | "rebuild" | "noop";
@@ -30,11 +37,21 @@ type ObjectIdentity = {
   inode: bigint;
 };
 
+type SynchronizedState = {
+  entryCount: number;
+  leafId: string | null;
+  records?: string[];
+};
+
 export type ProlongMemoryOptions = {
   runtimeDirectory: string;
   sessionId: string;
   readSignature?: (path: string) => Promise<FileSignature | undefined>;
+  assertSupported?: () => Promise<void>;
 };
+
+const TEMPORARY_LOG_PATTERN =
+  /^\.active-branch-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/i;
 
 function assertSafeSessionId(sessionId: string): void {
   if (!/^[A-Za-z0-9._-]+$/.test(sessionId) || sessionId === "." || sessionId.includes("..")) {
@@ -74,11 +91,33 @@ function assertSignaturesEqual(expected: FileSignature, actual: FileSignature): 
   }
 }
 
+function ownedByCurrentUser(uid: number | bigint): boolean {
+  if (typeof process.getuid !== "function") return true;
+  return typeof uid === "bigint" ? uid === BigInt(process.getuid()) : uid === process.getuid();
+}
+
 async function readSignature(path: string): Promise<FileSignature | undefined> {
   try {
     const metadata = await lstat(path, { bigint: true });
     if (metadata.isSymbolicLink() || !metadata.isFile()) {
       throw new Error(`Refusing unsafe PRO-LONG log: ${path}`);
+    }
+    return signatureFromStat(metadata);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+async function readOwnedRegularFileSignature(path: string): Promise<FileSignature | undefined> {
+  try {
+    const metadata = await lstat(path, { bigint: true });
+    if (
+      metadata.isSymbolicLink() ||
+      !metadata.isFile() ||
+      !ownedByCurrentUser(metadata.uid)
+    ) {
+      throw new Error(`Refusing unsafe PRO-LONG temporary file: ${path}`);
     }
     return signatureFromStat(metadata);
   } catch (error) {
@@ -94,9 +133,7 @@ async function ensurePrivateDirectoryPath(path: string): Promise<void> {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
   const metadata = await lstat(path);
-  const ownedByCurrentUser =
-    typeof process.getuid !== "function" || metadata.uid === process.getuid();
-  if (metadata.isSymbolicLink() || !metadata.isDirectory() || !ownedByCurrentUser) {
+  if (metadata.isSymbolicLink() || !metadata.isDirectory() || !ownedByCurrentUser(metadata.uid)) {
     throw new Error(`Refusing unsafe PRO-LONG directory: ${path}`);
   }
   await chmod(path, 0o700);
@@ -105,9 +142,7 @@ async function ensurePrivateDirectoryPath(path: string): Promise<void> {
 async function readPrivateDirectoryIdentity(path: string): Promise<ObjectIdentity | undefined> {
   try {
     const metadata = await lstat(path, { bigint: true });
-    const ownedByCurrentUser =
-      typeof process.getuid !== "function" || metadata.uid === BigInt(process.getuid());
-    if (metadata.isSymbolicLink() || !metadata.isDirectory() || !ownedByCurrentUser) {
+    if (metadata.isSymbolicLink() || !metadata.isDirectory() || !ownedByCurrentUser(metadata.uid)) {
       throw new Error(`Refusing unsafe PRO-LONG directory: ${path}`);
     }
     return { device: metadata.dev, inode: metadata.ino };
@@ -122,6 +157,19 @@ function privateDirectoryOpenFlags(): number {
     throw new Error("Safe descriptor-relative PRO-LONG cleanup is unavailable on this platform");
   }
   return constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
+}
+
+async function defaultAssertSupported(): Promise<void> {
+  privateDirectoryOpenFlags();
+  try {
+    const metadata = await lstat("/proc/self/fd");
+    if (!metadata.isDirectory()) throw new Error("/proc/self/fd is not a directory");
+  } catch (error) {
+    throw new Error(
+      "PRO-LONG requires Linux procfs for safe cleanup; no projection was created",
+      { cause: error },
+    );
+  }
 }
 
 async function descriptorDirectoryPath(handle: Awaited<ReturnType<typeof open>>): Promise<string> {
@@ -142,11 +190,20 @@ async function validatePrivateDirectoryHandle(
   path: string,
 ): Promise<void> {
   const metadata = await handle.stat();
-  const ownedByCurrentUser =
-    typeof process.getuid !== "function" || metadata.uid === process.getuid();
-  if (!metadata.isDirectory() || !ownedByCurrentUser) {
+  if (!metadata.isDirectory() || !ownedByCurrentUser(metadata.uid)) {
     throw new Error(`Refusing unsafe PRO-LONG directory: ${path}`);
   }
+}
+
+async function validateOwnedRegularFileHandle(
+  handle: Awaited<ReturnType<typeof open>>,
+  path: string,
+): Promise<FileSignature> {
+  const metadata = await handle.stat({ bigint: true });
+  if (!metadata.isFile() || !ownedByCurrentUser(metadata.uid)) {
+    throw new Error(`Refusing unsafe PRO-LONG temporary file: ${path}`);
+  }
+  return signatureFromStat(metadata);
 }
 
 function isPrefix(previousRecords: readonly string[], nextRecords: readonly string[]): boolean {
@@ -154,6 +211,35 @@ function isPrefix(previousRecords: readonly string[], nextRecords: readonly stri
     previousRecords.length <= nextRecords.length &&
     previousRecords.every((record, index) => record === nextRecords[index])
   );
+}
+
+function collectSuffix(
+  source: ProlongBranchSource,
+  currentLeaf: BranchEntry | undefined,
+  previousLeafId: string | null,
+): BranchEntry[] | undefined {
+  if (!currentLeaf) return previousLeafId === null ? [] : undefined;
+  const reversed: BranchEntry[] = [];
+  const seen = new Set<string>();
+  let current: BranchEntry | undefined = currentLeaf;
+
+  while (current) {
+    if (previousLeafId !== null && current.id === previousLeafId) {
+      return reversed.reverse();
+    }
+    if (seen.has(current.id)) return undefined;
+    seen.add(current.id);
+    reversed.push(current);
+
+    const parentId = current.parentId;
+    if (parentId === null || parentId === undefined) {
+      return previousLeafId === null ? reversed.reverse() : undefined;
+    }
+    const parent = source.getEntry(parentId);
+    if (!parent || parent.id !== parentId) return undefined;
+    current = parent;
+  }
+  return undefined;
 }
 
 function elapsedMilliseconds(started: bigint): number {
@@ -176,11 +262,16 @@ export class ProlongMemory {
   readonly directoryPath: string;
   readonly logPath: string;
 
-  private synchronizedRecords: string[] = [];
+  private synchronizedRecords: string[] | undefined;
+  private synchronizedLeafId: string | null | undefined;
+  private synchronizedEntryCount = 0;
   private expectedSignature: FileSignature | undefined;
   private expectedRootIdentity: ObjectIdentity | undefined;
   private expectedDirectoryIdentity: ObjectIdentity | undefined;
+  private operationTail: Promise<void> = Promise.resolve();
+  private supportPromise: Promise<void> | undefined;
   private readonly readLogSignature: (path: string) => Promise<FileSignature | undefined>;
+  private readonly supportCheck: () => Promise<void>;
   private readonly sessionId: string;
 
   constructor(options: ProlongMemoryOptions) {
@@ -190,13 +281,51 @@ export class ProlongMemory {
     this.directoryPath = join(root, options.sessionId);
     this.logPath = join(this.directoryPath, "active-branch.jsonl");
     this.readLogSignature = options.readSignature ?? readSignature;
+    this.supportCheck = options.assertSupported ?? defaultAssertSupported;
   }
 
-  async sync(
+  async assertSupported(): Promise<void> {
+    this.supportPromise ??= this.supportCheck();
+    await this.supportPromise;
+  }
+
+  sync(
     entries: readonly BranchEntry[],
     options: { forceRebuild?: boolean } = {},
   ): Promise<ProlongSyncResult> {
+    return this.serializeOperation(() => this.syncArrayExclusive(entries, options));
+  }
+
+  syncBranch(
+    source: ProlongBranchSource,
+    options: { forceRebuild?: boolean } = {},
+  ): Promise<ProlongSyncResult> {
+    return this.serializeOperation(() => this.syncBranchExclusive(source, options));
+  }
+
+  cleanup(): Promise<void> {
+    return this.serializeOperation(() => this.cleanupExclusive());
+  }
+
+  cleanupStale(): Promise<void> {
+    return this.cleanup();
+  }
+
+  private serializeOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.operationTail.then(operation, operation);
+    this.operationTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  private async syncArrayExclusive(
+    entries: readonly BranchEntry[],
+    options: { forceRebuild?: boolean },
+  ): Promise<ProlongSyncResult> {
     const started = process.hrtime.bigint();
+    await this.assertSupported();
     await this.ensurePrivateDirectory();
     const actualSignature = await this.readLogSignature(this.logPath);
     const serializedEntries = entries.map((entry) => JSON.stringify(entry));
@@ -210,6 +339,7 @@ export class ProlongMemory {
     if (
       !options.forceRebuild &&
       integrityMatches &&
+      this.synchronizedRecords !== undefined &&
       isPrefix(this.synchronizedRecords, serializedEntries)
     ) {
       if (this.synchronizedRecords.length === entries.length) {
@@ -227,101 +357,266 @@ export class ProlongMemory {
       mode = "rebuild";
     }
 
+    return this.finalizeSync(
+      started,
+      mode,
+      trustedSignature,
+      {
+        entryCount: entries.length,
+        leafId: entries.at(-1)?.id ?? null,
+        records: serializedEntries,
+      },
+    );
+  }
+
+  private async syncBranchExclusive(
+    source: ProlongBranchSource,
+    options: { forceRebuild?: boolean },
+  ): Promise<ProlongSyncResult> {
+    const started = process.hrtime.bigint();
+    await this.assertSupported();
+    await this.ensurePrivateDirectory();
+    const actualSignature = await this.readLogSignature(this.logPath);
+    const integrityMatches =
+      this.expectedSignature !== undefined &&
+      actualSignature !== undefined &&
+      signaturesEqual(this.expectedSignature, actualSignature);
+
+    let mode: ProlongSyncMode;
+    let trustedSignature: FileSignature;
+    let nextState: SynchronizedState;
+    const currentLeaf = source.getLeafEntry();
+    const currentLeafId = currentLeaf?.id ?? null;
+
+    if (options.forceRebuild || !integrityMatches || this.synchronizedLeafId === undefined) {
+      const entries = source.getBranch();
+      trustedSignature = await this.rebuild(entries);
+      mode = "rebuild";
+      nextState = {
+        entryCount: entries.length,
+        leafId: entries.at(-1)?.id ?? null,
+      };
+    } else if (currentLeafId === this.synchronizedLeafId) {
+      trustedSignature = actualSignature;
+      mode = "noop";
+      nextState = {
+        entryCount: this.synchronizedEntryCount,
+        leafId: this.synchronizedLeafId,
+      };
+    } else {
+      const suffix = collectSuffix(source, currentLeaf, this.synchronizedLeafId);
+      if (suffix !== undefined && suffix.length > 0) {
+        trustedSignature = await this.append(suffix, actualSignature);
+        mode = "append";
+        nextState = {
+          entryCount: this.synchronizedEntryCount + suffix.length,
+          leafId: currentLeafId,
+        };
+      } else if (suffix !== undefined) {
+        trustedSignature = actualSignature;
+        mode = "noop";
+        nextState = {
+          entryCount: this.synchronizedEntryCount,
+          leafId: this.synchronizedLeafId,
+        };
+      } else {
+        const entries = source.getBranch();
+        trustedSignature = await this.rebuild(entries);
+        mode = "rebuild";
+        nextState = {
+          entryCount: entries.length,
+          leafId: entries.at(-1)?.id ?? null,
+        };
+      }
+    }
+
+    return this.finalizeSync(started, mode, trustedSignature, nextState);
+  }
+
+  private async finalizeSync(
+    started: bigint,
+    mode: ProlongSyncMode,
+    trustedSignature: FileSignature,
+    nextState: SynchronizedState,
+  ): Promise<ProlongSyncResult> {
     const directoryIdentities = await this.validatePrivateDirectory();
     const synchronizedSignature = await this.readLogSignature(this.logPath);
     if (!synchronizedSignature) throw new Error("PRO-LONG log disappeared after synchronization");
     assertSignaturesEqual(trustedSignature, synchronizedSignature);
-    this.synchronizedRecords = serializedEntries;
+
+    this.synchronizedRecords = nextState.records;
+    this.synchronizedLeafId = nextState.leafId;
+    this.synchronizedEntryCount = nextState.entryCount;
     this.expectedSignature = synchronizedSignature;
     this.expectedRootIdentity = directoryIdentities.root;
     this.expectedDirectoryIdentity = directoryIdentities.session;
 
     return {
       mode,
-      entryCount: entries.length,
-      byteSize: Number(this.expectedSignature.size),
+      entryCount: nextState.entryCount,
+      byteSize: Number(synchronizedSignature.size),
       elapsedMs: elapsedMilliseconds(started),
     };
   }
 
-  async cleanup(): Promise<void> {
+  private async cleanupExclusive(): Promise<void> {
     const root = dirname(this.directoryPath);
     const runtimeDirectory = dirname(root);
+    const sessionIdentity = await readPrivateDirectoryIdentity(this.directoryPath);
+    if (!sessionIdentity) {
+      this.resetSynchronizedState();
+      return;
+    }
+
     const runtimeIdentity = await readPrivateDirectoryIdentity(runtimeDirectory);
     const rootIdentity = await readPrivateDirectoryIdentity(root);
-    const sessionIdentity = await readPrivateDirectoryIdentity(this.directoryPath);
-    const hierarchyExists = runtimeIdentity && rootIdentity && sessionIdentity;
-    if (!hierarchyExists && (this.expectedRootIdentity || this.expectedDirectoryIdentity)) {
+    if (!runtimeIdentity || !rootIdentity) {
       throw new Error("PRO-LONG directory changed during cleanup");
     }
-    if (hierarchyExists) {
-      if (
-        !this.expectedRootIdentity ||
-        !this.expectedDirectoryIdentity ||
-        !objectIdentitiesEqual(this.expectedRootIdentity, rootIdentity) ||
-        !objectIdentitiesEqual(this.expectedDirectoryIdentity, sessionIdentity)
-      ) {
-        throw new Error("PRO-LONG directory changed during cleanup");
+    if (
+      (this.expectedRootIdentity &&
+        !objectIdentitiesEqual(this.expectedRootIdentity, rootIdentity)) ||
+      (this.expectedDirectoryIdentity &&
+        !objectIdentitiesEqual(this.expectedDirectoryIdentity, sessionIdentity))
+    ) {
+      throw new Error("PRO-LONG directory changed during cleanup");
+    }
+
+    await this.assertSupported();
+    const rootHandle = await open(root, privateDirectoryOpenFlags());
+    try {
+      await this.cleanupFromRootHandle(rootHandle, root, rootIdentity, sessionIdentity);
+    } finally {
+      await rootHandle.close();
+    }
+    this.resetSynchronizedState();
+  }
+
+  private async cleanupFromRootHandle(
+    rootHandle: Awaited<ReturnType<typeof open>>,
+    root: string,
+    rootIdentity: ObjectIdentity,
+    sessionIdentity: ObjectIdentity,
+  ): Promise<void> {
+    await validatePrivateDirectoryHandle(rootHandle, root);
+    const openedRoot = await rootHandle.stat({ bigint: true });
+    if (openedRoot.dev !== rootIdentity.device || openedRoot.ino !== rootIdentity.inode) {
+      throw new Error("PRO-LONG directory changed during cleanup");
+    }
+
+    const rootDescriptorPath = await descriptorDirectoryPath(rootHandle);
+    const anchoredSessionPath = join(rootDescriptorPath, this.sessionId);
+    const sessionHandle = await open(anchoredSessionPath, privateDirectoryOpenFlags());
+    try {
+      await this.cleanupFromSessionHandle(
+        sessionHandle,
+        anchoredSessionPath,
+        rootIdentity,
+        sessionIdentity,
+      );
+    } finally {
+      await sessionHandle.close();
+    }
+  }
+
+  private async cleanupFromSessionHandle(
+    sessionHandle: Awaited<ReturnType<typeof open>>,
+    anchoredSessionPath: string,
+    rootIdentity: ObjectIdentity,
+    sessionIdentity: ObjectIdentity,
+  ): Promise<void> {
+    await validatePrivateDirectoryHandle(sessionHandle, this.directoryPath);
+    const openedSession = await sessionHandle.stat({ bigint: true });
+    if (
+      openedSession.dev !== sessionIdentity.device ||
+      openedSession.ino !== sessionIdentity.inode
+    ) {
+      throw new Error("PRO-LONG directory changed during cleanup");
+    }
+
+    const sessionDescriptorPath = await descriptorDirectoryPath(sessionHandle);
+    await this.removeTrackedLog(
+      join(sessionDescriptorPath, "active-branch.jsonl"),
+      rootIdentity,
+      sessionIdentity,
+    );
+    await this.removeOrphanedTemporaryLogs(sessionDescriptorPath, rootIdentity, sessionIdentity);
+    await this.validatePrivateDirectoryIdentities(rootIdentity, sessionIdentity);
+
+    const currentDirectory = await lstat(anchoredSessionPath, { bigint: true });
+    if (openedSession.dev !== currentDirectory.dev || openedSession.ino !== currentDirectory.ino) {
+      throw new Error("PRO-LONG directory changed during cleanup");
+    }
+    await rmdir(anchoredSessionPath);
+  }
+
+  private async removeTrackedLog(
+    anchoredLogPath: string,
+    rootIdentity: ObjectIdentity,
+    sessionIdentity: ObjectIdentity,
+  ): Promise<void> {
+    const validatedSignature = await this.readLogSignature(anchoredLogPath);
+    if (!validatedSignature) return;
+    if (
+      this.expectedSignature &&
+      !objectIdentitiesEqual(this.expectedSignature, validatedSignature)
+    ) {
+      throw new Error("PRO-LONG log identity changed during cleanup");
+    }
+
+    const logHandle = await open(anchoredLogPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const openedSignature = signatureFromStat(await logHandle.stat({ bigint: true }));
+      if (!signaturesEqual(validatedSignature, openedSignature)) {
+        throw new Error("PRO-LONG log changed during cleanup");
       }
-      // Anchor every destructive operation to opened directories. A mutable pathname is used only
-      // to acquire the root handle; descendants are then addressed through that descriptor chain.
-      const rootHandle = await open(root, privateDirectoryOpenFlags());
-      let sessionHandle: Awaited<ReturnType<typeof open>> | undefined;
+      await this.validatePrivateDirectoryIdentities(rootIdentity, sessionIdentity);
+      await unlink(anchoredLogPath);
+    } finally {
+      await logHandle.close();
+    }
+  }
+
+  private async removeOrphanedTemporaryLogs(
+    sessionDescriptorPath: string,
+    rootIdentity: ObjectIdentity,
+    sessionIdentity: ObjectIdentity,
+  ): Promise<void> {
+    for (const name of await readdir(sessionDescriptorPath)) {
+      if (name === "active-branch.jsonl") {
+        throw new Error("PRO-LONG log changed during cleanup");
+      }
+      if (!TEMPORARY_LOG_PATTERN.test(name)) {
+        throw new Error(`Refusing unknown file in PRO-LONG directory: ${name}`);
+      }
+
+      const anchoredTemporaryPath = join(sessionDescriptorPath, name);
+      const validatedSignature = await readOwnedRegularFileSignature(anchoredTemporaryPath);
+      if (!validatedSignature) continue;
+      const handle = await open(
+        anchoredTemporaryPath,
+        constants.O_RDONLY | constants.O_NOFOLLOW,
+      );
       try {
-        await validatePrivateDirectoryHandle(rootHandle, root);
-        const openedRoot = await rootHandle.stat({ bigint: true });
-        if (openedRoot.dev !== rootIdentity.device || openedRoot.ino !== rootIdentity.inode) {
-          throw new Error("PRO-LONG directory changed during cleanup");
+        const openedSignature = await validateOwnedRegularFileHandle(
+          handle,
+          anchoredTemporaryPath,
+        );
+        if (!signaturesEqual(validatedSignature, openedSignature)) {
+          throw new Error("PRO-LONG temporary file changed during cleanup");
         }
-        const rootDescriptorPath = await descriptorDirectoryPath(rootHandle);
-        const anchoredSessionPath = join(rootDescriptorPath, this.sessionId);
-        sessionHandle = await open(anchoredSessionPath, privateDirectoryOpenFlags());
-        await validatePrivateDirectoryHandle(sessionHandle, this.directoryPath);
-        const openedSession = await sessionHandle.stat({ bigint: true });
-        if (
-          openedSession.dev !== sessionIdentity.device ||
-          openedSession.ino !== sessionIdentity.inode
-        ) {
-          throw new Error("PRO-LONG directory changed during cleanup");
-        }
-        const sessionDescriptorPath = await descriptorDirectoryPath(sessionHandle);
-        const anchoredLogPath = join(sessionDescriptorPath, "active-branch.jsonl");
-        const validatedSignature = await this.readLogSignature(anchoredLogPath);
-        if (validatedSignature) {
-          if (
-            !this.expectedSignature ||
-            !objectIdentitiesEqual(this.expectedSignature, validatedSignature)
-          ) {
-            throw new Error("PRO-LONG log identity changed during cleanup");
-          }
-          const logHandle = await open(anchoredLogPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-          try {
-            const openedSignature = signatureFromStat(await logHandle.stat({ bigint: true }));
-            if (!signaturesEqual(validatedSignature, openedSignature)) {
-              throw new Error("PRO-LONG log changed during cleanup");
-            }
-            await this.validatePrivateDirectory();
-            await unlink(anchoredLogPath);
-          } finally {
-            await logHandle.close();
-          }
-        }
-        await this.validatePrivateDirectory();
-        const openedDirectory = await sessionHandle.stat({ bigint: true });
-        const currentDirectory = await lstat(anchoredSessionPath, { bigint: true });
-        if (
-          openedDirectory.dev !== currentDirectory.dev ||
-          openedDirectory.ino !== currentDirectory.ino
-        ) {
-          throw new Error("PRO-LONG directory changed during cleanup");
-        }
-        await rmdir(anchoredSessionPath);
+        await this.validatePrivateDirectoryIdentities(rootIdentity, sessionIdentity);
+        await unlink(anchoredTemporaryPath);
       } finally {
-        await sessionHandle?.close();
-        await rootHandle.close();
+        await handle.close();
       }
     }
-    this.synchronizedRecords = [];
+  }
+
+  private resetSynchronizedState(): void {
+    this.synchronizedRecords = undefined;
+    this.synchronizedLeafId = undefined;
+    this.synchronizedEntryCount = 0;
     this.expectedSignature = undefined;
     this.expectedRootIdentity = undefined;
     this.expectedDirectoryIdentity = undefined;
@@ -350,12 +645,23 @@ export class ProlongMemory {
     return { root: rootIdentity, session: sessionIdentity };
   }
 
+  private async validatePrivateDirectoryIdentities(
+    expectedRoot: ObjectIdentity,
+    expectedSession: ObjectIdentity,
+  ): Promise<void> {
+    const current = await this.validatePrivateDirectory();
+    if (
+      !objectIdentitiesEqual(expectedRoot, current.root) ||
+      !objectIdentitiesEqual(expectedSession, current.session)
+    ) {
+      throw new Error("PRO-LONG directory changed during cleanup");
+    }
+  }
+
   private async append(
     entries: readonly BranchEntry[],
     validatedSignature: FileSignature,
   ): Promise<FileSignature> {
-    // The idle log is 0400, so first anchor and validate it read-only. After making that inode
-    // writable, open the append descriptor and verify both handles still identify the same file.
     const validationHandle = await open(this.logPath, constants.O_RDONLY | constants.O_NOFOLLOW);
     let appendHandle: Awaited<ReturnType<typeof open>> | undefined;
     let writable = false;
