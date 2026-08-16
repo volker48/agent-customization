@@ -142,6 +142,45 @@ class ProjectionStoreTests(unittest.TestCase):
                 changed,
             )
 
+    def test_rebuild_fsyncs_the_containing_directory_after_atomic_replace(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = (
+                Path(directory)
+                / "runtime"
+                / "prolong"
+                / "session-1"
+                / "trajectory.jsonl"
+            )
+            store = module.ProjectionStore(log_path)
+            records = ({"record_type": "message", "message": {"id": 1}},)
+            events: list[str] = []
+            real_fsync = module.os.fsync
+            real_replace = module.os.replace
+
+            def tracked_fsync(descriptor: int) -> None:
+                if stat.S_ISDIR(module.os.fstat(descriptor).st_mode):
+                    events.append("directory-fsync")
+                real_fsync(descriptor)
+
+            def tracked_replace(source: Path, destination: Path) -> None:
+                events.append("replace")
+                real_replace(source, destination)
+
+            with (
+                unittest.mock.patch.object(
+                    module.os, "fsync", side_effect=tracked_fsync
+                ),
+                unittest.mock.patch.object(
+                    module.os, "replace", side_effect=tracked_replace
+                ),
+            ):
+                store.sync(records)
+
+            self.assertEqual(events, ["replace", "directory-fsync"])
+
     def test_refuses_a_symlinked_projection_root(self) -> None:
         module_path = PLUGIN_DIR / "projection.py"
         self.assertTrue(
@@ -190,6 +229,106 @@ class ProjectionStoreTests(unittest.TestCase):
             self.assertEqual(regenerated.mode, "rebuild")
             self.assertTrue(log_path.is_file())
 
+    def test_cleanup_can_run_under_an_existing_projection_root_transaction(
+        self,
+    ) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "runtime" / "prolong"
+            log_path = root / "session-1" / "trajectory.jsonl"
+            store = module.ProjectionStore(log_path)
+            store.sync(({"record_type": "message", "message": {"id": 1}},))
+
+            with module.projection_root_transaction(root):
+                with unittest.mock.patch.object(
+                    store,
+                    "_acquire_process_lock",
+                    side_effect=AssertionError(
+                        "cleanup reacquired the root process lock"
+                    ),
+                ):
+                    store.cleanup(_process_lock_held=True)
+
+            self.assertFalse(log_path.parent.exists())
+
+    def test_cleanup_removes_only_leftover_private_trajectory_temporary_files(
+        self,
+    ) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = (
+                Path(directory)
+                / "runtime"
+                / "prolong"
+                / "session-1"
+                / "trajectory.jsonl"
+            )
+            store = module.ProjectionStore(log_path)
+            store.sync(({"record_type": "message", "message": {"id": 1}},))
+            writable_temporary = log_path.parent / ".trajectory-writable.tmp"
+            readonly_temporary = log_path.parent / ".trajectory-readonly.tmp"
+            writable_temporary.write_bytes(b"partial")
+            writable_temporary.chmod(0o600)
+            readonly_temporary.write_bytes(b"complete")
+            readonly_temporary.chmod(0o400)
+
+            store.cleanup()
+
+            self.assertFalse(log_path.parent.exists())
+
+    def test_cleanup_refuses_arbitrary_non_trajectory_artifacts(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = (
+                Path(directory)
+                / "runtime"
+                / "prolong"
+                / "session-1"
+                / "trajectory.jsonl"
+            )
+            store = module.ProjectionStore(log_path)
+            store.sync(({"record_type": "message", "message": {"id": 1}},))
+            unrelated = log_path.parent / "unrelated-private-file"
+            unrelated.write_bytes(b"must not be removed")
+            unrelated.chmod(0o600)
+
+            with self.assertRaisesRegex(RuntimeError, "unexpected PRO-LONG cleanup"):
+                store.cleanup()
+
+            self.assertTrue(unrelated.exists())
+            self.assertTrue(log_path.parent.exists())
+
+    def test_cleanup_refuses_unsafe_artifacts_with_temporary_names(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = (
+                Path(directory)
+                / "runtime"
+                / "prolong"
+                / "session-1"
+                / "trajectory.jsonl"
+            )
+            store = module.ProjectionStore(log_path)
+            store.sync(({"record_type": "message", "message": {"id": 1}},))
+            outside = Path(directory) / "outside"
+            outside.write_bytes(b"must not be removed")
+            unsafe_temporary = log_path.parent / ".trajectory-symlink.tmp"
+            unsafe_temporary.symlink_to(outside)
+
+            with self.assertRaisesRegex(RuntimeError, "unsafe PRO-LONG cleanup"):
+                store.cleanup()
+
+            self.assertTrue(unsafe_temporary.is_symlink())
+            self.assertEqual(outside.read_bytes(), b"must not be removed")
+
     def test_external_modification_forces_rebuild_and_changed_cleanup_fails_closed(
         self,
     ) -> None:
@@ -233,6 +372,43 @@ class ProjectionStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "changed PRO-LONG log"):
                 store.cleanup()
             self.assertTrue(log_path.exists())
+
+    def test_sync_atomically_recovers_a_private_log_left_in_writable_mode(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = (
+                Path(directory)
+                / "runtime"
+                / "prolong"
+                / "session-1"
+                / "trajectory.jsonl"
+            )
+            store = module.ProjectionStore(log_path)
+            records = (
+                {
+                    "record_type": "message",
+                    "message": {"id": 1, "content": "canonical"},
+                },
+            )
+            store.sync(records)
+            previous_inode = log_path.stat().st_ino
+            log_path.chmod(0o600)
+            log_path.write_text('{"record_type":"interrupted"}\n', encoding="utf-8")
+
+            recovered = store.sync(records)
+
+            self.assertEqual(recovered.mode, "rebuild")
+            self.assertNotEqual(log_path.stat().st_ino, previous_inode)
+            self.assertEqual(stat.S_IMODE(log_path.stat().st_mode), 0o400)
+            self.assertEqual(
+                [
+                    json.loads(line)
+                    for line in log_path.read_text(encoding="utf-8").splitlines()
+                ],
+                list(records),
+            )
 
     def test_reuses_an_immutable_snapshot_without_reserializing_all_records(
         self,
@@ -337,20 +513,37 @@ class ProjectionStoreTests(unittest.TestCase):
             )
             store = module.ProjectionStore(log_path)
             original_write = module.os.write
+            original_mkstemp = module.tempfile.mkstemp
+            projection_descriptors: set[int] = set()
+            partial_write_calls = 0
+
+            def tracked_mkstemp(*args, **kwargs):
+                descriptor, temporary_name = original_mkstemp(*args, **kwargs)
+                projection_descriptors.add(descriptor)
+                return descriptor, temporary_name
 
             def partial_write(descriptor, payload):
-                return original_write(descriptor, payload[:7])
+                nonlocal partial_write_calls
+                if descriptor in projection_descriptors:
+                    partial_write_calls += 1
+                    payload = payload[:7]
+                return original_write(descriptor, payload)
 
-            module.os.write = partial_write
-            try:
+            with (
+                unittest.mock.patch.object(
+                    module.tempfile, "mkstemp", side_effect=tracked_mkstemp
+                ),
+                unittest.mock.patch.object(
+                    module.os, "write", side_effect=partial_write
+                ),
+            ):
                 store.sync(records)
-            finally:
-                module.os.write = original_write
 
             actual = [
                 json.loads(line)
                 for line in log_path.read_text(encoding="utf-8").splitlines()
             ]
+            self.assertGreater(partial_write_calls, 1)
             self.assertEqual(actual, list(records))
 
     def test_append_restores_read_only_mode_when_fchmod_is_interrupted(self) -> None:

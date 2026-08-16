@@ -34,10 +34,11 @@ anchor and each divergent lineage receives a distinct stable anchor. One branch 
 therefore never overwrite or disclose another branch's projection.
 
 The plugin synchronizes on session start, before model and tool calls, after the
-model call, at the end of each turn, and at reset/finalization boundaries. It uses
-the canonical database as the source of truth rather than hook payloads.
-Finalization waits for in-flight projection work, removes the derived lineage, and
-retires that session ID from further publication until an explicit session-start hook.
+model call, and at the end of each turn. It uses the canonical database as the
+source of truth rather than hook payloads. Reset/finalization are terminal cleanup
+boundaries: finalization waits for in-flight projection work, removes the derived
+lineage, and retires that session ID from further publication until an explicit
+session-start hook.
 
 ## Install
 

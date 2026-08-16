@@ -6,7 +6,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Mapping
 
-from .controller import ProlongController, get_runtime_home, log_path_for
+from .controller import ProlongController, log_path_for
 
 
 PROMPT_SECTION_ID = "prolong.programmatic-memory"
@@ -27,9 +27,14 @@ def trajectory_path(
     hermes_home: Path | None = None,
     projection_root: Path | None = None,
 ) -> Path:
+    """Return the unhashed tip-session fallback under an explicit plugin namespace.
+
+    This helper validates ``session_id`` but cannot discover Hermes's possibly hashed
+    ``ctx.state.data_dir``. Registered prompt builders use
+    ``ProlongController.projection_path`` instead.
+    """
     if projection_root is None:
-        home = Path(hermes_home) if hermes_home is not None else get_runtime_home()
-        projection_root = home / "plugin-data" / "prolong" / "sessions"
+        raise ValueError("projection_root is required without a registered controller")
     return log_path_for(Path(projection_root), session_id)
 
 
@@ -41,6 +46,12 @@ def build_prompt(
     controller: ProlongController | None = None,
 ) -> str:
     session_id = str(session_info.get("session_id") or "")
+    if not session_id:
+        return (
+            "PRO-LONG programmatic memory is unavailable for this turn because "
+            "Hermes did not provide a session ID. Do not assume earlier compressed "
+            "evidence is recoverable until a later turn supplies one."
+        )
     if controller is not None:
         path = controller.projection_path(session_id)
     else:

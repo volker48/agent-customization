@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import importlib
 import json
 import os
@@ -64,12 +65,21 @@ def _validate_regular_file(
         raise RuntimeError(f"Refusing unsafe PRO-LONG log: {label}")
 
 
-def _read_signature(path: Path) -> FileSignature | None:
+def _read_signature(
+    path: Path,
+    *,
+    allow_private_writable: bool = False,
+) -> FileSignature | None:
     try:
         metadata = path.lstat()
     except FileNotFoundError:
         return None
-    _validate_regular_file(metadata, expected_mode=0o400, label=str(path))
+    expected_mode = (
+        0o600
+        if allow_private_writable and stat.S_IMODE(metadata.st_mode) == 0o600
+        else 0o400
+    )
+    _validate_regular_file(metadata, expected_mode=expected_mode, label=str(path))
     return _signature(metadata)
 
 
@@ -190,7 +200,10 @@ class ProjectionStore:
         force_rebuild: bool,
         started: int,
     ) -> SyncResult:
-        actual_signature = _read_signature(self.log_path)
+        actual_signature = _read_signature(
+            self.log_path,
+            allow_private_writable=True,
+        )
         if (
             not force_rebuild
             and isinstance(records, tuple)
@@ -260,33 +273,68 @@ class ProjectionStore:
                 fcntl_module.flock(lock_descriptor, fcntl_module.LOCK_UN)
                 os.close(lock_descriptor)
 
-    def cleanup(self) -> None:
+    def cleanup(self, *, _process_lock_held: bool = False) -> None:
         """Delete this derived projection without touching the shared root."""
-        with self._lock:
-            self._ensure_private_directories()
-            lock_descriptor, fcntl_module = self._acquire_process_lock()
+        if _process_lock_held:
+            with self._lock:
+                self._ensure_private_directories()
+                self._cleanup_locked()
+            return
+        with self.transaction():
+            self._cleanup_locked()
+
+    def _cleanup_locked(self) -> None:
+        actual_signature = _read_signature(self.log_path)
+        if actual_signature is not None:
+            if (
+                self._expected_signature is None
+                or actual_signature != self._expected_signature
+            ):
+                raise RuntimeError(
+                    f"Refusing to remove changed PRO-LONG log: {self.log_path}"
+                )
+            self.log_path.unlink()
+        try:
+            _ensure_private_directory(self.directory_path)
+            self.directory_path.rmdir()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            if error.errno != errno.ENOTEMPTY:
+                raise
+            self._remove_private_temporary_files()
+            self.directory_path.rmdir()
+        self._records = ()
+        self._source_records = None
+        self._expected_signature = None
+
+    def _remove_private_temporary_files(self) -> None:
+        temporary_paths: list[Path] = []
+        for path in self.directory_path.iterdir():
+            middle = path.name.removeprefix(".trajectory-").removesuffix(".tmp")
+            if (
+                not path.name.startswith(".trajectory-")
+                or not path.name.endswith(".tmp")
+                or not middle
+            ):
+                raise RuntimeError(
+                    f"Refusing unexpected PRO-LONG cleanup artifact: {path}"
+                )
+            metadata = path.lstat()
+            mode = stat.S_IMODE(metadata.st_mode)
+            if mode not in {0o400, 0o600}:
+                raise RuntimeError(f"Refusing unsafe PRO-LONG cleanup artifact: {path}")
+            _validate_regular_file(
+                metadata,
+                expected_mode=mode,
+                label=str(path),
+            )
+            temporary_paths.append(path)
+        for path in temporary_paths:
             try:
-                actual_signature = _read_signature(self.log_path)
-                if actual_signature is not None:
-                    if (
-                        self._expected_signature is None
-                        or actual_signature != self._expected_signature
-                    ):
-                        raise RuntimeError(
-                            f"Refusing to remove changed PRO-LONG log: {self.log_path}"
-                        )
-                    self.log_path.unlink()
-                try:
-                    _ensure_private_directory(self.directory_path)
-                    self.directory_path.rmdir()
-                except FileNotFoundError:
-                    pass
-                self._records = ()
-                self._source_records = None
-                self._expected_signature = None
-            finally:
-                fcntl_module.flock(lock_descriptor, fcntl_module.LOCK_UN)
-                os.close(lock_descriptor)
+                path.unlink()
+            except FileNotFoundError:
+                pass
 
     def _ensure_private_directories(self) -> None:
         for path in reversed(self.directory_path.parents[:3]):
@@ -388,6 +436,14 @@ class ProjectionStore:
             os.fsync(descriptor)
             os.fchmod(descriptor, 0o400)
             os.replace(temporary_path, self.log_path)
+            directory_descriptor = os.open(
+                self.directory_path,
+                _open_flags(os.O_RDONLY, getattr(os, "O_DIRECTORY", 0)),
+            )
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
             return _signature(os.fstat(descriptor))
         finally:
             os.close(descriptor)

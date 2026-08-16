@@ -300,13 +300,21 @@ class HermesSessionReader:
                 raise LookupError(f"Hermes session segment not found: {segment_id}")
             marker = _segment_record(session, lineage_index)
             if marker != prior_state.marker:
-                return self._full_snapshot(database, lineage)
+                return self._full_snapshot(
+                    database,
+                    lineage,
+                    source_version=previous.source_version,
+                )
 
             last_id = prior_state.last_message_id
             if last_id is None:
                 messages = database.get_messages(segment_id, include_inactive=True)
                 if messages:
-                    return self._full_snapshot(database, lineage)
+                    return self._full_snapshot(
+                        database,
+                        lineage,
+                        source_version=previous.source_version,
+                    )
                 continue
 
             tail_and_suffix = database.get_messages(
@@ -315,10 +323,18 @@ class HermesSessionReader:
                 after_id=max(0, last_id - 1),
             )
             if not tail_and_suffix or tail_and_suffix[0].get("id") != last_id:
-                return self._full_snapshot(database, lineage)
+                return self._full_snapshot(
+                    database,
+                    lineage,
+                    source_version=previous.source_version,
+                )
             current_tail = dict(tail_and_suffix[0])
             if current_tail != prior_state.last_message:
-                return self._full_snapshot(database, lineage)
+                return self._full_snapshot(
+                    database,
+                    lineage,
+                    source_version=previous.source_version,
+                )
 
             suffix = [
                 dict(message)
@@ -328,7 +344,11 @@ class HermesSessionReader:
             if not suffix:
                 continue
             if lineage_index != len(lineage) - 1:
-                return self._full_snapshot(database, lineage)
+                return self._full_snapshot(
+                    database,
+                    lineage,
+                    source_version=previous.source_version,
+                )
 
             for message in suffix:
                 records.append(

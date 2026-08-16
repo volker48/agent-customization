@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import unittest
+from typing import Any
 
 from tests.hermes_prolong.test_plugin_registration import PLUGIN_DIR, load_plugin_module
 
@@ -9,7 +10,7 @@ from tests.hermes_prolong.test_plugin_registration import PLUGIN_DIR, load_plugi
 class FakeSessionDB:
     def __init__(self) -> None:
         self.closed = False
-        self.sessions = {
+        self.sessions: dict[str, dict[str, Any]] = {
             "root": {
                 "id": "root",
                 "parent_session_id": None,
@@ -32,7 +33,7 @@ class FakeSessionDB:
                 "rewind_count": 1,
             },
         }
-        self.messages = {
+        self.messages: dict[str, list[dict[str, Any]]] = {
             "root": [
                 {
                     "id": 10,
@@ -118,7 +119,41 @@ class IncrementalFakeSessionDB(FakeSessionDB):
         return messages
 
 
+class FakeDataVersionConnection:
+    def __init__(self, version: int) -> None:
+        self.version = version
+        self.in_transaction = False
+
+    def execute(self, statement: str):
+        if statement == "BEGIN":
+            self.in_transaction = True
+        return self
+
+    def fetchone(self) -> tuple[int]:
+        return (self.version,)
+
+    def rollback(self) -> None:
+        self.in_transaction = False
+
+
 class HermesSessionReaderTests(unittest.TestCase):
+    def test_matching_data_version_returns_the_previous_snapshot_unchanged(
+        self,
+    ) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.session_reader")
+        database = IncrementalFakeSessionDB()
+        setattr(database, "_conn", FakeDataVersionConnection(19))
+        reader = module.HermesSessionReader(db_factory=lambda: database)
+
+        first = reader.snapshot("tip")
+        calls_after_first = len(database.calls)
+        second = reader.snapshot("tip", previous=first)
+
+        self.assertIs(second, first)
+        self.assertEqual(first.source_version, 19)
+        self.assertEqual(len(database.calls), calls_after_first)
+
     def test_projects_only_the_complete_active_compression_lineage(self) -> None:
         module_path = PLUGIN_DIR / "session_reader.py"
         self.assertTrue(
@@ -219,6 +254,93 @@ class HermesSessionReaderTests(unittest.TestCase):
         self.assertEqual(extended.records[: len(first.records)], first.records)
         self.assertEqual(extended.records[-1]["message"]["content"], "new suffix")
         self.assertEqual(database.calls[-1]["after_id"], 20)
+
+    def test_every_incremental_full_fallback_preserves_source_version(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.session_reader")
+        source_version = 73
+
+        def reader_and_previous(
+            database: IncrementalFakeSessionDB,
+            lineage: tuple[str, ...] = ("tip",),
+        ) -> tuple[Any, Any]:
+            reader = module.HermesSessionReader(db_factory=lambda: database)
+            previous = reader._full_snapshot(
+                database,
+                lineage,
+                source_version=source_version,
+            )
+            return reader, previous
+
+        cases: list[
+            tuple[str, Any, IncrementalFakeSessionDB, tuple[str, ...], Any]
+        ] = []
+
+        database = IncrementalFakeSessionDB()
+        reader, previous = reader_and_previous(database)
+        database.sessions["tip"]["rewind_count"] += 1
+        cases.append(("segment marker changed", reader, database, ("tip",), previous))
+
+        database = IncrementalFakeSessionDB()
+        database.messages["tip"] = []
+        reader, previous = reader_and_previous(database)
+        database.messages["tip"].append(
+            {
+                "id": 22,
+                "session_id": "tip",
+                "role": "user",
+                "content": "first message",
+                "active": 1,
+                "compacted": 0,
+            }
+        )
+        cases.append(
+            ("previously empty segment grew", reader, database, ("tip",), previous)
+        )
+
+        database = IncrementalFakeSessionDB()
+        reader, previous = reader_and_previous(database)
+        database.messages["tip"][0]["id"] = 22
+        cases.append(("prior tail disappeared", reader, database, ("tip",), previous))
+
+        database = IncrementalFakeSessionDB()
+        reader, previous = reader_and_previous(database)
+        database.messages["tip"][0]["content"] = "edited in place"
+        cases.append(("prior tail changed", reader, database, ("tip",), previous))
+
+        database = IncrementalFakeSessionDB()
+        database.sessions["root"] = {
+            **database.sessions["tip"],
+            "id": "root",
+            "parent_session_id": None,
+        }
+        database.messages["root"] = [
+            {
+                **database.messages["tip"][0],
+                "id": 10,
+                "session_id": "root",
+            }
+        ]
+        lineage = ("root", "tip")
+        reader, previous = reader_and_previous(database, lineage)
+        database.messages["root"].append(
+            {
+                "id": 11,
+                "session_id": "root",
+                "role": "assistant",
+                "content": "late ancestor suffix",
+                "active": 1,
+                "compacted": 0,
+            }
+        )
+        cases.append(("ancestor segment grew", reader, database, lineage, previous))
+
+        for label, reader, database, case_lineage, previous in cases:
+            with self.subTest(label):
+                refreshed = reader._incremental_snapshot(
+                    database, case_lineage, previous
+                )
+                self.assertEqual(refreshed.source_version, source_version)
 
 
 if __name__ == "__main__":

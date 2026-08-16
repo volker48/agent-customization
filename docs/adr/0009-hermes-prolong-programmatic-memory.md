@@ -21,8 +21,9 @@ to the summary that replaced them.
 
 Add a standalone, repository-local Hermes plugin under
 `hermes-plugins/prolong/`. It materializes a private JSONL projection from the
-canonical Hermes `state.db` rather than modifying the model context, system prompt,
-or tool schemas during a conversation.
+canonical Hermes `state.db` without modifying Hermes core, persisted conversation
+roles, or tool schemas. It registers one cache-safe system-prompt section that names
+the projection and may inject a stale-projection warning after synchronization failure.
 
 The plugin:
 
@@ -38,9 +39,9 @@ The plugin:
 5. Treats lifecycle hooks only as idempotent reconciliation signals. The primary
    normal checkpoint is `on_session_end`, which Hermes fires after final SQLite
    persistence on normal turns.
-6. Also reconciles on session start, before model/tool calls, after model calls,
-   and at reset/finalization boundaries so resume, early-return, and crash recovery
-   converge on the next reachable hook.
+6. Also reconciles on session start, before model/tool calls, and after model calls
+   so resume, early-return, and crash recovery converge on the next reachable hook.
+   Reset/finalization are terminal cleanup boundaries rather than extra sync passes.
 7. Uses SQLite `data_version` as a conservative invalidator. Every canonical commit
    causes a complete lineage reread, after which an exact serialized suffix may
    append; mutation, compaction, rewind, divergence, restart, or integrity changes

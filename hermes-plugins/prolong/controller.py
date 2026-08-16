@@ -54,11 +54,12 @@ class ProlongController:
         self._snapshots: dict[str, Any] = {}
         self._session_roots: dict[str, str] = {}
         self._session_locks: dict[str, threading.RLock] = {}
-        self._last_error: str | None = None
+        self._last_errors: dict[str, str] = {}
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._active_operations = 0
         self._retired_sessions: set[str] = set()
+        self._startup_sweep_started = False
         self._maintenance = False
         self._closing = False
         self._closed = False
@@ -177,13 +178,26 @@ class ProlongController:
         """Synchronize and resolve the stable path rendered into the system prompt."""
         safe_id = validate_session_id(session_id)
         try:
-            self.synchronize(safe_id)
-            with self._lock:
-                root_session_id = self._session_roots[safe_id]
-            return log_path_for(self._root(), root_session_id)
+            with self._operation(safe_id):
+                try:
+                    self._synchronize_admitted(safe_id)
+                    with self._lock:
+                        root_session_id = self._session_roots[safe_id]
+                except Exception:
+                    LOGGER.exception(
+                        "PRO-LONG could not synchronize projection path for %s; "
+                        "using its stable fallback path",
+                        safe_id,
+                    )
+                    with self._lock:
+                        root_session_id = self._session_roots.setdefault(
+                            safe_id, safe_id
+                        )
+                return log_path_for(self._root(), root_session_id)
         except Exception:
             LOGGER.exception(
-                "PRO-LONG could not synchronize projection path for %s; using tip path",
+                "PRO-LONG controller rejected projection path admission for %s; "
+                "using an unregistered tip path",
                 safe_id,
             )
             return log_path_for(self._root(), safe_id)
@@ -196,34 +210,43 @@ class ProlongController:
     ) -> SyncResult:
         safe_id = validate_session_id(session_id)
         with self._operation(safe_id):
-            canonical_root, lineage = self._lineage_root(safe_id)
-            with projection_root_transaction(self._root()):
-                root_session_id = self._projection_root_for(
-                    safe_id,
-                    canonical_root,
-                    lineage,
+            return self._synchronize_admitted(
+                safe_id,
+                force_rebuild=force_rebuild,
+            )
+
+    def _synchronize_admitted(
+        self,
+        safe_id: str,
+        *,
+        force_rebuild: bool = False,
+    ) -> SyncResult:
+        canonical_root, lineage = self._lineage_root(safe_id)
+        with projection_root_transaction(self._root()):
+            root_session_id = self._projection_root_for(
+                safe_id,
+                canonical_root,
+                lineage,
+            )
+            lock = self._session_lock(root_session_id)
+            with lock:
+                store = self._store_for(root_session_id)
+                with self._lock:
+                    previous = self._snapshots.get(root_session_id)
+                snapshot = self._reader.snapshot(safe_id, previous=previous)
+                if not snapshot.lineage:
+                    raise RuntimeError("PRO-LONG snapshot had no compression lineage")
+                validate_session_id(snapshot.lineage[0])
+                result = store.sync(
+                    snapshot.records,
+                    force_rebuild=force_rebuild,
+                    _process_lock_held=True,
                 )
-                lock = self._session_lock(root_session_id)
-                with lock:
-                    store = self._store_for(root_session_id)
-                    with self._lock:
-                        previous = self._snapshots.get(root_session_id)
-                    snapshot = self._reader.snapshot(safe_id, previous=previous)
-                    if not snapshot.lineage:
-                        raise RuntimeError(
-                            "PRO-LONG snapshot had no compression lineage"
-                        )
-                    validate_session_id(snapshot.lineage[0])
-                    result = store.sync(
-                        snapshot.records,
-                        force_rebuild=force_rebuild,
-                        _process_lock_held=True,
-                    )
-                    with self._lock:
-                        self._snapshots[root_session_id] = snapshot
-                        self._session_roots[safe_id] = root_session_id
-                        self._last_error = None
-                    return result
+                with self._lock:
+                    self._snapshots[root_session_id] = snapshot
+                    self._session_roots[safe_id] = root_session_id
+                    self._last_errors.pop(safe_id, None)
+                return result
 
     def _resolve_cleanup_root(self, session_id: str) -> str:
         with self._lock:
@@ -248,34 +271,43 @@ class ProlongController:
             while self._active_operations:
                 self._condition.wait()
         try:
-            root_session_id = self._resolve_cleanup_root(safe_id)
-            with self._lock:
-                retiring_ids.add(root_session_id)
-                retiring_ids.update(
-                    segment_id
-                    for segment_id, projection_root in self._session_roots.items()
-                    if projection_root == root_session_id
-                )
-            lock = self._session_lock(root_session_id)
-            with lock:
+            with projection_root_transaction(self._root()):
+                root_session_id = self._resolve_cleanup_root(safe_id)
                 with self._lock:
-                    store = self._stores.get(root_session_id)
-                if store is None:
-                    log_path = log_path_for(self._root(), root_session_id)
-                    if log_path.exists():
-                        store = self._store_for(root_session_id)
-                        store.sync((), force_rebuild=True)
-                if store is not None:
-                    store.cleanup()
-                with self._lock:
-                    self._stores.pop(root_session_id, None)
-                    self._snapshots.pop(root_session_id, None)
-                    self._session_locks.pop(root_session_id, None)
-                    self._session_roots = {
-                        segment_id: projection_root
+                    retiring_ids.add(root_session_id)
+                    retiring_ids.update(
+                        segment_id
                         for segment_id, projection_root in self._session_roots.items()
-                        if projection_root != root_session_id
-                    }
+                        if projection_root == root_session_id
+                    )
+                lock = self._session_lock(root_session_id)
+                with lock:
+                    with self._lock:
+                        store = self._stores.get(root_session_id)
+                    if store is None:
+                        log_path = log_path_for(self._root(), root_session_id)
+                        try:
+                            log_path.parent.lstat()
+                        except FileNotFoundError:
+                            pass
+                        else:
+                            store = self._store_for(root_session_id)
+                            store.sync(
+                                (),
+                                force_rebuild=True,
+                                _process_lock_held=True,
+                            )
+                    if store is not None:
+                        store.cleanup(_process_lock_held=True)
+                    with self._lock:
+                        self._stores.pop(root_session_id, None)
+                        self._snapshots.pop(root_session_id, None)
+                        self._session_locks.pop(root_session_id, None)
+                        self._session_roots = {
+                            segment_id: projection_root
+                            for segment_id, projection_root in self._session_roots.items()
+                            if projection_root != root_session_id
+                        }
         finally:
             with self._condition:
                 self._retired_sessions.update(retiring_ids)
@@ -310,54 +342,62 @@ class ProlongController:
         with self._operation():
             root = self._root()
             try:
-                root_metadata = root.lstat()
+                root.lstat()
             except FileNotFoundError:
                 return 0
-            if (
-                not stat.S_ISDIR(root_metadata.st_mode)
-                or root_metadata.st_uid != os.getuid()
-            ):
-                raise RuntimeError(f"unsafe PRO-LONG projection root: {root}")
-            for directory in tuple(root.iterdir()):
-                try:
-                    metadata = directory.lstat()
-                    root_session_id = validate_session_id(directory.name)
-                except (OSError, ValueError):
-                    continue
+            with projection_root_transaction(root):
+                root_metadata = root.lstat()
                 if (
-                    not stat.S_ISDIR(metadata.st_mode)
-                    or metadata.st_uid != os.getuid()
-                    or stat.S_IMODE(metadata.st_mode) != 0o700
+                    not stat.S_ISDIR(root_metadata.st_mode)
+                    or root_metadata.st_uid != os.getuid()
                 ):
-                    continue
-                log_path = directory / "trajectory.jsonl"
-                try:
-                    segments = self._projection_segments(log_path)
-                    orphaned = bool(segments) and not any(
-                        self._reader.session_exists(segment_id)
-                        for segment_id in segments
-                    )
-                    if not orphaned:
+                    raise RuntimeError(f"unsafe PRO-LONG projection root: {root}")
+                for directory in tuple(root.iterdir()):
+                    try:
+                        metadata = directory.lstat()
+                        root_session_id = validate_session_id(directory.name)
+                    except (OSError, ValueError):
                         continue
-                    lock = self._session_lock(root_session_id)
-                    with lock:
-                        store = self._store_for(root_session_id)
-                        store.sync((), force_rebuild=True)
-                        store.cleanup()
-                        with self._lock:
-                            self._stores.pop(root_session_id, None)
-                            self._snapshots.pop(root_session_id, None)
-                            self._session_locks.pop(root_session_id, None)
-                            self._session_roots = {
-                                segment_id: projection_root
-                                for segment_id, projection_root in self._session_roots.items()
-                                if projection_root != root_session_id
-                            }
-                    removed += 1
-                except FileNotFoundError:
-                    continue
-                except Exception:
-                    LOGGER.exception("PRO-LONG orphan sweep failed for %s", directory)
+                    if (
+                        not stat.S_ISDIR(metadata.st_mode)
+                        or metadata.st_uid != os.getuid()
+                        or stat.S_IMODE(metadata.st_mode) != 0o700
+                    ):
+                        continue
+                    log_path = directory / "trajectory.jsonl"
+                    try:
+                        segments = self._projection_segments(log_path)
+                        orphaned = bool(segments) and not any(
+                            self._reader.session_exists(segment_id)
+                            for segment_id in segments
+                        )
+                        if not orphaned:
+                            continue
+                        lock = self._session_lock(root_session_id)
+                        with lock:
+                            store = self._store_for(root_session_id)
+                            store.sync(
+                                (),
+                                force_rebuild=True,
+                                _process_lock_held=True,
+                            )
+                            store.cleanup(_process_lock_held=True)
+                            with self._lock:
+                                self._stores.pop(root_session_id, None)
+                                self._snapshots.pop(root_session_id, None)
+                                self._session_locks.pop(root_session_id, None)
+                                self._session_roots = {
+                                    segment_id: projection_root
+                                    for segment_id, projection_root in self._session_roots.items()
+                                    if projection_root != root_session_id
+                                }
+                        removed += 1
+                    except FileNotFoundError:
+                        continue
+                    except Exception:
+                        LOGGER.exception(
+                            "PRO-LONG orphan sweep failed for %s", directory
+                        )
         return removed
 
     def _safe_synchronize(self, hook_name: str, session_id: str) -> None:
@@ -365,7 +405,7 @@ class ProlongController:
             self.synchronize(session_id)
         except Exception as exc:
             with self._lock:
-                self._last_error = f"{hook_name}: {exc}"
+                self._last_errors[session_id] = f"{hook_name}: {exc}"
             LOGGER.exception(
                 "PRO-LONG %s synchronization failed for %s", hook_name, session_id
             )
@@ -382,17 +422,20 @@ class ProlongController:
             while self._maintenance and not self._closing and not self._closed:
                 self._condition.wait()
             self._retired_sessions.discard(safe_id)
-        try:
-            self.sweep_orphans()
-        except Exception:
-            LOGGER.exception("PRO-LONG startup orphan sweep failed")
+            run_startup_sweep = not self._startup_sweep_started
+            self._startup_sweep_started = True
+        if run_startup_sweep:
+            try:
+                self.sweep_orphans()
+            except Exception:
+                LOGGER.exception("PRO-LONG startup orphan sweep failed")
         self._safe_synchronize("on_session_start", safe_id)
         return None
 
     def pre_llm_call(self, *, session_id: str, **_: Any) -> dict[str, str] | None:
         self._safe_synchronize("pre_llm_call", session_id)
         with self._lock:
-            error = self._last_error
+            error = self._last_errors.get(session_id)
         if error is None:
             return None
         return {
@@ -440,6 +483,7 @@ class ProlongController:
             self._snapshots.clear()
             self._session_roots.clear()
             self._session_locks.clear()
+            self._last_errors.clear()
             self._retired_sessions.clear()
             self._closed = True
 

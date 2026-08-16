@@ -12,6 +12,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_SOURCE = REPO_ROOT / "hermes-plugins" / "prolong"
 HERMES_SOURCE = os.environ.get("HERMES_SOURCE")
+_MISSING = object()
+_HERMES_STATE_DEFAULTS = {
+    "_state_db": None,
+    "_state_db_path": None,
+    "_state_db_failed": False,
+}
 
 
 def projection_path_from_prompt(manager, session_id: str) -> Path:
@@ -32,15 +38,46 @@ def projection_path_from_prompt(manager, session_id: str) -> Path:
 
 @unittest.skipUnless(HERMES_SOURCE, "set HERMES_SOURCE to run installed-runtime tests")
 class InstalledHermesRuntimeContractTests(unittest.TestCase):
-    def test_plugin_manager_loads_hooks_and_projects_real_session_lineage(self) -> None:
+    def setUp(self) -> None:
+        self._original_sys_path = list(sys.path)
+        self._original_hermes_home = os.environ.get("HERMES_HOME", _MISSING)
         sys.path.insert(0, str(HERMES_SOURCE))
-        plugins_module = importlib.import_module("hermes_cli.plugins")
-        state_module = importlib.import_module("hermes_state")
-        plugin_manager = plugins_module.PluginManager
-        session_database = state_module.SessionDB
+        try:
+            self.plugins_module = importlib.import_module("hermes_cli.plugins")
+            self.state_module = importlib.import_module("hermes_state")
+        except Exception:
+            sys.path[:] = self._original_sys_path
+            raise
+        self._original_state_globals = {
+            name: getattr(self.state_module, name, _MISSING)
+            for name in _HERMES_STATE_DEFAULTS
+        }
+        for name, value in _HERMES_STATE_DEFAULTS.items():
+            setattr(self.state_module, name, value)
+        self.addCleanup(self._restore_runtime_globals)
+
+    def _use_runtime_home(self, home: Path) -> None:
+        os.environ["HERMES_HOME"] = str(home)
+
+    def _restore_runtime_globals(self) -> None:
+        for name, value in self._original_state_globals.items():
+            if value is _MISSING:
+                delattr(self.state_module, name)
+            else:
+                setattr(self.state_module, name, value)
+        if self._original_hermes_home is _MISSING:
+            os.environ.pop("HERMES_HOME", None)
+        else:
+            os.environ["HERMES_HOME"] = str(self._original_hermes_home)
+        sys.path[:] = self._original_sys_path
+
+    def test_plugin_manager_loads_hooks_and_projects_real_session_lineage(self) -> None:
+        plugin_manager = self.plugins_module.PluginManager
+        session_database = self.state_module.SessionDB
 
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
+            self._use_runtime_home(home)
             plugins_dir = home / "plugins"
             plugins_dir.mkdir(mode=0o700)
             (plugins_dir / "prolong").symlink_to(
@@ -51,6 +88,7 @@ class InstalledHermesRuntimeContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             database = session_database(db_path=home / "state.db")
+            self.addCleanup(database.close)
             root_id = "runtime-root"
             tip_id = "runtime-tip"
             database.create_session(root_id, "cli")
@@ -64,6 +102,7 @@ class InstalledHermesRuntimeContractTests(unittest.TestCase):
             database.append_message(tip_id, "assistant", "continuation")
 
             manager = plugin_manager(scope_key=str(home))
+            self.addCleanup(manager.unload)
             manager.discover_and_load()
             self.assertIn("prolong", manager._plugins)
             self.assertEqual(len(manager.iter_hook_callbacks("pre_llm_call")), 1)
@@ -75,7 +114,7 @@ class InstalledHermesRuntimeContractTests(unittest.TestCase):
             results = manager.invoke_hook(
                 "pre_llm_call",
                 session_id=tip_id,
-                message="query",
+                user_message="query",
                 conversation_history=[],
             )
             self.assertEqual(results, [])
@@ -95,12 +134,9 @@ class InstalledHermesRuntimeContractTests(unittest.TestCase):
             database.close()
 
     def test_reconciliation_rebuilds_after_real_in_place_compaction(self) -> None:
-        sys.path.insert(0, str(HERMES_SOURCE))
-        plugins_module = importlib.import_module("hermes_cli.plugins")
-        state_module = importlib.import_module("hermes_state")
-
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
+            self._use_runtime_home(home)
             plugins_dir = home / "plugins"
             plugins_dir.mkdir(mode=0o700)
             (plugins_dir / "prolong").symlink_to(
@@ -110,19 +146,21 @@ class InstalledHermesRuntimeContractTests(unittest.TestCase):
                 "plugins:\n  enabled:\n    - prolong\n",
                 encoding="utf-8",
             )
-            database = state_module.SessionDB(db_path=home / "state.db")
+            database = self.state_module.SessionDB(db_path=home / "state.db")
+            self.addCleanup(database.close)
             session_id = "runtime-in-place"
             database.create_session(session_id, "cli")
             database.append_message(session_id, "user", "full fidelity nonce")
             database.append_message(session_id, "assistant", "pre-compression answer")
 
-            manager = plugins_module.PluginManager(scope_key=str(home))
+            manager = self.plugins_module.PluginManager(scope_key=str(home))
+            self.addCleanup(manager.unload)
             manager.discover_and_load()
             log_path = projection_path_from_prompt(manager, session_id)
             manager.invoke_hook(
                 "pre_llm_call",
                 session_id=session_id,
-                message="before compression",
+                user_message="before compression",
                 conversation_history=[],
             )
             database.archive_and_compact(
@@ -139,7 +177,7 @@ class InstalledHermesRuntimeContractTests(unittest.TestCase):
             manager.invoke_hook(
                 "pre_llm_call",
                 session_id=session_id,
-                message="after compression",
+                user_message="after compression",
                 conversation_history=[],
             )
             projected = [
@@ -163,16 +201,9 @@ class InstalledHermesRuntimeContractTests(unittest.TestCase):
             database.close()
 
     def test_reconciliation_detects_a_real_non_tail_row_mutation(self) -> None:
-        sys.path.insert(0, str(HERMES_SOURCE))
-        try:
-            plugins_module = importlib.import_module("hermes_cli.plugins")
-            state_module = importlib.import_module("hermes_state")
-        finally:
-            if sys.path[0] == HERMES_SOURCE:
-                sys.path.pop(0)
-
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
+            self._use_runtime_home(home)
             plugin_dir = home / "plugins" / "prolong"
             plugin_dir.parent.mkdir(parents=True)
             plugin_dir.symlink_to(PLUGIN_SOURCE, target_is_directory=True)
@@ -180,11 +211,8 @@ class InstalledHermesRuntimeContractTests(unittest.TestCase):
                 "plugins:\n  enabled:\n    - prolong\n",
                 encoding="utf-8",
             )
-            setattr(state_module, "_state_db", None)
-            setattr(state_module, "_state_db_path", None)
-            setattr(state_module, "_state_db_failed", False)
-            os.environ["HERMES_HOME"] = str(home)
-            database = state_module.SessionDB(db_path=home / "state.db")
+            database = self.state_module.SessionDB(db_path=home / "state.db")
+            self.addCleanup(database.close)
             session_id = "runtime-row-mutation"
             database.create_session(session_id, source="cli")
             database.append_message(session_id, "user", "first")
@@ -192,14 +220,15 @@ class InstalledHermesRuntimeContractTests(unittest.TestCase):
             database.append_message(session_id, "user", "tail")
             first_id = database.get_messages(session_id)[0]["id"]
 
-            manager = plugins_module.PluginManager(scope_key=str(home))
+            manager = self.plugins_module.PluginManager(scope_key=str(home))
+            self.addCleanup(manager.unload)
             manager.discover_and_load()
             log_path = projection_path_from_prompt(manager, session_id)
             manager.invoke_hook(
                 "pre_llm_call",
                 session_id=session_id,
-                messages=[],
-                tools=[],
+                user_message="before row mutation",
+                conversation_history=[],
             )
             before = [
                 json.loads(line)
@@ -217,8 +246,8 @@ class InstalledHermesRuntimeContractTests(unittest.TestCase):
             manager.invoke_hook(
                 "pre_llm_call",
                 session_id=session_id,
-                messages=[],
-                tools=[],
+                user_message="after row mutation",
+                conversation_history=[],
             )
 
             after = [

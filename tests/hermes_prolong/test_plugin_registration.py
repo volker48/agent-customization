@@ -64,13 +64,46 @@ class PluginRegistrationTests(unittest.TestCase):
         self.assertLessEqual(section["max_chars"], 4000)
         self.assertTrue(callable(section["content"]))
         with tempfile.TemporaryDirectory() as home:
+            projection_root = Path(home) / "plugin-data" / "hashed-prolong" / "sessions"
             rendered = module.build_prompt(
                 {"session_id": "session-safe_1"},
-                hermes_home=Path(home),
+                projection_root=projection_root,
             )
         self.assertIn("PRO-LONG programmatic memory", rendered)
         self.assertIn("session-safe_1", rendered)
         self.assertIn("trajectory.jsonl", rendered)
+
+    def test_unregistered_path_resolution_requires_the_plugin_namespace(self) -> None:
+        module = load_plugin_module()
+
+        with self.assertRaisesRegex(ValueError, "projection_root"):
+            module.trajectory_path("session-safe_1")
+
+    def test_prompt_uses_the_registered_controller_path(self) -> None:
+        module = load_plugin_module()
+        expected = Path(
+            "/profile/plugin-data/hashed-prolong/sessions/root/trajectory.jsonl"
+        )
+        controller = SimpleNamespace(projection_path=lambda session_id: expected)
+
+        rendered = module.build_prompt(
+            {"session_id": "tip"},
+            controller=controller,
+        )
+
+        self.assertIn(str(expected), rendered)
+
+    def test_prompt_fails_open_when_session_id_is_missing(self) -> None:
+        module = load_plugin_module()
+
+        class UnexpectedController:
+            def projection_path(self, session_id: str) -> Path:
+                raise AssertionError("missing session ID must not reach the controller")
+
+        rendered = module.build_prompt({}, controller=UnexpectedController())
+
+        self.assertIn("unavailable", rendered.casefold())
+        self.assertNotIn("trajectory.jsonl", rendered)
 
     def test_registers_forward_compatible_synchronization_hooks(self) -> None:
         module = load_plugin_module()

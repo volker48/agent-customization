@@ -29,11 +29,18 @@ if TYPE_CHECKING:
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_PATH = REPO_ROOT / "hermes-plugins" / "prolong"
 DEFAULT_HERMES_SOURCE = Path.home() / ".hermes" / "hermes-agent"
+SEED_LINE_WIDTH = 100
+SEED_LEADING_LINE_COUNT = 43
+SEED_TRAILING_LINE_COUNT = 22
 
 
 def build_seed_source(nonce: str) -> str:
     """Keep the nonce outside Hermes's summary head/tail without long lines."""
-    lines = (["A" * 100] * 43) + [f"MARKER={nonce}"] + (["B" * 100] * 22)
+    lines = (
+        (["A" * SEED_LINE_WIDTH] * SEED_LEADING_LINE_COUNT)
+        + [f"MARKER={nonce}"]
+        + (["B" * SEED_LINE_WIDTH] * SEED_TRAILING_LINE_COUNT)
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -112,6 +119,22 @@ def run_checked(
         text=True,
         capture_output=True,
     )
+
+
+def source_revision(hermes_source: Path, env: dict[str, str]) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(hermes_source), "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            env=env,
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+    except OSError:
+        return "unknown"
+    revision = result.stdout.strip()
+    return revision if result.returncode == 0 and revision else "unknown"
 
 
 def write_secure_json(path: Path, value: Mapping[str, Any]) -> None:
@@ -237,6 +260,51 @@ def drain(child: pexpect.spawn, output: deque[str]) -> None:
             return
 
 
+def start_compression_capture(
+    child: pexpect.spawn,
+    output: deque[str],
+) -> None:
+    output.clear()
+    child.sendline("/compress")
+
+
+def spawn_hermes(
+    hermes: Path,
+    repo_root: Path,
+    env: dict[str, str],
+    evidence: dict[str, Any],
+) -> pexpect.spawn:
+    try:
+        return pexpect.spawn(
+            str(hermes),
+            [
+                "chat",
+                "--cli",
+                "--provider",
+                "openai-codex",
+                "--model",
+                "gpt-5.6-sol",
+                "--reasoning",
+                "none",
+                "--toolsets",
+                "file",
+                "--ignore-rules",
+                "--in",
+                str(repo_root),
+            ],
+            env=env,
+            encoding="utf-8",
+            codec_errors="replace",
+            timeout=120,
+            dimensions=(40, 120),
+        )
+    except Exception as exc:
+        evidence["status"] = "failed"
+        evidence["error_type"] = type(exc).__name__
+        evidence["error"] = str(exc)
+        raise
+
+
 def wait_for(
     child: pexpect.spawn,
     output: deque[str],
@@ -290,10 +358,13 @@ def wait_for_assistant(
 
 
 def locate_projection(home: Path, session_id: str) -> Path | None:
-    candidates = list(
+    candidates = sorted(
         (home / "plugin-data").glob(f"*/sessions/{session_id}/trajectory.jsonl")
     )
-    return candidates[0] if len(candidates) == 1 else None
+    if len(candidates) > 1:
+        rendered = ", ".join(str(candidate) for candidate in candidates)
+        raise RuntimeError(f"Ambiguous trajectory projection: {rendered}")
+    return candidates[0] if candidates else None
 
 
 def read_projection(path: Path) -> list[dict[str, Any]]:
@@ -547,10 +618,7 @@ def main() -> int:
     listing_data = json.loads(listing.stdout)
     plugin_entry = require_plugin_entry(listing_data)
     hermes_version = run_checked([str(hermes), "--version"], env).stdout.strip()
-    hermes_revision = run_checked(
-        ["git", "-C", str(hermes_source), "rev-parse", "HEAD"],
-        env,
-    ).stdout.strip()
+    hermes_revision = source_revision(hermes_source, env)
 
     nonce = "PLG_NONCE_" + secrets.token_hex(24)
     seed_source = root / "nonce-source.txt"
@@ -577,29 +645,7 @@ def main() -> int:
         raise AssertionError("Recovery prompt leaked the nonce")
 
     output: deque[str] = deque(maxlen=64)
-    child = pexpect.spawn(
-        str(hermes),
-        [
-            "chat",
-            "--cli",
-            "--provider",
-            "openai-codex",
-            "--model",
-            "gpt-5.6-sol",
-            "--reasoning",
-            "none",
-            "--toolsets",
-            "file",
-            "--ignore-rules",
-            "--in",
-            str(REPO_ROOT),
-        ],
-        env=env,
-        encoding="utf-8",
-        codec_errors="replace",
-        timeout=120,
-        dimensions=(40, 120),
-    )
+    child = spawn_hermes(hermes, REPO_ROOT, env, evidence)
 
     evidence.update(
         {
@@ -716,8 +762,7 @@ def main() -> int:
         projection_for_cleanup = projection
         verify_permissions(projection)
 
-        before_compress_output = "".join(output)
-        child.sendline("/compress")
+        start_compression_capture(child, output)
 
         def compression_committed() -> list[dict[str, Any]] | None:
             rows = message_rows(database_path, session_id)
@@ -745,7 +790,7 @@ def main() -> int:
         )
         time.sleep(2)
         drain(child, output)
-        compression_output = "".join(output).replace(before_compress_output, "", 1)
+        compression_output = "".join(output)
         feedback_casefold = compression_output.casefold()
         forbidden_feedback = (
             "compression failed",

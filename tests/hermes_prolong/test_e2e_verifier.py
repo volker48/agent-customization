@@ -5,9 +5,12 @@ from __future__ import annotations
 import builtins
 import importlib.util
 import json
+import os
 import sys
+import tempfile
 import unittest
 import unittest.mock
+from collections import deque
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -59,11 +62,89 @@ class E2EVerifierTests(unittest.TestCase):
         marker_start = rendered_tool_result.index(nonce)
         marker_end = marker_start + len(nonce)
 
-        self.assertGreater(len(lines), 50)
-        self.assertLessEqual(max(map(len, lines)), 120)
-        self.assertGreater(len(rendered_tool_result), 6_000)
+        self.assertEqual(
+            len(lines),
+            module.SEED_LEADING_LINE_COUNT + 1 + module.SEED_TRAILING_LINE_COUNT,
+        )
+        self.assertEqual(
+            lines[: module.SEED_LEADING_LINE_COUNT],
+            ["A" * module.SEED_LINE_WIDTH] * module.SEED_LEADING_LINE_COUNT,
+        )
+        self.assertEqual(
+            lines[-module.SEED_TRAILING_LINE_COUNT :],
+            ["B" * module.SEED_LINE_WIDTH] * module.SEED_TRAILING_LINE_COUNT,
+        )
+        expected_marker_start = sum(
+            len(f"{line_number}|{'A' * module.SEED_LINE_WIDTH}\n")
+            for line_number in range(1, module.SEED_LEADING_LINE_COUNT + 1)
+        ) + len(f"{module.SEED_LEADING_LINE_COUNT + 1}|MARKER=")
+        expected_trailing_width = sum(
+            len(f"{line_number}|{'B' * module.SEED_LINE_WIDTH}") + 1
+            for line_number in range(
+                module.SEED_LEADING_LINE_COUNT + 2,
+                len(lines) + 1,
+            )
+        )
+        self.assertEqual(marker_start, expected_marker_start)
+        self.assertEqual(
+            len(rendered_tool_result) - marker_end,
+            expected_trailing_width,
+        )
+
+        # Hermes's bounded tool rendering retains roughly a 4k head and 1.5k
+        # tail. Keep the nonce outside both windows so PTY clipping cannot make
+        # a leaked marker look like successful PRO-LONG recovery.
         self.assertGreater(marker_start, 4_000)
         self.assertGreater(len(rendered_tool_result) - marker_end, 1_500)
+
+    def test_compression_capture_discards_prior_bounded_child_output(self) -> None:
+        module = load_verifier()
+        output = deque(["seed output", "filler output"], maxlen=64)
+
+        class RecordingChild:
+            command: str | None = None
+
+            def sendline(self, command: str) -> None:
+                self.command = command
+                self.output_when_sent = list(output)
+                output.append("compression output")
+
+        child = RecordingChild()
+
+        module.start_compression_capture(child, output)
+
+        self.assertEqual(child.command, "/compress")
+        self.assertEqual(child.output_when_sent, [])
+        self.assertEqual("".join(output), "compression output")
+
+    def test_source_revision_is_unknown_for_non_git_hermes_source(self) -> None:
+        module = load_verifier()
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(
+                module.source_revision(Path(directory), os.environ.copy()),
+                "unknown",
+            )
+
+    def test_locate_projection_raises_when_multiple_plugins_match(self) -> None:
+        module = load_verifier()
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            for plugin_name in ("first", "second"):
+                projection = (
+                    home
+                    / "plugin-data"
+                    / plugin_name
+                    / "sessions"
+                    / "session-1"
+                    / "trajectory.jsonl"
+                )
+                projection.parent.mkdir(parents=True)
+                projection.write_text("{}\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                RuntimeError, "Ambiguous trajectory projection"
+            ):
+                module.locate_projection(home, "session-1")
 
     def test_projected_seed_selection_uses_canonical_message_identity(self) -> None:
         module = load_verifier()
@@ -259,7 +340,6 @@ class E2EVerifierTests(unittest.TestCase):
 
     def test_credential_copy_keeps_only_openai_codex_records(self) -> None:
         module = load_verifier()
-        import tempfile
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -293,6 +373,58 @@ class E2EVerifierTests(unittest.TestCase):
             self.assertEqual(set(copied["credential_pool"]), {"openai-codex"})
             self.assertEqual(set(copied["providers"]), {"openai-codex"})
             self.assertNotIn("unrelated", json.dumps(copied))
+
+    def test_credential_copy_rejects_auth_without_openai_codex(self) -> None:
+        module = load_verifier()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            destination = root / "destination"
+            source.mkdir(mode=0o700)
+            destination.mkdir(mode=0o700)
+            credential_path = source / "auth.json"
+            credential_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "active_provider": "openrouter",
+                        "credential_pool": {
+                            "openrouter": [{"access_token": "unrelated"}]
+                        },
+                        "providers": {"openrouter": {"access_token": "unrelated"}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            credential_path.chmod(0o600)
+
+            with self.assertRaisesRegex(RuntimeError, "No OpenAI Codex credentials"):
+                module.copy_credentials(source, destination)
+
+            self.assertFalse((destination / "auth.json").exists())
+
+    def test_spawn_failure_records_the_concrete_exception(self) -> None:
+        module = load_verifier()
+        evidence: dict[str, object] = {"status": "initializing"}
+
+        class FailingPexpect:
+            @staticmethod
+            def spawn(*args, **kwargs):
+                raise OSError("pty unavailable")
+
+        setattr(module, "pexpect", FailingPexpect)
+        with self.assertRaisesRegex(OSError, "pty unavailable"):
+            module.spawn_hermes(
+                Path("/hermes"),
+                Path("/repo"),
+                {},
+                evidence,
+            )
+
+        self.assertEqual(evidence["status"], "failed")
+        self.assertEqual(evidence["error_type"], "OSError")
+        self.assertEqual(evidence["error"], "pty unavailable")
 
 
 if __name__ == "__main__":
