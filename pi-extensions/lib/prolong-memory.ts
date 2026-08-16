@@ -112,11 +112,7 @@ async function readSignature(path: string): Promise<FileSignature | undefined> {
 async function readOwnedRegularFileSignature(path: string): Promise<FileSignature | undefined> {
   try {
     const metadata = await lstat(path, { bigint: true });
-    if (
-      metadata.isSymbolicLink() ||
-      !metadata.isFile() ||
-      !ownedByCurrentUser(metadata.uid)
-    ) {
+    if (metadata.isSymbolicLink() || !metadata.isFile() || !ownedByCurrentUser(metadata.uid)) {
       throw new Error(`Refusing unsafe PRO-LONG temporary file: ${path}`);
     }
     return signatureFromStat(metadata);
@@ -165,10 +161,9 @@ async function defaultAssertSupported(): Promise<void> {
     const metadata = await lstat("/proc/self/fd");
     if (!metadata.isDirectory()) throw new Error("/proc/self/fd is not a directory");
   } catch (error) {
-    throw new Error(
-      "PRO-LONG requires Linux procfs for safe cleanup; no projection was created",
-      { cause: error },
-    );
+    throw new Error("PRO-LONG requires Linux procfs for safe cleanup; no projection was created", {
+      cause: error,
+    });
   }
 }
 
@@ -357,16 +352,11 @@ export class ProlongMemory {
       mode = "rebuild";
     }
 
-    return this.finalizeSync(
-      started,
-      mode,
-      trustedSignature,
-      {
-        entryCount: entries.length,
-        leafId: entries.at(-1)?.id ?? null,
-        records: serializedEntries,
-      },
-    );
+    return this.finalizeSync(started, mode, trustedSignature, {
+      entryCount: entries.length,
+      leafId: entries.at(-1)?.id ?? null,
+      records: serializedEntries,
+    });
   }
 
   private async syncBranchExclusive(
@@ -593,15 +583,9 @@ export class ProlongMemory {
       const anchoredTemporaryPath = join(sessionDescriptorPath, name);
       const validatedSignature = await readOwnedRegularFileSignature(anchoredTemporaryPath);
       if (!validatedSignature) continue;
-      const handle = await open(
-        anchoredTemporaryPath,
-        constants.O_RDONLY | constants.O_NOFOLLOW,
-      );
+      const handle = await open(anchoredTemporaryPath, constants.O_RDONLY | constants.O_NOFOLLOW);
       try {
-        const openedSignature = await validateOwnedRegularFileHandle(
-          handle,
-          anchoredTemporaryPath,
-        );
+        const openedSignature = await validateOwnedRegularFileHandle(handle, anchoredTemporaryPath);
         if (!signaturesEqual(validatedSignature, openedSignature)) {
           throw new Error("PRO-LONG temporary file changed during cleanup");
         }

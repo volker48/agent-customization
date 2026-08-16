@@ -253,10 +253,7 @@ async function showProlongStatus(
   );
 }
 
-async function refreshProlong(
-  runtime: ProlongRuntime,
-  context: ExtensionContext,
-): Promise<void> {
+async function refreshProlong(runtime: ProlongRuntime, context: ExtensionContext): Promise<void> {
   if (!runtime.enabled) {
     context.ui.notify("PRO-LONG is off. Enable it first with /prolong on.", "warning");
     return;
