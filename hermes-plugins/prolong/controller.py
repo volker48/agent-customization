@@ -31,7 +31,7 @@ def get_runtime_home() -> Path:
 
 
 def validate_session_id(session_id: str) -> str:
-    if not _SESSION_ID.fullmatch(session_id):
+    if not isinstance(session_id, str) or not _SESSION_ID.fullmatch(session_id):
         raise ValueError(f"unsafe Hermes session id: {session_id!r}")
     return session_id
 
@@ -287,7 +287,7 @@ class ProlongController:
                         if known_root is None:
                             canonical_root, lineage = self._lineage_root(safe_id)
                             raw_fallback = log_path_for(self._root(), safe_id)
-                            if raw_fallback.exists() or self._anchor_is_advertised(
+                            if os.path.lexists(raw_fallback) or self._anchor_is_advertised(
                                 safe_id,
                                 safe_id,
                             ):
@@ -632,7 +632,14 @@ class ProlongController:
             LOGGER.exception("PRO-LONG %s cleanup failed for %s", hook_name, session_id)
 
     def on_session_start(self, *, session_id: str, **_: Any) -> None:
-        safe_id = validate_session_id(session_id)
+        try:
+            safe_id = validate_session_id(session_id)
+        except ValueError:
+            LOGGER.exception(
+                "PRO-LONG ignored on_session_start with an unsafe session id: %r",
+                session_id,
+            )
+            return None
         with self._condition:
             while self._maintenance and not self._closing and not self._closed:
                 self._condition.wait()

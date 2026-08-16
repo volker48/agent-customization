@@ -6,7 +6,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Mapping
 
-from .controller import ProlongController, log_path_for
+from .controller import ProlongController, log_path_for, validate_session_id
 
 
 PROMPT_SECTION_ID = "prolong.programmatic-memory"
@@ -43,12 +43,13 @@ def build_prompt(
     projection_root: Path | None = None,
     controller: ProlongController | None = None,
 ) -> str:
-    session_id = str(session_info.get("session_id") or "")
-    if not session_id:
+    try:
+        session_id = validate_session_id(session_info.get("session_id"))
+    except ValueError:
         return (
             "PRO-LONG programmatic memory is unavailable for this turn because "
-            "Hermes did not provide a session ID. Do not assume earlier compressed "
-            "evidence is recoverable until a later turn supplies one."
+            "Hermes did not provide a valid session ID. Do not assume earlier "
+            "compressed evidence is recoverable until a later turn supplies one."
         )
     if controller is not None:
         path = controller.projection_path(session_id)
