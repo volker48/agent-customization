@@ -27,8 +27,9 @@ or tool schemas during a conversation.
 The plugin:
 
 1. Captures the profile-scoped plugin data directory during `register()` and resolves
-   one cache-safe system-prompt path keyed by the root compression-session ID. The
-   path remains stable when rotation creates a child tip.
+   one cache-safe system-prompt path keyed by a stable lineage anchor. A linear
+   compression continuation keeps the root anchor; divergent live continuations
+   receive distinct anchors so they cannot overwrite or disclose one another.
 2. Lazily opens the profile's `state.db` read-only through Hermes `SessionDB`.
 3. Uses `get_compression_lineage()` for explicit rotation lineage and
    `get_messages(..., include_inactive=True)` for raw persisted rows.
@@ -44,9 +45,10 @@ The plugin:
    causes a complete lineage reread, after which an exact serialized suffix may
    append; mutation, compaction, rewind, divergence, restart, or integrity changes
    rebuild atomically.
-8. Holds the validated process lock across both canonical snapshot acquisition and
-   projection mutation so a delayed stale reader cannot overwrite a newer result.
-9. Removes root-lineage projections on finalization and plugin unload. Startup
+8. Holds the validated process lock across lineage-anchor selection, canonical
+   snapshot acquisition, and projection mutation so a delayed stale reader or a
+   divergent sibling cannot overwrite another lineage.
+9. Removes anchored-lineage projections on finalization and plugin unload. Startup
    sweeping reconciles direct canonical deletion: surviving continuations keep the
    frozen path anchor and are rewritten; the projection is removed only when none of
    its represented sessions remains.
@@ -55,7 +57,7 @@ The path lives under the public `ctx.state.data_dir` namespace rather than insid
 the quota-bounded `ctx.state` JSON document:
 
 ```text
-$HERMES_HOME/plugin-data/<prolong-namespace>/sessions/<root-session-id>/trajectory.jsonl
+$HERMES_HOME/plugin-data/<prolong-namespace>/sessions/<lineage-anchor-id>/trajectory.jsonl
 ```
 
 ## Fidelity contract

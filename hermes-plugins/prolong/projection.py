@@ -121,6 +121,35 @@ def _ensure_private_directory(path: Path) -> None:
     path.chmod(0o700)
 
 
+@contextmanager
+def projection_root_transaction(projection_root: Path):
+    """Serialize anchor selection and publication across plugin processes."""
+    root = Path(projection_root)
+    for path in reversed(root.parents[:2]):
+        _ensure_private_directory(path)
+    _ensure_private_directory(root)
+    lock_path = root / ".prolong.lock"
+    descriptor = os.open(
+        lock_path,
+        _open_flags(os.O_RDWR, os.O_CREAT),
+        0o600,
+    )
+    try:
+        _validate_regular_file(
+            os.fstat(descriptor),
+            expected_mode=0o600,
+            label=str(lock_path),
+        )
+        fcntl_module = importlib.import_module("fcntl")
+        fcntl_module.flock(descriptor, fcntl_module.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl_module.flock(descriptor, fcntl_module.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
 class ProjectionStore:
     """Maintain one integrity-checked, owner-private JSONL projection."""
 
@@ -144,9 +173,11 @@ class ProjectionStore:
     ) -> SyncResult:
         started = time.monotonic_ns()
         if _process_lock_held:
-            return self._sync_locked(
-                records, force_rebuild=force_rebuild, started=started
-            )
+            with self._lock:
+                self._ensure_private_directories()
+                return self._sync_locked(
+                    records, force_rebuild=force_rebuild, started=started
+                )
         with self.transaction():
             return self._sync_locked(
                 records, force_rebuild=force_rebuild, started=started

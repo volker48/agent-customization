@@ -19,16 +19,19 @@ For each active Hermes session, the plugin reconciles:
 The projection is written beneath Hermes's profile-scoped plugin data directory:
 
 ```text
-$HERMES_HOME/plugin-data/<prolong-namespace>/sessions/<root-session-id>/trajectory.jsonl
+$HERMES_HOME/plugin-data/<prolong-namespace>/sessions/<lineage-anchor-id>/trajectory.jsonl
 ```
 
 The namespace is assigned by Hermes and may contain a hash. The plugin's static
 system-prompt section gives the model the exact absolute path; callers should not
 construct it themselves.
 
-The directory key is the root of the active compression lineage, not its current
-tip. It therefore remains identical when rotation-based compression creates a child
-Hermes session ID.
+The directory key is normally the root of the active compression lineage, not its
+current tip, so it remains identical when rotation-based compression creates a
+linear child. If two live lineages diverge from the same root, anchor selection and
+publication occur under the shared process lock: the first lineage keeps the root
+anchor and each divergent lineage receives a distinct stable anchor. One branch can
+therefore never overwrite or disclose another branch's projection.
 
 The plugin synchronizes on session start, before model and tool calls, after the
 model call, at the end of each turn, and at reset/finalization boundaries. It uses

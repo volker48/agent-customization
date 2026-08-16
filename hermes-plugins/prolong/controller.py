@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from .projection import ProjectionStore, SyncResult
+from .projection import ProjectionStore, SyncResult, projection_root_transaction
 from .session_reader import HermesSessionReader
 
 LOGGER = logging.getLogger("hermes.plugins.prolong")
@@ -35,7 +35,7 @@ def log_path_for(projection_root: Path, session_id: str) -> Path:
 
 
 class ProlongController:
-    """Synchronize canonical Hermes rows into one root-lineage projection."""
+    """Synchronize canonical Hermes rows into one isolated lineage projection."""
 
     def __init__(
         self,
@@ -110,7 +110,11 @@ class ProlongController:
         root_session_id = validate_session_id(lineage[0])
         return root_session_id, lineage
 
-    def _find_projection_anchor(self, session_id: str) -> str | None:
+    def _find_projection_anchor(
+        self,
+        session_id: str,
+        lineage: tuple[str, ...],
+    ) -> str | None:
         root = self._root()
         try:
             root_metadata = root.lstat()
@@ -121,6 +125,8 @@ class ProlongController:
             or root_metadata.st_uid != os.getuid()
         ):
             raise RuntimeError(f"unsafe PRO-LONG projection root: {root}")
+        exact: list[tuple[int, str]] = []
+        compatible: list[tuple[int, str]] = []
         for directory in sorted(root.iterdir(), key=lambda path: path.name):
             try:
                 metadata = directory.lstat()
@@ -134,42 +140,50 @@ class ProlongController:
             ):
                 continue
             try:
-                if session_id in self._projection_segments(
-                    directory / "trajectory.jsonl"
-                ):
-                    return anchor
+                segments = self._projection_segments(directory / "trajectory.jsonl")
+                if session_id in segments:
+                    exact.append((len(segments), anchor))
+                elif segments and lineage[: len(segments)] == segments:
+                    compatible.append((len(segments), anchor))
             except (FileNotFoundError, RuntimeError, json.JSONDecodeError):
                 continue
-        return None
+        for _, anchor in exact:
+            if anchor == session_id:
+                return anchor
+        candidates = exact or compatible
+        return max(candidates, default=(0, ""))[1] or None
 
     def _projection_root_for(
         self,
         session_id: str,
         canonical_root: str,
+        lineage: tuple[str, ...],
     ) -> str:
         with self._lock:
             known_root = self._session_roots.get(session_id)
         if known_root is not None:
             return known_root
-        return self._find_projection_anchor(session_id) or canonical_root
+        existing_anchor = self._find_projection_anchor(session_id, lineage)
+        if existing_anchor is not None:
+            return existing_anchor
+        canonical_log = log_path_for(self._root(), canonical_root)
+        try:
+            canonical_log.lstat()
+        except FileNotFoundError:
+            return canonical_root
+        return session_id if session_id != canonical_root else canonical_root
 
     def projection_path(self, session_id: str) -> Path:
-        """Resolve the stable root-lineage path rendered into the system prompt."""
+        """Synchronize and resolve the stable path rendered into the system prompt."""
         safe_id = validate_session_id(session_id)
         try:
-            with self._operation(safe_id):
-                canonical_root, lineage = self._lineage_root(safe_id)
-                root_session_id = self._projection_root_for(
-                    safe_id,
-                    canonical_root,
-                )
-                with self._lock:
-                    for segment_id in lineage:
-                        self._session_roots[segment_id] = root_session_id
-                return log_path_for(self._root(), root_session_id)
+            self.synchronize(safe_id)
+            with self._lock:
+                root_session_id = self._session_roots[safe_id]
+            return log_path_for(self._root(), root_session_id)
         except Exception:
             LOGGER.exception(
-                "PRO-LONG could not resolve compression root for %s; using tip path",
+                "PRO-LONG could not synchronize projection path for %s; using tip path",
                 safe_id,
             )
             return log_path_for(self._root(), safe_id)
@@ -182,12 +196,16 @@ class ProlongController:
     ) -> SyncResult:
         safe_id = validate_session_id(session_id)
         with self._operation(safe_id):
-            canonical_root, _ = self._lineage_root(safe_id)
-            root_session_id = self._projection_root_for(safe_id, canonical_root)
-            lock = self._session_lock(root_session_id)
-            with lock:
-                store = self._store_for(root_session_id)
-                with store.transaction():
+            canonical_root, lineage = self._lineage_root(safe_id)
+            with projection_root_transaction(self._root()):
+                root_session_id = self._projection_root_for(
+                    safe_id,
+                    canonical_root,
+                    lineage,
+                )
+                lock = self._session_lock(root_session_id)
+                with lock:
+                    store = self._store_for(root_session_id)
                     with self._lock:
                         previous = self._snapshots.get(root_session_id)
                     snapshot = self._reader.snapshot(safe_id, previous=previous)
@@ -203,8 +221,7 @@ class ProlongController:
                     )
                     with self._lock:
                         self._snapshots[root_session_id] = snapshot
-                        for segment_id in snapshot.lineage:
-                            self._session_roots[segment_id] = root_session_id
+                        self._session_roots[safe_id] = root_session_id
                         self._last_error = None
                     return result
 
@@ -214,8 +231,8 @@ class ProlongController:
         if known_root is not None:
             return known_root
         try:
-            canonical_root, _ = self._lineage_root(session_id)
-            return self._projection_root_for(session_id, canonical_root)
+            canonical_root, lineage = self._lineage_root(session_id)
+            return self._projection_root_for(session_id, canonical_root, lineage)
         except Exception:
             return session_id
 

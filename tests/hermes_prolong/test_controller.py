@@ -99,6 +99,43 @@ class RotatingReader:
         self.closed = True
 
 
+class ForkingReader:
+    def __init__(self) -> None:
+        self.existing = {"root", "branch-a", "branch-b"}
+
+    def lineage(self, session_id: str):
+        if session_id == "root":
+            return ("root",)
+        return ("root", session_id)
+
+    def snapshot(self, session_id: str, *, previous=None):
+        del previous
+        lineage = self.lineage(session_id)
+        records = [
+            {
+                "record_type": "session_segment",
+                "lineage_index": index,
+                "session": {"id": segment_id},
+            }
+            for index, segment_id in enumerate(lineage)
+        ]
+        records.append(
+            {
+                "record_type": "message",
+                "lineage_index": len(lineage) - 1,
+                "session_id": session_id,
+                "message": {"id": len(lineage), "content": session_id},
+            }
+        )
+        return SimpleNamespace(records=tuple(records), lineage=lineage)
+
+    def session_exists(self, session_id: str) -> bool:
+        return session_id in self.existing
+
+    def close(self) -> None:
+        return None
+
+
 class BlockingReader(FakeReader):
     def __init__(self) -> None:
         super().__init__()
@@ -248,6 +285,51 @@ class ProlongControllerTests(unittest.TestCase):
             controller.on_session_finalize(session_id="tip")
             self.assertFalse(root_log.parent.exists())
             controller.close()
+
+    def test_forked_compression_lineages_use_distinct_stable_projections(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        reader = ForkingReader()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            first = module.ProlongController(reader=reader, projection_root=root)
+            second = module.ProlongController(reader=reader, projection_root=root)
+
+            self.assertEqual(
+                first.projection_path("branch-a"), root / "root" / "trajectory.jsonl"
+            )
+            self.assertEqual(
+                second.projection_path("branch-b"),
+                root / "branch-b" / "trajectory.jsonl",
+            )
+            self.assertIn(
+                "branch-a",
+                (root / "root" / "trajectory.jsonl").read_text(encoding="utf-8"),
+            )
+            self.assertIn(
+                "branch-b",
+                (root / "branch-b" / "trajectory.jsonl").read_text(encoding="utf-8"),
+            )
+            first.synchronize("branch-a")
+            second.synchronize("branch-b")
+
+            branch_a_path = first.projection_path("branch-a")
+            branch_b_path = second.projection_path("branch-b")
+            self.assertEqual(branch_a_path, root / "root" / "trajectory.jsonl")
+            self.assertEqual(branch_b_path, root / "branch-b" / "trajectory.jsonl")
+            self.assertNotEqual(branch_a_path, branch_b_path)
+            self.assertIn("branch-a", branch_a_path.read_text(encoding="utf-8"))
+            self.assertNotIn("branch-b", branch_a_path.read_text(encoding="utf-8"))
+            self.assertIn("branch-b", branch_b_path.read_text(encoding="utf-8"))
+            self.assertNotIn("branch-a", branch_b_path.read_text(encoding="utf-8"))
+
+            first.synchronize("branch-a")
+            self.assertEqual(first.projection_path("branch-a"), branch_a_path)
+            self.assertEqual(second.projection_path("branch-b"), branch_b_path)
+            self.assertIn("branch-b", branch_b_path.read_text(encoding="utf-8"))
+
+            first.close()
+            second.close()
 
     def test_snapshot_and_projection_update_share_the_process_lock(self) -> None:
         load_plugin_module()
