@@ -194,13 +194,13 @@ describe("PRO-LONG regressions", () => {
       logPath: "/runtime/pi-prolong/session/active-branch.jsonl",
       assertSupported: async () => undefined,
       sync: vi.fn(async () => ({
-        mode: "noop",
+        mode: "noop" as const,
         entryCount: branch.length,
         byteSize: 1,
         elapsedMs: 1,
       })),
       syncBranch: vi.fn(async () => ({
-        mode: "noop",
+        mode: "noop" as const,
         entryCount: branch.length,
         byteSize: 1,
         elapsedMs: 1,
