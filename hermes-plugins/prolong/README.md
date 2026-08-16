@@ -31,7 +31,10 @@ current tip, so it remains identical when rotation-based compression creates a
 linear child. If two live lineages diverge from the same root, anchor selection and
 publication occur under the shared process lock: the first lineage keeps the root
 anchor and each divergent lineage receives a distinct stable anchor. One branch can
-therefore never overwrite or disclose another branch's projection.
+therefore never overwrite or disclose another branch's projection. If an ancestor is
+resumed while a descendant still advertises that root anchor, the resumed ancestor
+receives a deterministic synthetic anchor instead of replacing the descendant's
+projection.
 
 The plugin synchronizes on session start, before model and tool calls, after the
 model call, and at the end of each turn. It uses the canonical database as the

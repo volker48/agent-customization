@@ -624,6 +624,52 @@ class ProlongControllerTests(unittest.TestCase):
             first.close()
             second.close()
 
+    def test_resumed_ancestor_does_not_overwrite_live_descendant_projection(
+        self,
+    ) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            tip_controller = module.ProlongController(
+                reader=RotatingReader(),
+                projection_root=root,
+            )
+            resumed_root_controller = module.ProlongController(
+                reader=RotatingReader(),
+                projection_root=root,
+            )
+
+            tip_path = tip_controller.projection_path("tip")
+            tip_bytes = tip_path.read_bytes()
+            resumed_root_path = resumed_root_controller.projection_path("root")
+
+            self.assertNotEqual(resumed_root_path, tip_path)
+            self.assertTrue(resumed_root_path.is_file())
+            self.assertEqual(tip_path.read_bytes(), tip_bytes)
+            self.assertIn('"id":"tip"', tip_bytes.decode())
+            self.assertNotIn(
+                '"id":"tip"',
+                resumed_root_path.read_text(encoding="utf-8"),
+            )
+
+            resumed_root_peer = module.ProlongController(
+                reader=RotatingReader(),
+                projection_root=root,
+            )
+            self.assertEqual(
+                resumed_root_peer.projection_path("root"),
+                resumed_root_path,
+            )
+            resumed_root_peer.close()
+            self.assertTrue(resumed_root_path.is_file())
+
+            resumed_root_controller.close()
+            self.assertFalse(resumed_root_path.parent.exists())
+            self.assertEqual(tip_path.read_bytes(), tip_bytes)
+            tip_controller.close()
+            self.assertFalse(tip_path.parent.exists())
+
     def test_shared_projection_survives_first_controller_close_until_last_lease(
         self,
     ) -> None:
@@ -1173,6 +1219,8 @@ class ProlongControllerTests(unittest.TestCase):
         controller_module = importlib.import_module(
             "test_hermes_prolong_plugin.controller"
         )
+        if "fork" not in multiprocessing.get_all_start_methods():
+            self.skipTest("requires multiprocessing fork context")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "plugin-data" / "prolong" / "sessions"
             log_path = root / "s1" / "trajectory.jsonl"

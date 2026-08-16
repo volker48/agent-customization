@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -168,7 +169,7 @@ class ProlongController:
                 continue
             try:
                 segments = self._projection_segments(directory / "trajectory.jsonl")
-                if session_id in segments:
+                if segments and segments[-1] == session_id:
                     exact.append((len(segments), anchor))
                 elif segments and lineage[: len(segments)] == segments:
                     compatible.append((len(segments), anchor))
@@ -179,6 +180,18 @@ class ProlongController:
                 return anchor
         candidates = exact or compatible
         return max(candidates, default=(0, ""))[1] or None
+
+    def _unused_resumed_anchor(self, session_id: str) -> str:
+        occupied = {path.name for path in self._root().iterdir()}
+        counter = 0
+        while True:
+            digest = hashlib.sha256(
+                f"PRO-LONG-resumed-anchor\0{session_id}\0{counter}".encode()
+            ).hexdigest()[:32]
+            candidate = f"resumed-{digest}"
+            if candidate not in occupied:
+                return candidate
+            counter += 1
 
     def _projection_root_for(
         self,
@@ -198,7 +211,9 @@ class ProlongController:
             canonical_log.lstat()
         except FileNotFoundError:
             return canonical_root
-        return session_id if session_id != canonical_root else canonical_root
+        if session_id != canonical_root:
+            return session_id
+        return self._unused_resumed_anchor(session_id)
 
     def projection_path(self, session_id: str) -> Path:
         """Synchronize and resolve the stable path rendered into the system prompt."""
