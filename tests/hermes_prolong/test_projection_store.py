@@ -12,6 +12,60 @@ from pathlib import Path
 from tests.hermes_prolong.test_plugin_registration import PLUGIN_DIR, load_plugin_module
 
 
+def create_private_anchor(root: Path, anchor: str = "s1") -> Path:
+    anchor_directory = root / anchor
+    for path in (root.parent.parent, root.parent, root, anchor_directory):
+        path.mkdir(mode=0o700, exist_ok=True)
+        path.chmod(0o700)
+    return anchor_directory
+
+
+def canonical_session(session_id: str, parent_session_id: str | None = None) -> dict:
+    return {
+        "id": session_id,
+        "parent_session_id": parent_session_id,
+        "source": "test",
+        "started_at": 1.0,
+        "ended_at": None,
+        "end_reason": None,
+        "compression_count": None,
+        "rewind_count": None,
+    }
+
+
+def canonical_message(
+    message_id: int,
+    *,
+    session_id: str = "s1",
+    content: object = "message",
+) -> dict:
+    return {
+        "id": message_id,
+        "session_id": session_id,
+        "role": "user",
+        "content": content,
+        "tool_call_id": None,
+        "tool_calls": None,
+        "tool_name": None,
+        "effect_disposition": None,
+        "timestamp": 1.0,
+        "token_count": None,
+        "finish_reason": None,
+        "reasoning": None,
+        "reasoning_content": None,
+        "reasoning_details": None,
+        "codex_reasoning_items": None,
+        "codex_message_items": None,
+        "platform_message_id": None,
+        "observed": 0,
+        "active": 1,
+        "compacted": 0,
+        "api_content": None,
+        "display_kind": None,
+        "display_metadata": None,
+    }
+
+
 class ProjectionStoreTests(unittest.TestCase):
     def test_sync_creates_a_private_fresh_runtime_home(self) -> None:
         load_plugin_module()
@@ -33,6 +87,176 @@ class ProjectionStoreTests(unittest.TestCase):
 
             self.assertTrue(log_path.is_file())
             self.assertEqual(stat.S_IMODE(runtime_home.stat().st_mode), 0o700)
+
+    def test_relative_projection_root_does_not_chmod_the_working_directory(
+        self,
+    ) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+
+        with tempfile.TemporaryDirectory() as directory:
+            working_directory = Path(directory)
+            working_directory.chmod(0o755)
+            previous_working_directory = Path.cwd()
+            try:
+                os.chdir(working_directory)
+                store = module.ProjectionStore(
+                    Path("plugin-data")
+                    / "prolong"
+                    / "sessions"
+                    / "session-1"
+                    / "trajectory.jsonl"
+                )
+
+                store.sync(({"record_type": "message", "message": {"id": 1}},))
+
+                self.assertEqual(
+                    stat.S_IMODE(working_directory.stat().st_mode),
+                    0o755,
+                )
+            finally:
+                os.chdir(previous_working_directory)
+
+    def test_relative_canonical_root_rejects_a_nonprivate_existing_home(
+        self,
+    ) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+
+        for operation in ("root-transaction", "store"):
+            with (
+                self.subTest(operation=operation),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                working_directory = Path(directory)
+                previous_working_directory = Path.cwd()
+                try:
+                    os.chdir(working_directory)
+                    home = Path("hermes-home")
+                    home.mkdir(mode=0o755)
+                    home.chmod(0o755)
+                    root = home / "plugin-data" / "prolong" / "sessions"
+
+                    with self.assertRaisesRegex(
+                        RuntimeError, "unsafe PRO-LONG directory"
+                    ):
+                        if operation == "root-transaction":
+                            with module.projection_root_transaction(root):
+                                pass
+                        else:
+                            store = module.ProjectionStore(
+                                root / "s1" / "trajectory.jsonl"
+                            )
+                            store.sync(
+                                ({"record_type": "message", "message": {"id": 1}},)
+                            )
+
+                    self.assertEqual(stat.S_IMODE(home.stat().st_mode), 0o755)
+                finally:
+                    os.chdir(previous_working_directory)
+
+    def test_shallow_relative_projection_root_does_not_chmod_the_working_directory(
+        self,
+    ) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+
+        with tempfile.TemporaryDirectory() as directory:
+            working_directory = Path(directory)
+            working_directory.chmod(0o755)
+            previous_working_directory = Path.cwd()
+            try:
+                os.chdir(working_directory)
+                store = module.ProjectionStore(
+                    Path("sessions") / "session-1" / "trajectory.jsonl"
+                )
+
+                store.sync(({"record_type": "message", "message": {"id": 1}},))
+
+                self.assertEqual(
+                    stat.S_IMODE(working_directory.stat().st_mode),
+                    0o755,
+                )
+            finally:
+                os.chdir(previous_working_directory)
+
+    def test_shallow_absolute_projection_root_ignores_unrelated_tmp_ancestor(
+        self,
+    ) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+        records = (
+            {
+                "record_type": "message",
+                "lineage_index": 0,
+                "session_id": "s1",
+                "message": {"id": 1},
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "sessions"
+            with module.projection_root_transaction(root):
+                pass
+            store = module.ProjectionStore(root / "s1" / "trajectory.jsonl")
+            store.sync(records)
+
+            self.assertTrue(store.log_path.is_file())
+            self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
+
+    def test_projection_paths_do_not_chmod_unrelated_owner_ancestor(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+        records = (
+            {
+                "record_type": "message",
+                "lineage_index": 0,
+                "session_id": "s1",
+                "message": {"id": 1},
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            outer = Path(directory) / "unrelated"
+            outer.mkdir(mode=0o755)
+            root = outer / "sessions"
+            with module.projection_root_transaction(root):
+                pass
+            module.ProjectionStore(root / "s1" / "trajectory.jsonl").sync(records)
+
+            self.assertEqual(stat.S_IMODE(outer.stat().st_mode), 0o755)
+
+    def test_existing_nonprivate_canonical_home_is_rejected_unchanged(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+        records = (
+            {
+                "record_type": "message",
+                "lineage_index": 0,
+                "session_id": "s1",
+                "message": {"id": 1},
+            },
+        )
+
+        for operation in ("root-transaction", "store-sync"):
+            with (
+                self.subTest(operation=operation),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                runtime_home = Path(directory) / "hermes-home"
+                runtime_home.mkdir(mode=0o755)
+                root = runtime_home / "plugin-data" / "prolong" / "sessions"
+
+                with self.assertRaisesRegex(RuntimeError, "unsafe PRO-LONG directory"):
+                    if operation == "root-transaction":
+                        with module.projection_root_transaction(root):
+                            pass
+                    else:
+                        module.ProjectionStore(root / "s1" / "trajectory.jsonl").sync(
+                            records
+                        )
+
+                self.assertEqual(stat.S_IMODE(runtime_home.stat().st_mode), 0o755)
 
     def test_sync_refuses_a_symlinked_runtime_home(self) -> None:
         load_plugin_module()
@@ -299,6 +523,241 @@ class ProjectionStoreTests(unittest.TestCase):
 
             self.assertFalse(log_path.parent.exists())
 
+    def test_read_only_cleanup_adoption_rejects_malformed_projection_jsonl(
+        self,
+    ) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+
+        def jsonl(*records: dict) -> bytes:
+            return (
+                "".join(
+                    json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n"
+                    for record in records
+                )
+            ).encode()
+
+        canonical_segment = {
+            "lineage_index": 0,
+            "record_type": "session_segment",
+            "session": canonical_session("s1"),
+        }
+        missing_fixed_message_field = canonical_message(1)
+        missing_fixed_message_field.pop("effect_disposition")
+        malformed_payloads = (
+            b"",
+            b"not-jsonl\n",
+            b'{"record_type":"message"}\n',
+            b'{"lineage_index":0,"record_type":"session_segment"}\n',
+            b'{ "lineage_index":0,"record_type":"session_segment",'
+            b'"session":{"id":"s1"}}\n',
+            b'{"lineage_index":0,"record_type":"session_segment",'
+            b'"session":{"compression_count":NaN,"id":"s1"}}\n',
+            b'{"lineage_index":0,"message":{"id":1},'
+            b'"record_type":"message","session_id":"s1"}\n',
+            b'{"lineage_index":0,"record_type":"session_segment",'
+            b'"session":{"id":"s1"}}\n'
+            b'{"lineage_index":2,"record_type":"session_segment",'
+            b'"session":{"id":"s2"}}\n',
+            b'{"lineage_index":0,"record_type":"session_segment",'
+            b'"session":{"id":"s1"}}\n'
+            b'{"lineage_index":0,"message":{"id":1,"role":"user"},'
+            b'"record_type":"message","session_id":"s1"}\n'
+            b'{"chunk_count":2,"chunk_index":0,"content":"first",'
+            b'"content_encoding":"text","lineage_index":0,"message_id":1,'
+            b'"record_type":"message_content_chunk","role":"user",'
+            b'"session_id":"s1","tool_call_id":null}\n',
+            b'{"chunk_count":1,"chunk_index":2,"content":"x",'
+            b'"lineage_index":0,"record_type":"message_content_chunk",'
+            b'"session_id":"s1"}\n',
+            jsonl(
+                {
+                    "lineage_index": 0,
+                    "record_type": "session_segment",
+                    "session": {"id": "s1"},
+                }
+            ),
+            jsonl(
+                {
+                    "lineage_index": 0,
+                    "record_type": "session_segment",
+                    "session": canonical_session("../foreign"),
+                }
+            ),
+            jsonl(
+                canonical_segment,
+                {
+                    "lineage_index": 0,
+                    "message": missing_fixed_message_field,
+                    "record_type": "message",
+                    "session_id": "s1",
+                },
+            ),
+            jsonl(
+                {
+                    "lineage_index": 0,
+                    "record_type": "session_segment",
+                    "session": {
+                        **canonical_session("s1"),
+                        "compression_count": True,
+                    },
+                }
+            ),
+            jsonl(
+                {
+                    "lineage_index": 0,
+                    "record_type": "session_segment",
+                    "session": {
+                        **canonical_session("s1"),
+                        "parent_session_id": "../escape",
+                    },
+                }
+            ),
+            jsonl(
+                {
+                    "lineage_index": 0,
+                    "record_type": "session_segment",
+                    "session": {
+                        **canonical_session("s1"),
+                        "parent_session_id": 7,
+                    },
+                }
+            ),
+            jsonl(
+                canonical_segment,
+                {
+                    "lineage_index": 1,
+                    "record_type": "session_segment",
+                    "session": canonical_session("s1", "s1"),
+                },
+            ),
+            jsonl(
+                {
+                    "lineage_index": 0,
+                    "record_type": "session_segment",
+                    "session": canonical_session("a", "c"),
+                },
+                {
+                    "lineage_index": 1,
+                    "record_type": "session_segment",
+                    "session": canonical_session("b", "a"),
+                },
+                {
+                    "lineage_index": 2,
+                    "record_type": "session_segment",
+                    "session": canonical_session("c", "b"),
+                },
+            ),
+            jsonl(
+                canonical_segment,
+                {
+                    "lineage_index": 0,
+                    "message": canonical_message(1, session_id="other"),
+                    "record_type": "message",
+                    "session_id": "s1",
+                },
+            ),
+            jsonl(
+                canonical_segment,
+                {
+                    "lineage_index": 0,
+                    "message": {"id": 1},
+                    "record_type": "message",
+                    "session_id": "s1",
+                },
+            ),
+            jsonl(
+                canonical_segment,
+                {
+                    "extra": "unsupported",
+                    "lineage_index": 0,
+                    "message": {"id": 1},
+                    "record_type": "message",
+                    "session_id": "s1",
+                },
+            ),
+            (
+                json.dumps(
+                    {
+                        "lineage_index": 0,
+                        "record_type": "session_segment",
+                        "session": canonical_session("s1"),
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "lineage_index": 0,
+                        "message": canonical_message(1, content="A" * 800),
+                        "record_type": "message",
+                        "session_id": "s1",
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode(),
+        )
+        for payload in malformed_payloads:
+            with (
+                self.subTest(payload=payload),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+                log_path = root / "s1" / "trajectory.jsonl"
+                create_private_anchor(root)
+                log_path.write_bytes(payload)
+                log_path.chmod(0o400)
+                store = module.ProjectionStore(log_path)
+
+                with self.assertRaisesRegex(RuntimeError, "valid PRO-LONG projection"):
+                    with module.projection_root_transaction(root):
+                        store.adopt_for_cleanup(_process_lock_held=True)
+
+                self.assertEqual(log_path.read_bytes(), payload)
+
+    def test_read_only_cleanup_adoption_accepts_available_lineage_after_ancestor_deletion(
+        self,
+    ) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+        reader_module = importlib.import_module(
+            "test_hermes_prolong_plugin.session_reader"
+        )
+        message = canonical_message(1, content="A" * 800)
+        records = (
+            {
+                "lineage_index": 0,
+                "record_type": "session_segment",
+                "session": canonical_session("s1", "deleted-root"),
+            },
+            {
+                "lineage_index": 0,
+                "message": message,
+                "record_type": "message",
+                "session_id": "s1",
+            },
+            *reader_module._message_content_chunks(
+                message,
+                session_id="s1",
+                lineage_index=0,
+            ),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            log_path = root / "s1" / "trajectory.jsonl"
+            store = module.ProjectionStore(log_path)
+            store.sync(records)
+            adopted = module.ProjectionStore(log_path)
+
+            with module.projection_root_transaction(root):
+                adopted.adopt_for_cleanup(_process_lock_held=True)
+                adopted.cleanup(_process_lock_held=True)
+
+            self.assertFalse(log_path.exists())
+
     def test_cleanup_removes_only_leftover_private_trajectory_temporary_files(
         self,
     ) -> None:
@@ -383,7 +842,7 @@ class ProjectionStoreTests(unittest.TestCase):
             store = module.ProjectionStore(log_path)
             store.sync(({"record_type": "message", "message": {"id": 1}},))
             saved_original = log_path.parent / "saved-original"
-            replacement = log_path.parent / "replacement"
+            replacement = Path(directory) / "replacement"
             replacement.write_text('{"record_type":"replacement"}\n', encoding="utf-8")
             replacement.chmod(0o400)
             original_read_signature = module._read_signature
@@ -401,7 +860,10 @@ class ProjectionStoreTests(unittest.TestCase):
             with unittest.mock.patch.object(
                 module, "_read_signature", side_effect=swap_after_validation
             ):
-                with self.assertRaisesRegex(RuntimeError, "changed PRO-LONG log"):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "changed PRO-LONG log|unexpected PRO-LONG cleanup",
+                ):
                     store.cleanup()
 
             self.assertEqual(
@@ -425,7 +887,7 @@ class ProjectionStoreTests(unittest.TestCase):
             store = module.ProjectionStore(log_path)
             store.sync(({"record_type": "message", "message": {"id": 1}},))
             saved_original = log_path.parent / "saved-original"
-            replacement = log_path.parent / "replacement"
+            replacement = Path(directory) / "replacement"
             replacement.write_text('{"record_type":"replacement"}\n', encoding="utf-8")
             replacement.chmod(0o400)
             original_read_signature = module._read_signature
@@ -572,6 +1034,7 @@ class ProjectionStoreTests(unittest.TestCase):
                 store.cleanup()
 
             self.assertTrue(unrelated.exists())
+            self.assertTrue(log_path.exists())
             self.assertTrue(log_path.parent.exists())
 
     def test_cleanup_refuses_unsafe_artifacts_with_temporary_names(self) -> None:
@@ -597,7 +1060,44 @@ class ProjectionStoreTests(unittest.TestCase):
                 store.cleanup()
 
             self.assertTrue(unsafe_temporary.is_symlink())
+            self.assertTrue(log_path.exists())
             self.assertEqual(outside.read_bytes(), b"must not be removed")
+
+    def test_cleanup_restores_the_log_if_an_artifact_appears_after_capture(
+        self,
+    ) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = (
+                Path(directory)
+                / "runtime"
+                / "prolong"
+                / "session-1"
+                / "trajectory.jsonl"
+            )
+            store = module.ProjectionStore(log_path)
+            store.sync(({"record_type": "message", "message": {"id": 1}},))
+            expected_payload = log_path.read_bytes()
+            unexpected = log_path.parent / "appeared-during-capture"
+            original_check = store._require_only_quarantined_log
+
+            def inject_then_check(quarantine_path):
+                unexpected.write_bytes(b"preserve")
+                unexpected.chmod(0o600)
+                original_check(quarantine_path)
+
+            with unittest.mock.patch.object(
+                store,
+                "_require_only_quarantined_log",
+                side_effect=inject_then_check,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "changed PRO-LONG log"):
+                    store.cleanup()
+
+            self.assertEqual(log_path.read_bytes(), expected_payload)
+            self.assertEqual(unexpected.read_bytes(), b"preserve")
 
     def test_external_modification_forces_rebuild_and_changed_cleanup_fails_closed(
         self,
@@ -739,6 +1239,7 @@ class ProjectionStoreTests(unittest.TestCase):
                 / "trajectory.jsonl"
             )
             log_path.parent.mkdir(mode=0o700, parents=True)
+            log_path.parent.parent.chmod(0o700)
             log_path.write_text('{"record_type":"foreign"}\n', encoding="utf-8")
             log_path.chmod(0o644)
             store = module.ProjectionStore(log_path)
@@ -789,6 +1290,7 @@ class ProjectionStoreTests(unittest.TestCase):
 
             def tracked_mkstemp(*args, **kwargs):
                 descriptor, temporary_name = original_mkstemp(*args, **kwargs)
+                projection_descriptors.clear()
                 projection_descriptors.add(descriptor)
                 return descriptor, temporary_name
 

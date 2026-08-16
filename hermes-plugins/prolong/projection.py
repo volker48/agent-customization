@@ -5,7 +5,9 @@ from __future__ import annotations
 import errno
 import importlib
 import json
+import math
 import os
+import re
 import stat
 import tempfile
 import threading
@@ -13,7 +15,29 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
+
+from .session_reader import _MESSAGE_FIELDS, _SESSION_FIELDS, _message_content_chunks
+
+
+_PROJECTION_RECORD_TYPES = {
+    "session_segment",
+    "message",
+    "message_content_chunk",
+}
+_SAFE_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
+_NULLABLE_MESSAGE_TEXT_FIELDS = (
+    "api_content",
+    "codex_message_items",
+    "codex_reasoning_items",
+    "effect_disposition",
+    "finish_reason",
+    "platform_message_id",
+    "reasoning",
+    "reasoning_content",
+    "reasoning_details",
+    "tool_name",
+)
 
 
 @dataclass(frozen=True)
@@ -109,6 +133,206 @@ def _serialize(record: Mapping[str, Any]) -> str:
     )
 
 
+def _finite_number(value: object) -> bool:
+    if type(value) is int:
+        return True
+    if type(value) is float:
+        return math.isfinite(value)
+    return False
+
+
+def _nullable_nonnegative_count(value: object) -> bool:
+    return value is None or (type(value) is int and value >= 0)
+
+
+def _valid_session_metadata(session: object) -> bool:
+    if not isinstance(session, dict) or set(session) != set(_SESSION_FIELDS):
+        return False
+    session_id = session.get("id")
+    parent_session_id = session.get("parent_session_id")
+    return (
+        type(session_id) is str
+        and _SAFE_SESSION_ID.fullmatch(session_id) is not None
+        and (
+            parent_session_id is None
+            or (
+                type(parent_session_id) is str
+                and _SAFE_SESSION_ID.fullmatch(parent_session_id) is not None
+            )
+        )
+        and type(session.get("source")) is str
+        and bool(session["source"])
+        and _finite_number(session.get("started_at"))
+        and (session.get("ended_at") is None or _finite_number(session.get("ended_at")))
+        and (
+            session.get("end_reason") is None or type(session.get("end_reason")) is str
+        )
+        and _nullable_nonnegative_count(session.get("compression_count"))
+        and _nullable_nonnegative_count(session.get("rewind_count"))
+    )
+
+
+def _valid_message_metadata(message: object, *, session_id: str) -> bool:
+    if not isinstance(message, dict) or set(message) != set(_MESSAGE_FIELDS):
+        return False
+    tool_call_id = message.get("tool_call_id")
+    return (
+        type(message.get("id")) is int
+        and message["id"] > 0
+        and type(message.get("session_id")) is str
+        and message["session_id"] == session_id
+        and _SAFE_SESSION_ID.fullmatch(message["session_id"]) is not None
+        and type(message.get("role")) is str
+        and bool(message["role"])
+        and (
+            message.get("tool_calls") is None
+            or isinstance(message.get("tool_calls"), list)
+        )
+        and all(
+            message.get(field) is None or type(message.get(field)) is str
+            for field in _NULLABLE_MESSAGE_TEXT_FIELDS
+        )
+        and _finite_number(message.get("timestamp"))
+        and _nullable_nonnegative_count(message.get("token_count"))
+        and type(message.get("observed")) is int
+        and message["observed"] in {0, 1}
+        and type(message.get("active")) is int
+        and message["active"] in {0, 1}
+        and type(message.get("compacted")) is int
+        and message["compacted"] in {0, 1}
+        and (tool_call_id is None or type(tool_call_id) is str)
+        and (
+            message.get("display_kind") is None
+            or type(message.get("display_kind")) is str
+        )
+        and (
+            message.get("display_metadata") is None
+            or isinstance(message.get("display_metadata"), dict)
+        )
+    )
+
+
+def _valid_projection_record(record: object) -> bool:
+    if not isinstance(record, dict):
+        return False
+    lineage_index = record.get("lineage_index")
+    if type(lineage_index) is not int or lineage_index < 0:
+        return False
+    record_type = record.get("record_type")
+    if record_type not in _PROJECTION_RECORD_TYPES:
+        return False
+    if record_type == "session_segment":
+        session = record.get("session")
+        return set(record) == {
+            "lineage_index",
+            "record_type",
+            "session",
+        } and _valid_session_metadata(session)
+    session_id = record.get("session_id")
+    if type(session_id) is not str or _SAFE_SESSION_ID.fullmatch(session_id) is None:
+        return False
+    if record_type == "message":
+        return set(record) == {
+            "lineage_index",
+            "message",
+            "record_type",
+            "session_id",
+        } and _valid_message_metadata(record.get("message"), session_id=session_id)
+    chunk_index = record.get("chunk_index")
+    chunk_count = record.get("chunk_count")
+    return (
+        set(record)
+        == {
+            "chunk_count",
+            "chunk_index",
+            "content",
+            "content_encoding",
+            "lineage_index",
+            "message_id",
+            "record_type",
+            "role",
+            "session_id",
+            "tool_call_id",
+        }
+        and type(chunk_index) is int
+        and type(chunk_count) is int
+        and 0 <= chunk_index < chunk_count
+        and isinstance(record.get("content"), str)
+    )
+
+
+def _valid_projection_records(records: Sequence[dict[str, Any]]) -> bool:
+    if not records:
+        return False
+    segment_ids: dict[int, str] = {}
+    seen_session_ids: set[str] = set()
+    root_parent_session_id: str | None = None
+    current_lineage_index = -1
+    expected_chunks: tuple[dict[str, Any], ...] = ()
+    expected_chunk_index = 0
+    last_message_id = 0
+
+    for record in records:
+        record_type = record["record_type"]
+        if record_type != "message_content_chunk" and expected_chunk_index < len(
+            expected_chunks
+        ):
+            return False
+        lineage_index = record["lineage_index"]
+        if record_type == "session_segment":
+            if lineage_index != current_lineage_index + 1:
+                return False
+            session = record["session"]
+            session_id = session["id"]
+            if session_id in seen_session_ids:
+                return False
+            if (
+                current_lineage_index >= 0
+                and session["parent_session_id"] != segment_ids[current_lineage_index]
+            ):
+                return False
+            segment_ids[lineage_index] = session_id
+            seen_session_ids.add(session_id)
+            if lineage_index == 0:
+                root_parent_session_id = session["parent_session_id"]
+            current_lineage_index = lineage_index
+            expected_chunks = ()
+            expected_chunk_index = 0
+            last_message_id = 0
+            continue
+        if lineage_index != current_lineage_index or record.get(
+            "session_id"
+        ) != segment_ids.get(lineage_index):
+            return False
+        if record_type == "message":
+            message = record["message"]
+            if message["id"] <= last_message_id:
+                return False
+            last_message_id = message["id"]
+            expected_chunks = _message_content_chunks(
+                message,
+                session_id=record["session_id"],
+                lineage_index=lineage_index,
+            )
+            expected_chunk_index = 0
+            continue
+        if (
+            expected_chunk_index >= len(expected_chunks)
+            or record != expected_chunks[expected_chunk_index]
+        ):
+            return False
+        expected_chunk_index += 1
+
+    return (
+        expected_chunk_index == len(expected_chunks)
+        and bool(segment_ids)
+        and (
+            root_parent_session_id is None
+            or root_parent_session_id not in seen_session_ids
+        )
+    )
+
+
 def _jsonl(serialized: Sequence[str]) -> bytes:
     if not serialized:
         return b""
@@ -131,38 +355,96 @@ def _write_all(descriptor: int, payload: bytes) -> None:
         remaining = remaining[written:]
 
 
-def _ensure_private_directory(path: Path) -> None:
+def _validate_directory_ancestors(path: Path) -> None:
+    absolute_path = path if path.is_absolute() else Path.cwd() / path
+    for ancestor in absolute_path.parents:
+        if ancestor.parent == ancestor:
+            continue
+        try:
+            metadata = ancestor.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError(f"Refusing unsafe PRO-LONG directory: {ancestor}")
+
+
+def _create_missing_directory_ancestors(path: Path) -> None:
+    if path == Path(".") or path.parent == path:
+        return
     try:
-        path.mkdir(mode=0o700)
+        metadata = path.lstat()
     except FileNotFoundError:
-        _ensure_private_directory(path.parent)
+        _create_missing_directory_ancestors(path.parent)
         try:
             path.mkdir(mode=0o700)
         except FileExistsError:
             pass
+        else:
+            path.chmod(0o700)
+        metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        raise RuntimeError(f"Refusing unsafe PRO-LONG directory: {path}")
+
+
+def _ensure_private_directory(
+    path: Path, *, strict_existing_mode: bool = False
+) -> None:
+    _validate_directory_ancestors(path)
+    created = False
+    try:
+        path.mkdir(mode=0o700)
+        created = True
+    except FileNotFoundError:
+        _create_missing_directory_ancestors(path.parent)
+        try:
+            path.mkdir(mode=0o700)
+            created = True
+        except FileExistsError:
+            pass
     except FileExistsError:
         pass
+    if created:
+        path.chmod(0o700)
     metadata = path.lstat()
     owned_by_current_user = not hasattr(os, "getuid") or metadata.st_uid == os.getuid()
     if (
         stat.S_ISLNK(metadata.st_mode)
         or not stat.S_ISDIR(metadata.st_mode)
         or not owned_by_current_user
+        or (strict_existing_mode and stat.S_IMODE(metadata.st_mode) != 0o700)
     ):
         raise RuntimeError(f"Refusing unsafe PRO-LONG directory: {path}")
-    path.chmod(0o700)
+
+
+def _managed_projection_root_directories(root: Path) -> tuple[Path, ...]:
+    if len(root.parents) > 1 and root.parents[1].name == "plugin-data":
+        managed = [root.parents[1], root.parent, root]
+        if len(root.parents) > 2 and root.parents[2] != Path("."):
+            managed.insert(0, root.parents[2])
+        return tuple(managed)
+    return (root,)
+
+
+def _managed_store_directories(directory: Path) -> tuple[Path, ...]:
+    if len(directory.parents) > 2 and directory.parents[2].name == "plugin-data":
+        managed = [
+            directory.parents[2],
+            directory.parents[1],
+            directory.parent,
+            directory,
+        ]
+        if len(directory.parents) > 3 and directory.parents[3] != Path("."):
+            managed.insert(0, directory.parents[3])
+        return tuple(managed)
+    return (directory.parent, directory)
 
 
 @contextmanager
 def projection_root_transaction(projection_root: Path):
     """Serialize anchor selection and publication across plugin processes."""
     root = Path(projection_root)
-    private_parents = list(root.parents[:2])
-    if len(root.parents) > 2 and root.parents[1].name == "plugin-data":
-        private_parents.append(root.parents[2])
-    for path in reversed(private_parents):
-        _ensure_private_directory(path)
-    _ensure_private_directory(root)
+    for path in _managed_projection_root_directories(root):
+        _ensure_private_directory(path, strict_existing_mode=True)
     lock_path = root / ".prolong.lock"
     descriptor = os.open(
         lock_path,
@@ -181,6 +463,91 @@ def projection_root_transaction(projection_root: Path):
             yield
         finally:
             fcntl_module.flock(descriptor, fcntl_module.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+def _ensure_private_lease_directory(path: Path) -> None:
+    created = False
+    try:
+        path.mkdir(mode=0o700)
+        created = True
+    except FileExistsError:
+        pass
+    if created:
+        path.chmod(0o700)
+    metadata = path.lstat()
+    owned_by_current_user = not hasattr(os, "getuid") or metadata.st_uid == os.getuid()
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or not owned_by_current_user
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise RuntimeError(f"Refusing unsafe PRO-LONG lease directory: {path}")
+
+
+def projection_lease_path(projection_root: Path, anchor: str) -> Path:
+    """Return the private lease file for one validated projection anchor."""
+    if not anchor or Path(anchor).name != anchor or anchor in {".", ".."}:
+        raise ValueError(f"unsafe PRO-LONG lease anchor: {anchor!r}")
+    return Path(projection_root) / ".leases" / anchor
+
+
+def acquire_projection_lease(
+    projection_root: Path,
+    anchor: str,
+    *,
+    exclusive: bool = False,
+    nonblocking: bool = False,
+) -> int | None:
+    """Acquire one OS-managed anchor lease while the root transaction is held."""
+    lease_path = projection_lease_path(projection_root, anchor)
+    _ensure_private_lease_directory(lease_path.parent)
+    descriptor = os.open(
+        lease_path,
+        _open_flags(os.O_RDWR, os.O_CREAT),
+        0o600,
+    )
+    try:
+        descriptor_metadata = os.fstat(descriptor)
+        _validate_regular_file(
+            descriptor_metadata,
+            expected_mode=0o600,
+            label=str(lease_path),
+        )
+        path_metadata = lease_path.lstat()
+        _validate_regular_file(
+            path_metadata,
+            expected_mode=0o600,
+            label=str(lease_path),
+        )
+        if (
+            descriptor_metadata.st_dev != path_metadata.st_dev
+            or descriptor_metadata.st_ino != path_metadata.st_ino
+        ):
+            raise RuntimeError(f"Refusing replaced PRO-LONG lease: {lease_path}")
+        fcntl_module = importlib.import_module("fcntl")
+        operation = fcntl_module.LOCK_EX if exclusive else fcntl_module.LOCK_SH
+        if nonblocking:
+            operation |= fcntl_module.LOCK_NB
+        try:
+            fcntl_module.flock(descriptor, operation)
+        except BlockingIOError:
+            if nonblocking:
+                os.close(descriptor)
+                return None
+            raise
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def release_projection_lease(descriptor: int) -> None:
+    """Release a controller lease; process death provides the same release guarantee."""
+    try:
+        fcntl_module = importlib.import_module("fcntl")
+        fcntl_module.flock(descriptor, fcntl_module.LOCK_UN)
     finally:
         os.close(descriptor)
 
@@ -229,6 +596,19 @@ class ProjectionStore:
             self.log_path,
             allow_private_writable=True,
         )
+        if (
+            self._expected_signature is None
+            and actual_signature is not None
+            and actual_signature.mode == 0o400
+        ):
+            try:
+                self._adopt_for_cleanup_locked()
+            except RuntimeError:
+                pass
+            actual_signature = _read_signature(
+                self.log_path,
+                allow_private_writable=True,
+            )
         if (
             not force_rebuild
             and isinstance(records, tuple)
@@ -308,8 +688,133 @@ class ProjectionStore:
         with self.transaction():
             self._cleanup_locked()
 
+    def adopt_for_cleanup(
+        self,
+        *,
+        allow_append_refresh: bool = False,
+        _process_lock_held: bool = False,
+    ) -> None:
+        """Bind an inherited valid projection read-only before secure cleanup."""
+        if _process_lock_held:
+            with self._lock:
+                self._ensure_private_directories()
+                self._adopt_for_cleanup_locked(
+                    allow_append_refresh=allow_append_refresh,
+                )
+            return
+        with self.transaction():
+            self._adopt_for_cleanup_locked(
+                allow_append_refresh=allow_append_refresh,
+            )
+
+    def _adopt_for_cleanup_locked(self, *, allow_append_refresh: bool = False) -> None:
+        previous_signature = self._expected_signature
+        previous_records = self._records
+        if previous_signature is not None and not allow_append_refresh:
+            return
+        if previous_signature is not None:
+            actual_signature = _read_signature(
+                self.log_path,
+                allow_private_writable=True,
+            )
+            if actual_signature == previous_signature:
+                return
+        try:
+            descriptor = os.open(self.log_path, _open_flags(os.O_RDONLY))
+        except FileNotFoundError:
+            if previous_signature is not None:
+                raise RuntimeError(
+                    f"Refusing changed PRO-LONG projection: {self.log_path}"
+                ) from None
+            self._records = ()
+            self._source_records = None
+            return
+        except OSError as error:
+            raise RuntimeError(
+                f"Refusing unsafe PRO-LONG log: {self.log_path}"
+            ) from error
+        try:
+            metadata = os.fstat(descriptor)
+            mode = stat.S_IMODE(metadata.st_mode)
+            if mode not in {0o400, 0o600}:
+                raise RuntimeError(
+                    f"Refusing invalid PRO-LONG projection: {self.log_path}"
+                )
+            _validate_regular_file(
+                metadata,
+                expected_mode=mode,
+                label=str(self.log_path),
+            )
+            expected_signature = _signature(metadata)
+            path_metadata = self.log_path.lstat()
+            _validate_regular_file(
+                path_metadata,
+                expected_mode=mode,
+                label=str(self.log_path),
+            )
+            if (
+                path_metadata.st_dev != metadata.st_dev
+                or path_metadata.st_ino != metadata.st_ino
+            ):
+                raise RuntimeError(
+                    f"Refusing replaced PRO-LONG projection: {self.log_path}"
+                )
+            with os.fdopen(os.dup(descriptor), "rb") as stream:
+                payload = stream.read()
+            if _signature(os.fstat(descriptor)) != expected_signature:
+                raise RuntimeError(
+                    f"Refusing changed PRO-LONG projection: {self.log_path}"
+                )
+            final_path_signature = _signature(self.log_path.lstat())
+            if final_path_signature != expected_signature:
+                raise RuntimeError(
+                    f"Refusing changed PRO-LONG projection: {self.log_path}"
+                )
+        finally:
+            os.close(descriptor)
+
+        try:
+            if payload and not payload.endswith(b"\n"):
+                raise ValueError("projection lacks a final newline")
+            serialized: list[str] = []
+            parsed_records: list[dict[str, Any]] = []
+            for raw_line in payload.splitlines():
+                line = raw_line.decode("utf-8")
+                record = json.loads(line)
+                if not _valid_projection_record(record):
+                    raise ValueError("projection has an unsupported record")
+                if _serialize(record) != line:
+                    raise ValueError("projection record is not canonical JSON")
+                serialized.append(line)
+                parsed_records.append(record)
+            records = tuple(serialized)
+            if not _valid_projection_records(parsed_records):
+                raise ValueError("projection records are incoherent")
+            if _jsonl(records) != payload:
+                raise ValueError("projection is not canonical JSONL")
+            if previous_signature is not None and (
+                len(records) <= len(previous_records)
+                or records[: len(previous_records)] != previous_records
+            ):
+                raise ValueError("projection is not an append-only extension")
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+            raise RuntimeError(
+                f"Refusing invalid PRO-LONG projection: {self.log_path}"
+            ) from error
+
+        self._records = records
+        self._source_records = None
+        self._expected_signature = expected_signature
+
     def _cleanup_locked(self) -> None:
+        _ensure_private_directory(self.directory_path)
+        temporary_paths = self._validated_private_temporary_files()
         actual_signature = self._validated_cleanup_signature()
+        self._remove_private_temporary_files(temporary_paths)
+        if self._validated_private_temporary_files():
+            raise RuntimeError(
+                f"Refusing changed PRO-LONG cleanup artifacts: {self.directory_path}"
+            )
         if actual_signature is not None:
             deletion_signature = self._validated_cleanup_signature()
             if deletion_signature != actual_signature:
@@ -320,20 +825,21 @@ class ProjectionStore:
                 self.log_path,
                 actual_signature,
                 expected_payload=_jsonl(self._records),
+                before_unlink=self._require_only_quarantined_log,
                 error_message=(
                     f"Refusing to remove changed PRO-LONG log: {self.log_path}"
                 ),
             )
         try:
-            _ensure_private_directory(self.directory_path)
             self.directory_path.rmdir()
         except FileNotFoundError:
             pass
         except OSError as error:
             if error.errno != errno.ENOTEMPTY:
                 raise
-            self._remove_private_temporary_files()
-            self.directory_path.rmdir()
+            raise RuntimeError(
+                f"Refusing changed PRO-LONG cleanup artifacts: {self.directory_path}"
+            ) from error
         self._records = ()
         self._source_records = None
         self._expected_signature = None
@@ -388,6 +894,7 @@ class ProjectionStore:
         expected_signature: FileSignature,
         *,
         expected_payload: bytes | None = None,
+        before_unlink: Callable[[Path], None] | None = None,
         error_message: str,
         allow_missing: bool = False,
     ) -> None:
@@ -445,6 +952,15 @@ class ProjectionStore:
                 except FileNotFoundError:
                     os.replace(quarantine_path, path)
                 raise RuntimeError(error_message) from error
+            if before_unlink is not None:
+                try:
+                    before_unlink(quarantine_path)
+                except Exception as error:
+                    try:
+                        path.lstat()
+                    except FileNotFoundError:
+                        os.replace(quarantine_path, path)
+                    raise RuntimeError(error_message) from error
             quarantine_path.unlink()
         finally:
             if not captured:
@@ -453,9 +969,20 @@ class ProjectionStore:
                 except FileNotFoundError:
                     pass
 
-    def _remove_private_temporary_files(self) -> None:
+    def _require_only_quarantined_log(self, quarantine_path: Path) -> None:
+        for path in self.directory_path.iterdir():
+            if path != quarantine_path:
+                raise RuntimeError(
+                    f"Refusing changed PRO-LONG cleanup artifacts: {path}"
+                )
+
+    def _validated_private_temporary_files(
+        self,
+    ) -> tuple[tuple[Path, FileSignature], ...]:
         temporary_paths: list[tuple[Path, FileSignature]] = []
         for path in self.directory_path.iterdir():
+            if path == self.log_path:
+                continue
             trajectory_middle = path.name.removeprefix(".trajectory-").removesuffix(
                 ".tmp"
             )
@@ -486,6 +1013,14 @@ class ProjectionStore:
                 label=str(path),
             )
             temporary_paths.append((path, _signature(metadata)))
+        return tuple(temporary_paths)
+
+    def _remove_private_temporary_files(
+        self,
+        temporary_paths: Sequence[tuple[Path, FileSignature]] | None = None,
+    ) -> None:
+        if temporary_paths is None:
+            temporary_paths = self._validated_private_temporary_files()
         for path, expected_signature in temporary_paths:
             try:
                 metadata = path.lstat()
@@ -519,15 +1054,8 @@ class ProjectionStore:
                 pass
 
     def _ensure_private_directories(self) -> None:
-        private_parents = list(self.directory_path.parents[:3])
-        if (
-            len(self.directory_path.parents) > 3
-            and self.directory_path.parents[2].name == "plugin-data"
-        ):
-            private_parents.append(self.directory_path.parents[3])
-        for path in reversed(private_parents):
-            _ensure_private_directory(path)
-        _ensure_private_directory(self.directory_path)
+        for path in _managed_store_directories(self.directory_path):
+            _ensure_private_directory(path, strict_existing_mode=True)
 
     def _acquire_process_lock(self) -> tuple[int, Any]:
         descriptor = os.open(

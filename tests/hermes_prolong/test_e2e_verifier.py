@@ -125,6 +125,105 @@ class E2EVerifierTests(unittest.TestCase):
                 "unknown",
             )
 
+    def test_assistant_selection_ignores_inactive_or_compacted_rows(self) -> None:
+        module = load_verifier()
+        inactive: dict[str, Any] = {
+            "id": 2,
+            "role": "assistant",
+            "content": "RECOVERED",
+            "active": 0,
+            "compacted": 1,
+        }
+
+        def check_once(
+            _child: object,
+            _output: object,
+            predicate: Any,
+            **_kwargs: Any,
+        ) -> Any:
+            return predicate()
+
+        with (
+            unittest.mock.patch.object(module, "message_rows", return_value=[inactive]),
+            unittest.mock.patch.object(module, "wait_for", side_effect=check_once),
+        ):
+            self.assertIsNone(
+                module.wait_for_assistant(
+                    object(),
+                    deque(),
+                    Path("/state.db"),
+                    "s1",
+                    1,
+                    "RECOVERED",
+                )
+            )
+
+        active = {**inactive, "active": 1, "compacted": 0}
+        with (
+            unittest.mock.patch.object(module, "message_rows", return_value=[active]),
+            unittest.mock.patch.object(module, "wait_for", side_effect=check_once),
+        ):
+            self.assertEqual(
+                module.wait_for_assistant(
+                    object(),
+                    deque(),
+                    Path("/state.db"),
+                    "s1",
+                    1,
+                    "RECOVERED",
+                ),
+                active,
+            )
+
+    def test_filler_phase_audits_every_assistant_row_for_tool_calls(self) -> None:
+        module = load_verifier()
+        terminal_row = {
+            "id": 3,
+            "role": "assistant",
+            "tool_calls": None,
+        }
+        duplicate_call = '[{"name":"write_file","name":"read_file","arguments":"{}"}]'
+        for malformed in ("{", {}, duplicate_call):
+            with (
+                self.subTest(malformed=malformed),
+                self.assertRaisesRegex(AssertionError, "tool_calls"),
+            ):
+                module.require_tool_free_phase(
+                    [
+                        {
+                            "id": 2,
+                            "role": "assistant",
+                            "tool_calls": malformed,
+                        },
+                        terminal_row,
+                    ],
+                    after_id=1,
+                    through_id=3,
+                    label="Filler 1",
+                )
+
+        with self.assertRaisesRegex(AssertionError, "tool evidence"):
+            module.require_tool_free_phase(
+                [
+                    {
+                        "id": 2,
+                        "role": "tool",
+                        "tool_call_id": "call-filler",
+                    },
+                    terminal_row,
+                ],
+                after_id=1,
+                through_id=3,
+                label="Filler 1",
+            )
+
+        module.require_tool_free_phase(
+            [terminal_row],
+            after_id=1,
+            through_id=3,
+            label="Filler 1",
+        )
+
     def test_locate_projection_raises_when_multiple_plugins_match(self) -> None:
         module = load_verifier()
         with tempfile.TemporaryDirectory() as directory:
@@ -297,6 +396,7 @@ class E2EVerifierTests(unittest.TestCase):
                     "error": "blocked",
                 },
             },
+            {"ok": 0, "total_count": 1, "matches_text": "PLG_NONCE_test"},
             {"success": True, "data": {"value": "PLG_NONCE_test"}},
         )
         for payload in rejected:
@@ -312,6 +412,503 @@ class E2EVerifierTests(unittest.TestCase):
                         final_message_id=13,
                     )
                 )
+
+    def test_tool_result_rejects_boolean_counts(self) -> None:
+        module = load_verifier()
+        result = self.recovery_result(
+            12,
+            "call-1",
+            json.dumps({"matches_text": "PLG_NONCE_test", "total_count": True}),
+        )
+        self.assertFalse(
+            module.is_successful_tool_result(
+                result,
+                tool_name="search_files",
+                nonce="PLG_NONCE_test",
+                call_id="call-1",
+                call_message_id=11,
+                final_message_id=13,
+            )
+        )
+        result["content"] = json.dumps(
+            {"content": "1|PLG_NONCE_test", "total_lines": True}
+        )
+        self.assertFalse(
+            module.is_successful_tool_result(
+                result,
+                tool_name="read_file",
+                nonce="PLG_NONCE_test",
+                call_id="call-1",
+                call_message_id=11,
+                final_message_id=13,
+            )
+        )
+
+    def test_tool_result_rejects_failed_exit_codes(self) -> None:
+        module = load_verifier()
+        for content in (
+            {
+                "exit_code": 1,
+                "matches_text": "PLG_NONCE_test",
+                "total_count": 1,
+            },
+            {
+                "data": {
+                    "exit_code": 1,
+                    "matches_text": "PLG_NONCE_test",
+                    "total_count": 1,
+                },
+                "success": True,
+            },
+        ):
+            result = self.recovery_result(12, "call-1", json.dumps(content))
+            with self.subTest(content=content):
+                self.assertFalse(
+                    module.is_successful_tool_result(
+                        result,
+                        tool_name="search_files",
+                        nonce="PLG_NONCE_test",
+                        call_id="call-1",
+                        call_message_id=11,
+                        final_message_id=13,
+                    )
+                )
+
+    def test_recovery_tool_calls_reject_malformed_payloads(self) -> None:
+        module = load_verifier()
+        function = {
+            "name": "search_files",
+            "arguments": {"path": "/tmp/prolong/trajectory.jsonl"},
+        }
+        codex_call = {
+            "call_id": "call-1",
+            "function": function,
+            "id": "call-1",
+            "response_item_id": "fc-1",
+            "type": "function",
+        }
+        self.assertEqual(
+            module.require_recovery_tool_calls({"tool_calls": [codex_call]}),
+            [codex_call],
+        )
+        malformed: tuple[Any, ...] = (
+            "{",
+            {},
+            [None],
+            ["not-a-call"],
+            '[{"id":"first","id":"second","type":"function",'
+            '"function":{"name":"search_files","arguments":{}}}]',
+            [{"id": True, "type": "function", "function": function}],
+            [{"id": "call-1", "type": "not-function", "function": function}],
+            [
+                {
+                    "extra": "unsupported",
+                    "id": "call-1",
+                    "type": "function",
+                    "function": function,
+                }
+            ],
+            [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "search_files",
+                        "arguments": '{"path":NaN}',
+                    },
+                }
+            ],
+            [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "search_files",
+                        "arguments": '{"path":"/wrong","path":"/expected"}',
+                    },
+                }
+            ],
+            [{**codex_call, "id": "different"}],
+            [{**codex_call, "response_item_id": True}],
+        )
+        for tool_calls in malformed:
+            with (
+                self.subTest(tool_calls=tool_calls),
+                self.assertRaisesRegex(AssertionError, "tool_calls"),
+            ):
+                module.require_recovery_tool_calls({"tool_calls": tool_calls})
+        self.assertEqual(module.require_recovery_tool_calls({"tool_calls": None}), [])
+        self.assertEqual(module.require_recovery_tool_calls({"tool_calls": "[]"}), [])
+
+    def test_seed_tool_path_requires_the_exact_persisted_hermes_shape(self) -> None:
+        module = load_verifier()
+        projection = Path("/tmp/prolong/trajectory.jsonl")
+        call: dict[str, Any] = {
+            "name": "write_file",
+            "arguments": json.dumps({"path": str(projection)}),
+        }
+
+        self.assertEqual(module.exact_seed_tool_path(call, projection), projection)
+        codex_call: dict[str, Any] = {
+            "call_id": "call-seed",
+            "function": {
+                "arguments": call["arguments"],
+                "name": "write_file",
+            },
+            "id": "call-seed",
+            "response_item_id": "fc-seed",
+            "type": "function",
+        }
+        self.assertEqual(
+            module.exact_seed_tool_path(codex_call, projection),
+            projection,
+        )
+        for malformed in (
+            {**call, "extra": True},
+            {"name": True, "arguments": call["arguments"]},
+            {
+                "name": "write_file",
+                "arguments": '{"path":"/wrong","path":"' + str(projection) + '"}',
+            },
+            {**codex_call, "id": "different"},
+            {**codex_call, "response_item_id": True},
+        ):
+            with self.subTest(malformed=malformed):
+                with self.assertRaisesRegex(AssertionError, "[Ss]eed tool call"):
+                    module.exact_seed_tool_path(malformed, projection)
+
+        duplicate_outer_call = (
+            '[{"name":"write_file","name":"read_file","arguments":'
+            + json.dumps(json.dumps({"path": str(projection)}))
+            + "}]"
+        )
+        with self.assertRaisesRegex(AssertionError, "malformed JSON"):
+            module.extract_tool_calls({"tool_calls": duplicate_outer_call})
+
+    def test_tool_result_rejects_boolean_row_and_call_ids(self) -> None:
+        module = load_verifier()
+        content = json.dumps({"matches_text": "PLG_NONCE_test", "total_count": 1})
+        boolean_call_id = self.recovery_result(12, "call-1", content)
+        boolean_call_id["tool_call_id"] = True
+        self.assertFalse(
+            module.is_successful_tool_result(
+                boolean_call_id,
+                tool_name="search_files",
+                nonce="PLG_NONCE_test",
+                call_id="True",
+                call_message_id=11,
+                final_message_id=13,
+            )
+        )
+        boolean_row_id = self.recovery_result(True, "call-1", content)
+        self.assertFalse(
+            module.is_successful_tool_result(
+                boolean_row_id,
+                tool_name="search_files",
+                nonce="PLG_NONCE_test",
+                call_id="call-1",
+                call_message_id=0,
+                final_message_id=2,
+            )
+        )
+
+    def test_seed_evidence_rejects_same_id_result_outside_ordered_phase(self) -> None:
+        module = load_verifier()
+        seed_source = Path("/tmp/prolong-seed.txt")
+        nonce = "PLG_NONCE_test"
+        call_row = {
+            "id": 10,
+            "role": "assistant",
+            "active": True,
+            "compacted": False,
+        }
+        call = {
+            "name": "read_file",
+            "arguments": json.dumps({"path": str(seed_source)}),
+        }
+        failed_before_call = self.recovery_result(
+            9,
+            "call-seed",
+            json.dumps({"error": "failed", "content": nonce, "total_lines": 1}),
+        )
+        successful_result = self.recovery_result(
+            11,
+            "call-seed",
+            json.dumps({"content": nonce, "total_lines": 1}),
+        )
+
+        with self.assertRaisesRegex(AssertionError, "exactly one tool result"):
+            module.require_seed_tool_evidence(
+                [failed_before_call, successful_result],
+                call_row=call_row,
+                call=call,
+                seed_source=seed_source,
+                nonce=nonce,
+                final_message_id=12,
+            )
+
+        false_claim = {
+            "id": 13,
+            "role": "user",
+            "tool_call_id": "call-seed",
+            "content": "not a result",
+            "active": 1,
+            "compacted": 0,
+        }
+        with self.assertRaisesRegex(AssertionError, "claiming the seed call ID"):
+            module.require_seed_tool_evidence(
+                [successful_result, false_claim],
+                call_row=call_row,
+                call=call,
+                seed_source=seed_source,
+                nonce=nonce,
+                final_message_id=12,
+            )
+
+        self.assertEqual(
+            module.require_seed_tool_evidence(
+                [successful_result],
+                call_row=call_row,
+                call=call,
+                seed_source=seed_source,
+                nonce=nonce,
+                final_message_id=12,
+            ),
+            successful_result,
+        )
+
+    def test_recovery_evidence_rejects_failed_result_before_success(self) -> None:
+        module = load_verifier()
+        projection = Path("/tmp/prolong/root/trajectory.jsonl")
+        nonce = "PLG_NONCE_test"
+        calls = [
+            self.recovery_call(10, "call-search", "search_files", projection),
+            self.recovery_call(12, "call-read", "read_file", projection),
+        ]
+        rows = [
+            self.recovery_result(
+                11,
+                "call-search",
+                json.dumps(
+                    {
+                        "success": False,
+                        "data": {"total_count": 1, "matches_text": nonce},
+                        "error": "blocked",
+                    }
+                ),
+            ),
+            self.recovery_result(13, "call-read", f"44|MARKER={nonce}"),
+        ]
+
+        with self.assertRaisesRegex(AssertionError, "unsuccessful or malformed"):
+            module.require_recovery_tool_evidence(
+                rows,
+                calls,
+                projection=projection,
+                nonce=nonce,
+                final_message_id=14,
+            )
+
+    def test_recovery_evidence_rejects_inactive_or_compacted_call_rows(self) -> None:
+        module = load_verifier()
+        projection = Path("/tmp/prolong/root/trajectory.jsonl")
+        nonce = "PLG_NONCE_test"
+        for active, compacted in ((False, False), (True, True), (0, 0), (1, 1)):
+            call_row, call = self.recovery_call(
+                10,
+                "call-search",
+                "search_files",
+                projection,
+            )
+            call_row["active"] = active
+            call_row["compacted"] = compacted
+            with (
+                self.subTest(active=active, compacted=compacted),
+                self.assertRaisesRegex(AssertionError, "inactive or compacted"),
+            ):
+                module.require_recovery_tool_evidence(
+                    [
+                        self.recovery_result(
+                            11,
+                            "call-search",
+                            json.dumps({"matches_text": nonce, "total_count": 1}),
+                        )
+                    ],
+                    [(call_row, call)],
+                    projection=projection,
+                    nonce=nonce,
+                    final_message_id=12,
+                )
+
+    def test_recovery_evidence_rejects_malformed_result_before_success(self) -> None:
+        module = load_verifier()
+        projection = Path("/tmp/prolong/root/trajectory.jsonl")
+        nonce = "PLG_NONCE_test"
+        calls = [
+            self.recovery_call(10, "call-read", "read_file", projection),
+            self.recovery_call(12, "call-search", "search_files", projection),
+        ]
+        rows = [
+            self.recovery_result(11, "call-read", json.dumps({"content": nonce})),
+            self.recovery_result(
+                13,
+                "call-search",
+                json.dumps({"total_count": 1, "matches_text": nonce}),
+            ),
+        ]
+
+        with self.assertRaisesRegex(AssertionError, "unsuccessful or malformed"):
+            module.require_recovery_tool_evidence(
+                rows,
+                calls,
+                projection=projection,
+                nonce=nonce,
+                final_message_id=14,
+            )
+
+    def test_recovery_evidence_rejects_wrong_path_before_success(self) -> None:
+        module = load_verifier()
+        projection = Path("/tmp/prolong/root/trajectory.jsonl")
+        nonce = "PLG_NONCE_test"
+        calls = [
+            self.recovery_call(
+                10,
+                "call-search",
+                "search_files",
+                Path("/tmp/prolong/root/../root/trajectory.jsonl"),
+            ),
+            self.recovery_call(12, "call-read", "read_file", projection),
+        ]
+        rows = [
+            self.recovery_result(
+                11,
+                "call-search",
+                json.dumps({"total_count": 1, "matches_text": nonce}),
+            ),
+            self.recovery_result(13, "call-read", f"44|MARKER={nonce}"),
+        ]
+
+        with self.assertRaisesRegex(AssertionError, "exact advertised path"):
+            module.require_recovery_tool_evidence(
+                rows,
+                calls,
+                projection=projection,
+                nonce=nonce,
+                final_message_id=14,
+            )
+
+    def test_recovery_evidence_rejects_out_of_phase_or_unmatched_results(self) -> None:
+        module = load_verifier()
+        projection = Path("/tmp/prolong/root/trajectory.jsonl")
+        nonce = "PLG_NONCE_test"
+        calls = [self.recovery_call(10, "call-search", "search_files", projection)]
+        success = self.recovery_result(
+            11,
+            "call-search",
+            json.dumps({"total_count": 1, "matches_text": nonce}),
+        )
+        extras = (
+            self.recovery_result(9, "call-search", '{"error":"failed"}'),
+            self.recovery_result(21, "call-search", '{"error":"failed"}'),
+            self.recovery_result(12, "unknown-call", '{"error":"failed"}'),
+        )
+        for extra in extras:
+            with (
+                self.subTest(extra=extra),
+                self.assertRaisesRegex(AssertionError, "result"),
+            ):
+                module.require_recovery_tool_evidence(
+                    [success, extra],
+                    calls,
+                    projection=projection,
+                    nonce=nonce,
+                    recovery_user_id=5,
+                    final_message_id=20,
+                )
+
+    def test_recovery_evidence_accepts_successful_ordered_calls(self) -> None:
+        module = load_verifier()
+        projection = Path("/tmp/prolong/root/trajectory.jsonl")
+        nonce = "PLG_NONCE_test"
+        calls = [
+            self.recovery_call(10, "call-search", "search_files", projection),
+            self.recovery_call(12, "call-read", "read_file", projection),
+        ]
+        rows = [
+            self.recovery_result(
+                11,
+                "call-search",
+                json.dumps({"total_count": 1, "matches_text": nonce}),
+            ),
+            self.recovery_result(13, "call-read", f"44|MARKER={nonce}"),
+        ]
+
+        evidence = module.require_recovery_tool_evidence(
+            rows,
+            calls,
+            projection=projection,
+            nonce=nonce,
+            final_message_id=14,
+        )
+
+        self.assertEqual(
+            [(call["id"], result["id"]) for _, call, result in evidence],
+            [("call-search", 11), ("call-read", 13)],
+        )
+
+    @staticmethod
+    def recovery_call(
+        row_id: int,
+        call_id: str,
+        tool_name: str,
+        path: Path,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        return (
+            {
+                "id": row_id,
+                "role": "assistant",
+                "active": True,
+                "compacted": False,
+            },
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "arguments": {"path": str(path)},
+                },
+            },
+        )
+
+    @staticmethod
+    def recovery_result(row_id: int, call_id: str, content: str) -> dict[str, Any]:
+        return {
+            "id": row_id,
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": content,
+            "active": True,
+            "compacted": False,
+        }
+
+    def test_projection_idle_requires_a_private_read_only_regular_file(self) -> None:
+        module = load_verifier()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            projection = root / "trajectory.jsonl"
+            projection.write_text("{}\n", encoding="utf-8")
+            projection.chmod(0o600)
+            self.assertFalse(module.projection_is_idle(projection))
+            projection.chmod(0o400)
+            self.assertTrue(module.projection_is_idle(projection))
+            sibling = root / "linked.jsonl"
+            os.link(projection, sibling)
+            self.assertFalse(module.projection_is_idle(projection))
+            sibling.unlink()
+            self.assertTrue(module.projection_is_idle(projection))
+            symlink = root / "symlink.jsonl"
+            symlink.symlink_to(projection)
+            self.assertFalse(module.projection_is_idle(symlink))
 
     def test_receipt_write_is_exclusive_private_and_cleanup_is_verified(self) -> None:
         module = load_verifier()
@@ -412,14 +1009,14 @@ class E2EVerifierTests(unittest.TestCase):
             def spawn(*args, **kwargs):
                 raise OSError("pty unavailable")
 
-        setattr(module, "pexpect", FailingPexpect)
-        with self.assertRaisesRegex(OSError, "pty unavailable"):
-            module.spawn_hermes(
-                Path("/hermes"),
-                Path("/repo"),
-                {},
-                evidence,
-            )
+        with unittest.mock.patch.object(module, "pexpect", FailingPexpect, create=True):
+            with self.assertRaisesRegex(OSError, "pty unavailable"):
+                module.spawn_hermes(
+                    Path("/hermes"),
+                    Path("/repo"),
+                    {},
+                    evidence,
+                )
 
         self.assertEqual(evidence["status"], "failed")
         self.assertEqual(evidence["error_type"], "OSError")

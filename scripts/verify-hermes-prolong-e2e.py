@@ -237,6 +237,34 @@ def parse_json(value: Any, default: Any) -> Any:
         return default
 
 
+def parse_strict_json(value: Any, *, label: str) -> Any:
+    def reject_constant(constant: str) -> None:
+        raise ValueError(f"non-finite JSON constant: {constant}")
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON key: {key}")
+            result[key] = item
+        return result
+
+    try:
+        parsed = (
+            json.loads(
+                value,
+                object_pairs_hook=unique_object,
+                parse_constant=reject_constant,
+            )
+            if isinstance(value, str)
+            else value
+        )
+        json.dumps(parsed, allow_nan=False)
+    except (json.JSONDecodeError, TypeError, ValueError) as error:
+        raise AssertionError(f"{label} contained malformed JSON") from error
+    return parsed
+
+
 def message_rows(database_path: Path, session_id: str) -> list[dict[str, Any]]:
     with sqlite3.connect(database_path, timeout=30) as connection:
         connection.row_factory = sqlite3.Row
@@ -343,7 +371,10 @@ def wait_for_assistant(
         for row in message_rows(database_path, session_id):
             if int(row["id"]) <= after_id or row.get("role") != "assistant":
                 continue
-            if row_text(row.get("content")).strip() == expected:
+            if (
+                is_active_uncompacted(row)
+                and row_text(row.get("content")).strip() == expected
+            ):
                 return row
         return None
 
@@ -367,6 +398,67 @@ def locate_projection(home: Path, session_id: str) -> Path | None:
     return candidates[0] if candidates else None
 
 
+def exact_seed_tool_path(call: dict[str, Any], seed_source: Path) -> Path:
+    """Validate Hermes' canonical persisted seed-call representation."""
+    if set(call) == {"arguments", "name"}:
+        if type(call.get("name")) is not str or not call["name"]:
+            raise AssertionError(
+                "Seed tool call had an invalid persisted shape; "
+                f"keys={sorted(str(key) for key in call)}"
+            )
+        raw_arguments = call.get("arguments")
+    elif set(call) == {"function", "id", "type"}:
+        try:
+            arguments = require_recovery_call_arguments(call)
+        except AssertionError as error:
+            raise AssertionError(
+                "Seed tool call had an invalid persisted shape"
+            ) from error
+        raw_arguments = arguments
+    elif set(call) == {"call_id", "function", "id", "response_item_id", "type"}:
+        call_id = call.get("call_id")
+        response_item_id = call.get("response_item_id")
+        if (
+            type(call_id) is not str
+            or not call_id
+            or call.get("id") != call_id
+            or type(response_item_id) is not str
+            or not response_item_id
+        ):
+            raise AssertionError("Seed tool call had invalid Codex identity metadata")
+        try:
+            arguments = require_recovery_call_arguments(
+                {
+                    "function": call["function"],
+                    "id": call_id,
+                    "type": call["type"],
+                }
+            )
+        except AssertionError as error:
+            raise AssertionError(
+                "Seed tool call had an invalid persisted shape"
+            ) from error
+        raw_arguments = arguments
+    else:
+        raise AssertionError(
+            "Seed tool call had an invalid persisted shape; "
+            f"keys={sorted(str(key) for key in call)}"
+        )
+    arguments = parse_strict_json(
+        raw_arguments,
+        label="seed tool call arguments",
+    )
+    if not isinstance(arguments, dict):
+        raise AssertionError("Seed tool call arguments were not an object")
+    raw_path = arguments.get("path")
+    if type(raw_path) is not str or raw_path != str(seed_source):
+        raise AssertionError("Seed tool call did not use the exact source path")
+    candidate = Path(raw_path)
+    if not candidate.is_absolute() or candidate != seed_source:
+        raise AssertionError("Seed tool call path was not the exact absolute source")
+    return candidate
+
+
 def read_projection(path: Path) -> list[dict[str, Any]]:
     return [
         json.loads(line)
@@ -376,8 +468,46 @@ def read_projection(path: Path) -> list[dict[str, Any]]:
 
 
 def extract_tool_calls(row: dict[str, Any]) -> list[dict[str, Any]]:
-    calls = parse_json(row.get("tool_calls"), [])
-    return calls if isinstance(calls, list) else []
+    raw_calls = row.get("tool_calls")
+    if raw_calls in (None, ""):
+        return []
+    calls = parse_strict_json(raw_calls, label="Assistant tool_calls")
+    if not isinstance(calls, list) or any(not isinstance(call, dict) for call in calls):
+        raise AssertionError("Assistant tool_calls were malformed")
+    return calls
+
+
+def require_tool_free_phase(
+    rows: list[dict[str, Any]],
+    *,
+    after_id: int,
+    through_id: int,
+    label: str,
+) -> None:
+    if type(after_id) is not int or type(through_id) is not int:
+        raise AssertionError(f"{label} had malformed phase boundaries")
+    for row in rows:
+        row_id = row.get("id")
+        if type(row_id) is not int:
+            raise AssertionError(f"{label} had a malformed row ID")
+        if not after_id < row_id <= through_id:
+            continue
+        if row.get("role") == "assistant" and extract_tool_calls(row):
+            raise AssertionError(f"{label} assistant called a tool")
+        if row.get("role") == "tool" or row.get("tool_call_id") not in (None, ""):
+            raise AssertionError(f"{label} contained unexpected tool evidence")
+
+
+def require_recovery_tool_calls(row: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_calls = row.get("tool_calls")
+    if raw_calls in (None, ""):
+        return []
+    calls = parse_strict_json(raw_calls, label="Recovery assistant tool_calls")
+    if not isinstance(calls, list) or any(not isinstance(call, dict) for call in calls):
+        raise AssertionError("Recovery assistant tool_calls were malformed")
+    for call in calls:
+        require_recovery_call_arguments(call)
+    return calls
 
 
 def call_name(call: dict[str, Any]) -> str:
@@ -400,6 +530,49 @@ def call_arguments(call: dict[str, Any]) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def require_recovery_call_arguments(call: dict[str, Any]) -> dict[str, Any]:
+    call_keys = set(call)
+    standard_keys = {"id", "type", "function"}
+    codex_keys = {"call_id", "function", "id", "response_item_id", "type"}
+    if call_keys == standard_keys:
+        call_id = call.get("id")
+    elif call_keys == codex_keys:
+        call_id = call.get("call_id")
+        response_item_id = call.get("response_item_id")
+        if (
+            type(call_id) is not str
+            or not call_id
+            or call.get("id") != call_id
+            or type(response_item_id) is not str
+            or not response_item_id
+        ):
+            raise AssertionError(
+                "Recovery assistant tool_calls had invalid Codex identity metadata"
+            )
+    else:
+        raise AssertionError("Recovery assistant tool_calls had an invalid call shape")
+    if type(call_id) is not str or not call_id:
+        raise AssertionError("Recovery assistant tool_calls had an invalid call ID")
+    if call.get("type") != "function":
+        raise AssertionError("Recovery assistant tool_calls had an invalid call type")
+    function = call.get("function")
+    if not isinstance(function, dict) or set(function) != {"name", "arguments"}:
+        raise AssertionError("Recovery assistant tool_calls had an invalid function")
+    if type(function.get("name")) is not str or not function["name"]:
+        raise AssertionError(
+            "Recovery assistant tool_calls had an invalid function name"
+        )
+    arguments = parse_strict_json(
+        function.get("arguments"),
+        label="Recovery assistant tool_calls arguments",
+    )
+    if not isinstance(arguments, dict):
+        raise AssertionError(
+            "Recovery assistant tool_calls arguments were not an object"
+        )
+    return arguments
+
+
 def require_plugin_entry(value: Any) -> dict[str, Any]:
     if not isinstance(value, list):
         raise AssertionError("Plugin listing was not a JSON array")
@@ -417,10 +590,69 @@ def require_plugin_entry(value: Any) -> dict[str, Any]:
 
 
 def exact_tool_path(call: dict[str, Any], projection: Path) -> Path:
-    raw_path = call_arguments(call).get("path")
+    raw_path = require_recovery_call_arguments(call).get("path")
     if not isinstance(raw_path, str) or raw_path != str(projection):
         raise AssertionError("Recovery tool did not use the exact advertised path")
     return Path(raw_path)
+
+
+def is_active_uncompacted(row: dict[str, Any]) -> bool:
+    active = row.get("active")
+    compacted = row.get("compacted")
+    active_exact = active is True or (type(active) is int and active == 1)
+    compacted_exact = compacted is False or (type(compacted) is int and compacted == 0)
+    return active_exact and compacted_exact
+
+
+def require_seed_tool_evidence(
+    rows: list[dict[str, Any]],
+    *,
+    call_row: dict[str, Any],
+    call: dict[str, Any],
+    seed_source: Path,
+    nonce: str,
+    final_message_id: int,
+) -> dict[str, Any]:
+    if call_row.get("role") != "assistant" or not is_active_uncompacted(call_row):
+        raise AssertionError("Seed tool call row was inactive or compacted")
+    call_message_id = call_row.get("id")
+    if type(call_message_id) is not int or type(final_message_id) is not int:
+        raise AssertionError("Seed tool evidence had malformed row IDs")
+    if call_name(call) != "read_file":
+        raise AssertionError("Seed assistant did not issue a read_file call")
+    exact_seed_tool_path(call, seed_source)
+    seed_call_id = call.get("call_id", call.get("id"))
+    if seed_call_id is not None and (type(seed_call_id) is not str or not seed_call_id):
+        raise AssertionError("Seed read_file call had a malformed ID")
+    tool_results = [row for row in rows if row.get("role") == "tool"]
+    if len(tool_results) != 1:
+        raise AssertionError("Seed phase did not contain exactly one tool result")
+    result = tool_results[0]
+    result_id = result.get("id")
+    if type(result_id) is not int or not call_message_id < result_id < final_message_id:
+        raise AssertionError("Seed tool result was out of phase or malformed")
+    result_call_id = result.get("tool_call_id")
+    if type(result_call_id) is not str or not result_call_id:
+        raise AssertionError("Seed tool result had a malformed call ID")
+    claiming_rows = [row for row in rows if row.get("tool_call_id") == result_call_id]
+    if len(claiming_rows) != 1 or claiming_rows[0] != result:
+        raise AssertionError(
+            "Seed phase had an unexpected row claiming the seed call ID"
+        )
+    if seed_call_id is not None and seed_call_id != result_call_id:
+        raise AssertionError("Seed tool result call ID did not match the call")
+    if not is_successful_tool_result(
+        result,
+        tool_name="read_file",
+        nonce=nonce,
+        call_id=result_call_id,
+        call_message_id=call_message_id,
+        final_message_id=final_message_id,
+    ):
+        raise AssertionError(
+            "Nonce source was not preserved in one ordered successful seed result"
+        )
+    return result
 
 
 def is_successful_tool_result(
@@ -432,15 +664,29 @@ def is_successful_tool_result(
     call_message_id: int,
     final_message_id: int,
 ) -> bool:
-    if not call_id or str(row.get("tool_call_id") or "") != call_id:
+    if (
+        type(call_id) is not str
+        or not call_id
+        or type(row.get("tool_call_id")) is not str
+        or row["tool_call_id"] != call_id
+        or type(row.get("id")) is not int
+        or type(call_message_id) is not int
+        or type(final_message_id) is not int
+    ):
         return False
-    row_id = int(row.get("id") or -1)
+    row_id = row["id"]
     if not call_message_id < row_id < final_message_id:
         return False
-    if row.get("role") != "tool" or not row.get("active") or row.get("compacted"):
+    if row.get("role") != "tool" or not is_active_uncompacted(row):
         return False
     content = row.get("content")
-    parsed = parse_json(content, content)
+    if isinstance(content, str) and content.lstrip().startswith(("{", "[")):
+        try:
+            parsed = parse_strict_json(content, label="Recovery tool result")
+        except AssertionError:
+            return False
+    else:
+        parsed = content
     failure_statuses = {
         "blocked",
         "cancelled",
@@ -458,15 +704,25 @@ def is_successful_tool_result(
         if not isinstance(payload, dict):
             return False
         for candidate in (parsed, payload):
-            if candidate.get("error") not in (None, "") or candidate.get("ok") is False:
+            if candidate.get("error") not in (None, ""):
                 return False
-            if str(candidate.get("status") or "").lower() in failure_statuses:
+            if "exit_code" in candidate and (
+                type(candidate["exit_code"]) is not int or candidate["exit_code"] != 0
+            ):
+                return False
+            if "ok" in candidate and candidate["ok"] is not True:
+                return False
+            if "status" in candidate and (
+                type(candidate["status"]) is not str
+                or candidate["status"].lower()
+                not in {"completed", "ok", "success", "successful"}
+            ):
                 return False
         if tool_name == "search_files":
             evidence = payload.get("matches_text", payload.get("matches"))
             total_count = payload.get("total_count")
             return (
-                isinstance(total_count, int)
+                type(total_count) is int
                 and total_count > 0
                 and nonce in row_text(evidence)
             )
@@ -474,7 +730,7 @@ def is_successful_tool_result(
             evidence = payload.get("content")
             return (
                 isinstance(evidence, str)
-                and isinstance(payload.get("total_lines"), int)
+                and type(payload.get("total_lines")) is int
                 and payload["total_lines"] > 0
                 and nonce in evidence
             )
@@ -489,8 +745,108 @@ def is_successful_tool_result(
     )
 
 
+def require_recovery_tool_evidence(
+    rows: list[dict[str, Any]],
+    calls: list[tuple[dict[str, Any], dict[str, Any]]],
+    *,
+    projection: Path,
+    nonce: str,
+    recovery_user_id: int = 0,
+    final_message_id: int,
+) -> list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]]:
+    def exact_row_id(row: dict[str, Any]) -> int:
+        row_id = row.get("id")
+        if type(row_id) is not int:
+            raise AssertionError("Recovery tool result had a malformed row ID")
+        return row_id
+
+    call_rows_by_id: dict[str, dict[str, Any]] = {}
+    for call_row, call in calls:
+        if not is_active_uncompacted(call_row):
+            raise AssertionError("Recovery tool call row was inactive or compacted")
+        call_id = call.get("id")
+        if type(call_id) is not str or not call_id:
+            raise AssertionError("Recovery tool call had a malformed ID")
+        if call_id in call_rows_by_id:
+            raise AssertionError("Recovery tool call IDs were not unique")
+        exact_row_id(call_row)
+        call_rows_by_id[call_id] = call_row
+    matching_rows = [
+        row
+        for row in rows
+        if type(row.get("tool_call_id")) is str
+        and row["tool_call_id"] in call_rows_by_id
+    ]
+    for row in matching_rows:
+        call_id = row["tool_call_id"]
+        if (
+            row.get("role") != "tool"
+            or not exact_row_id(call_rows_by_id[call_id])
+            < exact_row_id(row)
+            < final_message_id
+        ):
+            raise AssertionError("Recovery tool result was out of phase or malformed")
+    phase_results: list[dict[str, Any]] = []
+    for row in rows:
+        if row.get("role") != "tool":
+            continue
+        row_id = exact_row_id(row)
+        if recovery_user_id < row_id < final_message_id:
+            phase_results.append(row)
+    if any(
+        type(row.get("tool_call_id")) is not str
+        or row["tool_call_id"] not in call_rows_by_id
+        for row in phase_results
+    ):
+        raise AssertionError("Unexpected recovery tool result was present")
+    evidence: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
+    for call_row, call in calls:
+        exact_tool_path(call, projection)
+        call_id = call["id"]
+        call_row_id = exact_row_id(call_row)
+        results = [
+            row
+            for row in rows
+            if row.get("role") == "tool"
+            and type(row.get("tool_call_id")) is str
+            and row["tool_call_id"] == call_id
+            and call_row_id < exact_row_id(row) < final_message_id
+        ]
+        if len(results) != 1:
+            raise AssertionError(
+                "Recovery tool call did not have exactly one ordered result"
+            )
+        result = results[0]
+        if not is_successful_tool_result(
+            result,
+            tool_name=call_name(call),
+            nonce=nonce,
+            call_id=call_id,
+            call_message_id=call_row_id,
+            final_message_id=final_message_id,
+        ):
+            raise AssertionError("Recovery tool result was unsuccessful or malformed")
+        evidence.append((call_row, call, result))
+    if not evidence:
+        raise AssertionError("No recovery tool evidence was found")
+    return evidence
+
+
+def projection_is_idle(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_uid == os.getuid()
+        and metadata.st_nlink == 1
+        and stat.S_IMODE(metadata.st_mode) == 0o400
+    )
+
+
 def verify_permissions(path: Path) -> None:
-    if stat.S_IMODE(path.stat().st_mode) != 0o400:
+    if not projection_is_idle(path):
         raise AssertionError(f"Projection mode is not 0400: {path}")
     for directory in (path.parent, path.parent.parent, path.parent.parent.parent):
         if stat.S_IMODE(directory.stat().st_mode) != 0o700:
@@ -703,32 +1059,16 @@ def main() -> int:
                 "Seed assistant did not issue exactly one read_file call"
             )
         seed_call_row, seed_call = seed_calls[0]
-        exact_tool_path(seed_call, seed_source)
-        seed_call_id = str(seed_call.get("id") or "")
-        if not seed_call_id:
-            raise AssertionError("Seed read_file call had an empty ID")
-        if (
-            sum(str(call.get("id") or "") == seed_call_id for _, call in seed_calls)
-            != 1
-        ):
-            raise AssertionError("Seed read_file call ID was not unique")
-        seed_tool_results = [
-            row
-            for row in seed_phase_rows
-            if row.get("role") == "tool"
-            and str(row.get("tool_call_id") or "") == seed_call_id
-        ]
-        if len(seed_tool_results) != 1 or not is_successful_tool_result(
-            seed_tool_results[0],
-            tool_name=call_name(seed_call),
+        seed_tool_result = require_seed_tool_evidence(
+            seed_phase_rows,
+            call_row=seed_call_row,
+            call=seed_call,
+            seed_source=seed_source,
             nonce=nonce,
-            call_id=seed_call_id,
-            call_message_id=int(seed_call_row["id"]),
             final_message_id=int(seed_assistant["id"]),
-        ):
-            raise AssertionError(
-                "Nonce source was not preserved in one ordered successful seed result"
-            )
+        )
+        seed_tool_results = [seed_tool_result]
+        seed_call_id = seed_tool_result["tool_call_id"]
         nonce_rows = [row for row in seed_phase_rows if nonce in row_text(row)]
         if [int(row["id"]) for row in nonce_rows] != [int(seed_tool_results[0]["id"])]:
             raise AssertionError("Nonce provenance was not unique to the seed result")
@@ -749,13 +1089,25 @@ def main() -> int:
                 baseline,
                 f"FILLER-{index}",
             )
-            if extract_tool_calls(response):
-                raise AssertionError(f"Filler {index} assistant called a tool")
+            require_tool_free_phase(
+                message_rows(database_path, session_id),
+                after_id=baseline,
+                through_id=int(response["id"]),
+                label=f"Filler {index}",
+            )
+
+        def initial_projection() -> Path | None:
+            candidate = locate_projection(home, session_id)
+            return (
+                candidate
+                if candidate is not None and projection_is_idle(candidate)
+                else None
+            )
 
         projection = wait_for(
             child,
             output,
-            lambda: locate_projection(home, session_id),
+            initial_projection,
             timeout=60,
             label="initial trajectory projection",
         )
@@ -837,7 +1189,8 @@ def main() -> int:
             ]
             return (
                 records
-                if any(
+                if projection_is_idle(projection)
+                and any(
                     row_text(message.get("content")).strip() == f"RECOVERED={nonce}"
                     for message in messages
                 )
@@ -876,12 +1229,16 @@ def main() -> int:
         ):
             raise AssertionError("Recovery user row was missing or leaked the nonce")
         recovery_user_id = int(recovery_users[0]["id"])
+        final_message_id = int(final["id"])
 
         calls: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for row in final_rows:
-            if int(row["id"]) <= recovery_user_id or row.get("role") != "assistant":
+            if (
+                not recovery_user_id < int(row["id"]) <= final_message_id
+                or row.get("role") != "assistant"
+            ):
                 continue
-            for call in extract_tool_calls(row):
+            for call in require_recovery_tool_calls(row):
                 calls.append((row, call))
         if not calls:
             raise AssertionError("Recovery assistant did not call a file tool")
@@ -889,63 +1246,61 @@ def main() -> int:
             call_name(call) not in {"search_files", "read_file"} for _, call in calls
         ):
             raise AssertionError("Recovery assistant called a non-read/search tool")
-        recovery_call_ids = [str(call.get("id") or "") for _, call in calls]
-        if any(not call_id for call_id in recovery_call_ids):
-            raise AssertionError("Recovery tool call had an empty ID")
+        recovery_call_ids = [call["id"] for _, call in calls]
         if len(set(recovery_call_ids)) != len(recovery_call_ids):
             raise AssertionError("Recovery tool call IDs were not unique")
         prior_call_ids = {
-            str(call.get("id") or "")
+            call["id"]
             for row in final_rows
             if int(row["id"]) <= recovery_user_id
             for call in extract_tool_calls(row)
-            if call.get("id")
+            if type(call.get("id")) is str and call["id"]
         }
         if prior_call_ids.intersection(recovery_call_ids):
             raise AssertionError("Recovery tool call ID collided with prior history")
-        for _, recovery_call in calls:
-            exact_tool_path(recovery_call, projection)
-
         if any(
-            nonce in json.dumps(call_arguments(call), ensure_ascii=False)
+            nonce
+            in json.dumps(require_recovery_call_arguments(call), ensure_ascii=False)
             for _, call in calls
         ):
             raise AssertionError("Recovery tool arguments leaked the nonce")
 
-        evidence_calls: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
-        all_tool_results: list[dict[str, Any]] = []
-        final_message_id = int(final["id"])
-        for call_row, call in calls:
-            candidate_call_id = str(call["id"])
-            candidate_results = [
-                row
-                for row in final_rows
-                if row.get("role") == "tool"
-                and str(row.get("tool_call_id") or "") == candidate_call_id
-                and int(call_row["id"]) < int(row["id"]) < final_message_id
-            ]
-            if len(candidate_results) != 1:
-                raise AssertionError(
-                    "Recovery tool call did not have exactly one ordered result"
-                )
-            result = candidate_results[0]
-            all_tool_results.append(result)
-            if is_successful_tool_result(
-                result,
-                tool_name=call_name(call),
-                nonce=nonce,
-                call_id=candidate_call_id,
-                call_message_id=int(call_row["id"]),
-                final_message_id=final_message_id,
-            ):
-                evidence_calls.append((call_row, call, result))
-        if not evidence_calls:
-            raise AssertionError(
-                "No successful ordered nonce-bearing recovery result was found"
+        evidence_calls = require_recovery_tool_evidence(
+            final_rows,
+            calls,
+            projection=projection,
+            nonce=nonce,
+            recovery_user_id=recovery_user_id,
+            final_message_id=final_message_id,
+        )
+        all_tool_results = [result for _, _, result in evidence_calls]
+        tool_attempts: list[dict[str, Any]] = []
+        for attempt_call_row, attempt_call, attempt_result in evidence_calls:
+            arguments_json = json.dumps(
+                require_recovery_call_arguments(attempt_call),
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
             )
-        call_row, call, tool_result = evidence_calls[0]
-        call_id = str(call["id"])
-        if extract_tool_calls(final):
+            result_text = row_text(attempt_result.get("content"))
+            tool_attempts.append(
+                {
+                    "tool_name": call_name(attempt_call),
+                    "tool_call_message_id": int(attempt_call_row["id"]),
+                    "tool_call_id": attempt_call["id"],
+                    "tool_call_arguments_sha256": hashlib.sha256(
+                        arguments_json.encode()
+                    ).hexdigest(),
+                    "tool_result_message_id": int(attempt_result["id"]),
+                    "tool_result_status": "successful",
+                    "tool_result_content_sha256": hashlib.sha256(
+                        result_text.encode()
+                    ).hexdigest(),
+                }
+            )
+        first_attempt = tool_attempts[0]
+        if require_recovery_tool_calls(final):
             raise AssertionError("Final recovery answer also requested a tool")
         later_assistants = [
             row
@@ -959,13 +1314,6 @@ def main() -> int:
                 "Final recovery answer preceded recovery tool evidence"
             )
 
-        call_arguments_json = json.dumps(
-            call_arguments(call),
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        tool_result_text = row_text(tool_result.get("content"))
         evidence.update(
             {
                 "status": "verified-before-shutdown",
@@ -984,17 +1332,9 @@ def main() -> int:
                 "projection_record_count": len(projected_records),
                 "projection_mode": oct(stat.S_IMODE(projection.stat().st_mode)),
                 "recovery_user_message_id": recovery_user_id,
-                "tool_name": call_name(call),
-                "tool_call_message_id": int(call_row["id"]),
-                "tool_call_id": call_id,
-                "tool_call_arguments_sha256": hashlib.sha256(
-                    call_arguments_json.encode()
-                ).hexdigest(),
-                "tool_result_message_id": int(tool_result["id"]),
-                "tool_result_status": "successful",
-                "tool_result_content_sha256": hashlib.sha256(
-                    tool_result_text.encode()
-                ).hexdigest(),
+                "tool_attempt_count": len(tool_attempts),
+                "tool_attempts": tool_attempts,
+                **first_attempt,
                 "final_message_id": final_message_id,
                 "final_answer": row_text(final.get("content")).strip(),
             }

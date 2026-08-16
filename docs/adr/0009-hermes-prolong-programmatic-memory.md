@@ -49,10 +49,21 @@ The plugin:
 8. Holds the validated process lock across lineage-anchor selection, canonical
    snapshot acquisition, and projection mutation so a delayed stale reader or a
    divergent sibling cannot overwrite another lineage.
-9. Removes anchored-lineage projections on finalization and plugin unload. Startup
-   sweeping reconciles direct canonical deletion: surviving continuations keep the
-   frozen path anchor and are rewritten; the projection is removed only when none of
-   its represented sessions remains.
+9. Holds a kernel-managed shared lease for each advertised lineage anchor. Finalize,
+   orphan cleanup, and plugin unload remove a projection only after releasing the
+   local lease and acquiring the anchor's exclusive lease, so one Hermes process
+   cannot invalidate a sibling's frozen prompt path. Unload also discovers valid
+   projections inherited from a crashed predecessor and read-only adopts their
+   descriptor-bound JSONL before deletion; it never rebuilds merely to establish a
+   cleanup baseline. A final lease holder may refresh stale local state only from a
+   canonical, structurally valid append-only extension published by a sibling.
+   Adoption also checks typed session metadata, safe parent IDs, and embedded
+   message/session identity. Cleanup prevalidates residual directory artifacts and
+   restores a captured log if the directory changes before unlink. Process death
+   releases shared leases automatically.
+10. Startup sweeping reconciles direct canonical deletion: surviving continuations
+    keep the frozen path anchor and are rewritten; the projection is removed only
+    when none of its represented sessions remains and no sibling lease is live.
 
 The path lives under the public `ctx.state.data_dir` namespace rather than inside
 the quota-bounded `ctx.state` JSON document:
@@ -86,8 +97,10 @@ of a large JSON record and making preserved evidence practically unrecoverable.
 The initial backend supports POSIX systems with `O_NOFOLLOW` and fails closed on
 unsupported platforms. It uses owner-only directories, a read-only idle log,
 regular-file/owner/link/mode checks, descriptor identity checks for append,
-full-write loops, `fsync`, same-directory atomic replacement, and a validated
-POSIX advisory lock that serializes sibling Hermes processes.
+full-write loops, `fsync`, same-directory atomic replacement, a validated POSIX
+advisory lock that serializes sibling Hermes processes, and per-anchor shared/exclusive
+`flock` leases that make lifecycle deletion safe across processes. Lease files are
+private empty coordination artifacts; the kernel releases ownership on process death.
 
 These measures are change detection and accidental-disclosure controls. They are
 not cryptographic integrity, a sandbox, secure erasure, or protection from root,

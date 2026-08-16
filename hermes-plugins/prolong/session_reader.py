@@ -21,6 +21,31 @@ _SESSION_FIELDS = (
     "compression_count",
     "rewind_count",
 )
+_MESSAGE_FIELDS = (
+    "id",
+    "session_id",
+    "role",
+    "content",
+    "tool_call_id",
+    "tool_calls",
+    "tool_name",
+    "effect_disposition",
+    "timestamp",
+    "token_count",
+    "finish_reason",
+    "reasoning",
+    "reasoning_content",
+    "reasoning_details",
+    "codex_reasoning_items",
+    "codex_message_items",
+    "platform_message_id",
+    "observed",
+    "active",
+    "compacted",
+    "api_content",
+    "display_kind",
+    "display_metadata",
+)
 _CONTENT_CHUNK_CHARS = 700
 _CONTENT_CHUNK_OVERLAP = 200
 
@@ -90,7 +115,7 @@ def _message_record(
         "record_type": "message",
         "lineage_index": lineage_index,
         "session_id": session_id,
-        "message": dict(message),
+        "message": {field: message.get(field) for field in _MESSAGE_FIELDS},
     }
 
 

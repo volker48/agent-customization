@@ -38,7 +38,10 @@ model call, and at the end of each turn. It uses the canonical database as the
 source of truth rather than hook payloads. Reset/finalization are terminal cleanup
 boundaries: finalization waits for in-flight projection work, removes the derived
 lineage, and retires that session ID from further publication until an explicit
-session-start hook.
+session-start hook. Path resolution fails open for Hermes availability, but it never
+advertises a real projection without a shared lease: if synchronization and fallback
+lease reservation both fail, the prompt receives a deliberately nonexistent
+`.unavailable/<session>/trajectory.jsonl` sentinel instead.
 
 ## Install
 
@@ -89,11 +92,15 @@ The projection duplicates persisted transcript data and may therefore contain
 secrets already present in the session. On supported POSIX systems the plugin:
 
 - creates owner-only `0700` directories;
+- requires an existing canonical Hermes home to be `0700` for both absolute and
+  relative paths, without chmodding unrelated lexical ancestors or the working directory;
 - leaves the idle JSONL at `0400`;
 - rejects symlink, hard-link, foreign-owner, non-regular, and wrong-mode logs;
 - uses `O_NOFOLLOW`, descriptor identity checks, full-write loops, `fsync`, and
   same-directory atomic replacement;
 - uses a validated POSIX advisory lock to serialize sibling Hermes processes;
+- holds an OS-managed shared lease for every advertised lineage anchor, so one
+  process cannot delete a projection still used by another;
 - detects unexpected file identity, size, time, mode, and owner changes.
 
 These controls reduce accidental disclosure and detect stale or substituted
@@ -105,7 +112,18 @@ erasure. Crashes and `SIGKILL` can leave a projection behind.
 A startup sweep reconciles direct canonical-session deletion that bypassed lifecycle
 hooks. If part of a lineage survives, PRO-LONG keeps the frozen path anchor and
 rewrites it from the surviving canonical lineage. It removes the projection only
-when no represented session remains.
+when no represented session remains and no sibling process holds its lease. Graceful
+unload also discovers valid projections inherited from a crashed predecessor and
+read-only adopts their descriptor-bound JSONL before removing them under the anchor's
+exclusive lease. The last lease holder may refresh a stale local cleanup baseline
+only when the inherited projection is a canonical, structurally valid append-only
+extension. Adoption enforces typed session counters/timestamps, safe parent IDs, the
+complete fixed persisted-message field set with field-specific types, and embedded
+message/session identity before trusting inherited bytes. Cleanup validates
+every residual artifact before touching the log and restores a captured log if the
+directory changes before unlink. Malformed, divergent,
+or changed artifacts are preserved and refused; process death releases shared leases
+in the kernel.
 
 Secure storage currently fails closed outside POSIX systems with `O_NOFOLLOW`.
 A Windows release needs a separate SID/DACL and reparse-point implementation.

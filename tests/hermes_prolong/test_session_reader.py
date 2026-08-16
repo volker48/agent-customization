@@ -10,6 +10,7 @@ from tests.hermes_prolong.test_plugin_registration import PLUGIN_DIR, load_plugi
 class FakeSessionDB:
     def __init__(self) -> None:
         self.closed = False
+        self._conn: Any | None = None
         self.sessions: dict[str, dict[str, Any]] = {
             "root": {
                 "id": "root",
@@ -143,7 +144,7 @@ class HermesSessionReaderTests(unittest.TestCase):
         load_plugin_module()
         module = importlib.import_module("test_hermes_prolong_plugin.session_reader")
         database = IncrementalFakeSessionDB()
-        setattr(database, "_conn", FakeDataVersionConnection(19))
+        database._conn = FakeDataVersionConnection(19)
         reader = module.HermesSessionReader(db_factory=lambda: database)
 
         first = reader.snapshot("tip")
@@ -341,6 +342,7 @@ class HermesSessionReaderTests(unittest.TestCase):
                     database, case_lineage, previous
                 )
                 self.assertEqual(refreshed.source_version, source_version)
+                self.assertIsNot(refreshed, previous)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib
 import json
+import multiprocessing
 import os
+import stat
 import tempfile
 import threading
 import time
@@ -11,6 +13,70 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from tests.hermes_prolong.test_plugin_registration import PLUGIN_DIR, load_plugin_module
+
+
+def create_private_anchor(root: Path, anchor: str = "s1") -> Path:
+    anchor_directory = root / anchor
+    for path in (root.parent.parent, root.parent, root, anchor_directory):
+        path.mkdir(mode=0o700, exist_ok=True)
+        path.chmod(0o700)
+    return anchor_directory
+
+
+def canonical_session(session_id: str, parent_session_id: str | None = None) -> dict:
+    return {
+        "id": session_id,
+        "parent_session_id": parent_session_id,
+        "source": "test",
+        "started_at": 1.0,
+        "ended_at": None,
+        "end_reason": None,
+        "compression_count": 0,
+        "rewind_count": 0,
+    }
+
+
+def canonical_message(message_id: int, session_id: str, content: str) -> dict:
+    return {
+        "id": message_id,
+        "session_id": session_id,
+        "role": "user",
+        "content": content,
+        "tool_call_id": None,
+        "tool_calls": None,
+        "tool_name": None,
+        "effect_disposition": None,
+        "timestamp": float(message_id),
+        "token_count": None,
+        "finish_reason": None,
+        "reasoning": None,
+        "reasoning_content": None,
+        "reasoning_details": None,
+        "codex_reasoning_items": None,
+        "codex_message_items": None,
+        "platform_message_id": None,
+        "observed": 0,
+        "active": 1,
+        "compacted": 0,
+        "api_content": None,
+        "display_kind": None,
+        "display_metadata": None,
+    }
+
+
+def canonical_segment_line(session_id: str, lineage_index: int = 0) -> str:
+    return (
+        json.dumps(
+            {
+                "lineage_index": lineage_index,
+                "record_type": "session_segment",
+                "session": canonical_session(session_id),
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    )
 
 
 class FakeReader:
@@ -22,13 +88,13 @@ class FakeReader:
             {
                 "record_type": "session_segment",
                 "lineage_index": 0,
-                "session": {"id": "s1"},
+                "session": canonical_session("s1"),
             },
             {
                 "record_type": "message",
                 "lineage_index": 0,
                 "session_id": "s1",
-                "message": {"id": 1, "content": "nonce"},
+                "message": canonical_message(1, "s1", "nonce"),
             },
         ]
 
@@ -77,7 +143,7 @@ class MultiSessionReader:
                 {
                     "record_type": "session_segment",
                     "lineage_index": 0,
-                    "session": {"id": session_id},
+                    "session": canonical_session(session_id),
                 },
             ),
             lineage=(session_id,),
@@ -104,7 +170,10 @@ class RotatingReader:
             {
                 "record_type": "session_segment",
                 "lineage_index": index,
-                "session": {"id": segment_id},
+                "session": canonical_session(
+                    segment_id,
+                    lineage[index - 1] if index else None,
+                ),
             }
             for index, segment_id in enumerate(lineage)
         ]
@@ -113,7 +182,11 @@ class RotatingReader:
                 "record_type": "message",
                 "lineage_index": len(lineage) - 1,
                 "session_id": session_id,
-                "message": {"id": len(lineage), "content": session_id},
+                "message": canonical_message(
+                    len(lineage),
+                    session_id,
+                    session_id,
+                ),
             }
         )
         return SimpleNamespace(records=tuple(records), lineage=lineage)
@@ -141,7 +214,10 @@ class ForkingReader:
             {
                 "record_type": "session_segment",
                 "lineage_index": index,
-                "session": {"id": segment_id},
+                "session": canonical_session(
+                    segment_id,
+                    lineage[index - 1] if index else None,
+                ),
             }
             for index, segment_id in enumerate(lineage)
         ]
@@ -150,7 +226,11 @@ class ForkingReader:
                 "record_type": "message",
                 "lineage_index": len(lineage) - 1,
                 "session_id": session_id,
-                "message": {"id": len(lineage), "content": session_id},
+                "message": canonical_message(
+                    len(lineage),
+                    session_id,
+                    session_id,
+                ),
             }
         )
         return SimpleNamespace(records=tuple(records), lineage=lineage)
@@ -238,7 +318,8 @@ class ProlongControllerTests(unittest.TestCase):
 
             self.assertEqual(set(controller._last_errors), {"s1"})
             self.assertIn("database unavailable for s1", controller._last_errors["s1"])
-            controller.close()
+            with self.assertNoLogs("hermes.plugins.prolong", level="ERROR"):
+                controller.close()
 
     def test_concurrent_session_starts_sweep_once_and_synchronize_every_session(
         self,
@@ -445,7 +526,7 @@ class ProlongControllerTests(unittest.TestCase):
                     "record_type": "message",
                     "lineage_index": 0,
                     "session_id": "s1",
-                    "message": {"id": 2, "content": "current turn"},
+                    "message": canonical_message(2, "s1", "current turn"),
                 }
             )
             self.assertIsNone(
@@ -543,6 +624,94 @@ class ProlongControllerTests(unittest.TestCase):
             first.close()
             second.close()
 
+    def test_shared_projection_survives_first_controller_close_until_last_lease(
+        self,
+    ) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            controller_a = module.ProlongController(
+                reader=FakeReader(),
+                projection_root=root,
+            )
+            controller_b = module.ProlongController(
+                reader=FakeReader(),
+                projection_root=root,
+            )
+
+            advertised_path = controller_a.projection_path("s1")
+            self.assertEqual(controller_b.projection_path("s1"), advertised_path)
+
+            controller_b.close()
+
+            self.assertTrue(advertised_path.is_file())
+            self.assertEqual(controller_a.projection_path("s1"), advertised_path)
+
+            controller_a.close()
+
+            self.assertFalse(advertised_path.parent.exists())
+
+    def test_last_controller_close_adopts_a_sibling_append_before_cleanup(
+        self,
+    ) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            reader_a = FakeReader()
+            reader_b = FakeReader()
+            controller_a = module.ProlongController(
+                reader=reader_a, projection_root=root
+            )
+            controller_b = module.ProlongController(
+                reader=reader_b, projection_root=root
+            )
+
+            advertised_path = controller_a.projection_path("s1")
+            self.assertEqual(controller_b.projection_path("s1"), advertised_path)
+            reader_b.records.append(
+                {
+                    "lineage_index": 0,
+                    "message": canonical_message(2, "s1", "sibling append"),
+                    "record_type": "message",
+                    "session_id": "s1",
+                }
+            )
+            self.assertEqual(controller_b.synchronize("s1").mode, "append")
+
+            controller_b.close()
+            self.assertTrue(advertised_path.is_file())
+            controller_a.close()
+
+            self.assertFalse(advertised_path.parent.exists())
+
+    def test_shared_projection_survives_sibling_session_finalization(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            controller_a = module.ProlongController(
+                reader=FakeReader(),
+                projection_root=root,
+            )
+            controller_b = module.ProlongController(
+                reader=FakeReader(),
+                projection_root=root,
+            )
+
+            advertised_path = controller_a.projection_path("s1")
+            self.assertEqual(controller_b.projection_path("s1"), advertised_path)
+
+            controller_b.on_session_finalize(session_id="s1")
+
+            self.assertTrue(advertised_path.is_file())
+            self.assertEqual(controller_a.projection_path("s1"), advertised_path)
+
+            controller_a.close()
+            controller_b.close()
+            self.assertFalse(advertised_path.parent.exists())
+
     def test_projection_path_fallback_reserves_the_tip_path_for_recovery(self) -> None:
         load_plugin_module()
         module = importlib.import_module("test_hermes_prolong_plugin.controller")
@@ -568,6 +737,78 @@ class ProlongControllerTests(unittest.TestCase):
             self.assertIn("branch-a", fallback_path.read_text(encoding="utf-8"))
             self.assertFalse((root / "root").exists())
             controller.close()
+
+    def test_projection_path_fallback_holds_a_shared_lease_until_close(self) -> None:
+        load_plugin_module()
+        controller_module = importlib.import_module(
+            "test_hermes_prolong_plugin.controller"
+        )
+        projection_module = importlib.import_module(
+            "test_hermes_prolong_plugin.projection"
+        )
+        reader = FakeReader()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            advertised_path = root / "s1" / "trajectory.jsonl"
+            projection_module.ProjectionStore(advertised_path).sync(reader.records)
+            advertiser = controller_module.ProlongController(
+                reader=reader,
+                projection_root=root,
+            )
+            sweeper = controller_module.ProlongController(
+                reader=reader,
+                projection_root=root,
+            )
+
+            def fail_synchronization(*_, **__):
+                raise OSError("projection lock unavailable")
+
+            advertiser._synchronize_admitted = fail_synchronization
+            with self.assertLogs("hermes.plugins.prolong", level="ERROR"):
+                self.assertEqual(advertiser.projection_path("s1"), advertised_path)
+
+            sweeper.close()
+            self.assertTrue(advertised_path.is_file())
+
+            advertiser.close()
+            self.assertFalse(advertised_path.parent.exists())
+
+    def test_projection_path_never_advertises_an_unleased_real_fallback(self) -> None:
+        load_plugin_module()
+        controller_module = importlib.import_module(
+            "test_hermes_prolong_plugin.controller"
+        )
+        projection_module = importlib.import_module(
+            "test_hermes_prolong_plugin.projection"
+        )
+        reader = FakeReader()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            real_path = root / "s1" / "trajectory.jsonl"
+            projection_module.ProjectionStore(real_path).sync(reader.records)
+            advertiser = controller_module.ProlongController(
+                reader=reader,
+                projection_root=root,
+            )
+            sweeper = controller_module.ProlongController(
+                reader=reader,
+                projection_root=root,
+            )
+
+            def fail(*_, **__):
+                raise OSError("lease unavailable")
+
+            advertiser._synchronize_admitted = fail
+            advertiser._acquire_anchor_lease = fail
+            with self.assertLogs("hermes.plugins.prolong", level="ERROR"):
+                unavailable_path = advertiser.projection_path("s1")
+
+            self.assertNotEqual(unavailable_path, real_path)
+            self.assertIn(".unavailable", unavailable_path.parts)
+            self.assertFalse(unavailable_path.exists())
+            sweeper.close()
+            self.assertFalse(real_path.parent.exists())
+            advertiser.close()
 
     def test_snapshot_and_projection_update_share_the_process_lock(self) -> None:
         load_plugin_module()
@@ -619,6 +860,135 @@ class ProlongControllerTests(unittest.TestCase):
             self.assertFalse(root_log.parent.exists())
             controller.close()
 
+    def test_orphan_sweep_does_not_delete_a_sibling_advertised_projection(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        reader = RotatingReader()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            controller_a = module.ProlongController(reader=reader, projection_root=root)
+            controller_b = module.ProlongController(reader=reader, projection_root=root)
+            advertised_path = controller_a.projection_path("tip")
+            reader.existing.clear()
+
+            self.assertEqual(controller_b.sweep_orphans(), 0)
+
+            self.assertTrue(advertised_path.is_file())
+            controller_b.close()
+            self.assertTrue(advertised_path.is_file())
+            controller_a.close()
+            self.assertFalse(advertised_path.parent.exists())
+
+    def test_orphan_sweeper_reacquires_its_lease_when_sibling_blocks_cleanup(
+        self,
+    ) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        reader = RotatingReader()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            controller_a = module.ProlongController(reader=reader, projection_root=root)
+            controller_b = module.ProlongController(reader=reader, projection_root=root)
+            advertised_path = controller_a.projection_path("tip")
+            self.assertEqual(controller_b.projection_path("tip"), advertised_path)
+            reader.existing.clear()
+
+            self.assertEqual(controller_a.sweep_orphans(), 0)
+            controller_b.close()
+
+            self.assertTrue(advertised_path.is_file())
+            controller_a.close()
+            self.assertFalse(advertised_path.parent.exists())
+
+    def test_orphan_sweeper_restores_its_lease_when_cleanup_fails_closed(
+        self,
+    ) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        reader_a = RotatingReader()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            controller_a = module.ProlongController(
+                reader=reader_a,
+                projection_root=root,
+            )
+            advertised_path = controller_a.projection_path("tip")
+            store = controller_a._stores["root"]
+            real_cleanup = store.cleanup
+
+            def fail_closed_cleanup(*args, **kwargs) -> None:
+                raise RuntimeError("unsafe cleanup artifact")
+
+            store.cleanup = fail_closed_cleanup
+            reader_a.existing.clear()
+
+            with self.assertLogs("hermes.plugins.prolong", level="ERROR"):
+                self.assertEqual(controller_a.sweep_orphans(), 0)
+            self.assertTrue(advertised_path.is_file())
+            store.cleanup = real_cleanup
+
+            controller_b = module.ProlongController(
+                reader=RotatingReader(),
+                projection_root=root,
+            )
+            self.assertEqual(controller_b.projection_path("tip"), advertised_path)
+            controller_b.close()
+
+            self.assertTrue(advertised_path.is_file())
+            controller_a.close()
+            self.assertFalse(advertised_path.parent.exists())
+
+    def test_finalize_preserves_a_locally_changed_projection_fail_closed(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            controller = module.ProlongController(
+                reader=FakeReader(),
+                projection_root=root,
+            )
+            log_path = controller.projection_path("s1")
+            changed_payload = '{"record_type":"foreign","same":"size"}\n'
+            log_path.chmod(0o600)
+            log_path.write_text(changed_payload, encoding="utf-8")
+            log_path.chmod(0o400)
+
+            with self.assertLogs("hermes.plugins.prolong", level="ERROR"):
+                controller.on_session_finalize(session_id="s1")
+
+            self.assertEqual(log_path.read_text(encoding="utf-8"), changed_payload)
+            with self.assertLogs("hermes.plugins.prolong", level="ERROR"):
+                controller.close()
+
+    def test_cold_close_refuses_malformed_private_projection_content(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        malformed_payloads = (
+            b"",
+            b"not-jsonl\n",
+            b'{"lineage_index":0,"message":{"id":1},'
+            b'"record_type":"message","session_id":"s1"}\n',
+        )
+        for payload in malformed_payloads:
+            with (
+                self.subTest(payload=payload),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+                log_path = root / "s1" / "trajectory.jsonl"
+                create_private_anchor(root)
+                log_path.write_bytes(payload)
+                log_path.chmod(0o400)
+                controller = module.ProlongController(
+                    reader=FakeReader(),
+                    projection_root=root,
+                )
+
+                with self.assertLogs("hermes.plugins.prolong", level="ERROR"):
+                    controller.close()
+
+                self.assertEqual(log_path.read_bytes(), payload)
+
     def test_orphan_sweep_takes_root_transaction_before_anchor_lock(self) -> None:
         load_plugin_module()
         module = importlib.import_module("test_hermes_prolong_plugin.controller")
@@ -626,11 +996,8 @@ class ProlongControllerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "plugin-data" / "prolong" / "sessions"
             log_path = root / "s1" / "trajectory.jsonl"
-            log_path.parent.mkdir(mode=0o700, parents=True)
-            log_path.write_text(
-                '{"record_type":"session_segment","session":{"id":"s1"}}\n',
-                encoding="utf-8",
-            )
+            create_private_anchor(root)
+            log_path.write_text(canonical_segment_line("s1"), encoding="utf-8")
             log_path.chmod(0o400)
             controller = module.ProlongController(reader=reader, projection_root=root)
             transaction_active = False
@@ -655,21 +1022,19 @@ class ProlongControllerTests(unittest.TestCase):
                     events.append("anchor-exit")
 
             class TrackingStore:
-                def sync(
+                def adopt_for_cleanup(
                     self,
-                    records,
                     *,
-                    force_rebuild=False,
+                    allow_append_refresh=False,
                     _process_lock_held=False,
                 ):
-                    self_outer.assertEqual(records, ())
-                    self_outer.assertTrue(force_rebuild)
-                    events.append(f"sync:{transaction_active}:{_process_lock_held}")
+                    if not allow_append_refresh:
+                        raise AssertionError("cleanup did not request append refresh")
+                    events.append(f"adopt:{transaction_active}:{_process_lock_held}")
 
                 def cleanup(self, *, _process_lock_held=False):
                     events.append(f"delete:{transaction_active}:{_process_lock_held}")
 
-            self_outer = self
             store = TrackingStore()
             original_transaction = getattr(module, "projection_root_transaction")
 
@@ -691,7 +1056,7 @@ class ProlongControllerTests(unittest.TestCase):
                 [
                     "transaction-enter",
                     "anchor-enter:True",
-                    "sync:True:True",
+                    "adopt:True:True",
                     "delete:True:True",
                     "anchor-exit",
                     "transaction-exit",
@@ -764,6 +1129,90 @@ class ProlongControllerTests(unittest.TestCase):
             self.assertFalse(log_path.parent.exists())
             controller.close()
 
+    def test_unopened_controller_close_does_not_create_a_projection_root(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            controller = module.ProlongController(
+                reader=FakeReader(),
+                projection_root=root,
+            )
+
+            controller.close()
+
+            self.assertFalse(root.exists())
+
+    def test_cold_close_discovers_and_removes_a_surviving_session_projection(
+        self,
+    ) -> None:
+        load_plugin_module()
+        controller_module = importlib.import_module(
+            "test_hermes_prolong_plugin.controller"
+        )
+        projection_module = importlib.import_module(
+            "test_hermes_prolong_plugin.projection"
+        )
+        reader = FakeReader()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            log_path = root / "s1" / "trajectory.jsonl"
+            projection_module.ProjectionStore(log_path).sync(tuple(reader.records))
+            controller = controller_module.ProlongController(
+                reader=reader,
+                projection_root=root,
+            )
+
+            controller.close()
+
+            self.assertFalse(log_path.parent.exists())
+            self.assertTrue(reader.closed)
+
+    def test_crashed_controller_lease_fd_releases_for_cold_close(self) -> None:
+        load_plugin_module()
+        controller_module = importlib.import_module(
+            "test_hermes_prolong_plugin.controller"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            log_path = root / "s1" / "trajectory.jsonl"
+            context = multiprocessing.get_context("fork")
+            ready_receiver, ready_sender = context.Pipe(duplex=False)
+
+            def publish_then_crash() -> None:
+                controller = controller_module.ProlongController(
+                    reader=FakeReader(),
+                    projection_root=root,
+                )
+                controller.synchronize("s1")
+                ready_sender.send("published")
+                ready_sender.close()
+                os._exit(17)
+
+            process = context.Process(target=publish_then_crash)
+            process.start()
+            ready_sender.close()
+            try:
+                self.assertTrue(ready_receiver.poll(5), "child did not publish")
+                self.assertEqual(ready_receiver.recv(), "published")
+                process.join(timeout=5)
+                self.assertFalse(process.is_alive(), "crashed child did not exit")
+                self.assertEqual(process.exitcode, 17)
+                self.assertTrue(log_path.is_file())
+
+                fresh_controller = controller_module.ProlongController(
+                    reader=FakeReader(),
+                    projection_root=root,
+                )
+                fresh_controller.close()
+
+                self.assertFalse(log_path.parent.exists())
+            finally:
+                ready_receiver.close()
+                if process.is_alive():
+                    process.kill()
+                    process.join(timeout=5)
+
     def test_cleanup_holds_root_transaction_across_resolution_adoption_and_deletion(
         self,
     ) -> None:
@@ -774,8 +1223,9 @@ class ProlongControllerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "plugin-data" / "prolong" / "sessions"
             log_path = root / "s1" / "trajectory.jsonl"
-            log_path.parent.mkdir(mode=0o700, parents=True)
-            log_path.touch(mode=0o400)
+            create_private_anchor(root)
+            log_path.write_text(canonical_segment_line("s1"), encoding="utf-8")
+            log_path.chmod(0o400)
             controller = module.ProlongController(reader=reader, projection_root=root)
             transaction_active = False
             events: list[str] = []
@@ -792,16 +1242,14 @@ class ProlongControllerTests(unittest.TestCase):
                     transaction_active = False
 
             class TrackingStore:
-                def sync(
+                def adopt_for_cleanup(
                     self,
-                    records,
                     *,
-                    force_rebuild=False,
+                    allow_append_refresh=False,
                     _process_lock_held=False,
                 ):
                     self_outer.assertTrue(transaction_active)
-                    self_outer.assertEqual(records, ())
-                    self_outer.assertTrue(force_rebuild)
+                    self_outer.assertTrue(allow_append_refresh)
                     self_outer.assertTrue(_process_lock_held)
                     events.append("adopt")
 
@@ -855,7 +1303,7 @@ class ProlongControllerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "plugin-data" / "prolong" / "sessions"
             log_path = root / "s1" / "trajectory.jsonl"
-            log_path.parent.mkdir(mode=0o700, parents=True)
+            create_private_anchor(root)
             log_path.symlink_to(log_path.parent / "missing")
             controller = module.ProlongController(
                 reader=FakeReader(),
@@ -874,8 +1322,7 @@ class ProlongControllerTests(unittest.TestCase):
         module = importlib.import_module("test_hermes_prolong_plugin.controller")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "plugin-data" / "prolong" / "sessions"
-            session_directory = root / "s1"
-            session_directory.mkdir(mode=0o700, parents=True)
+            session_directory = create_private_anchor(root)
             temporary_path = session_directory / ".trajectory-crash.tmp"
             temporary_path.write_text("partial", encoding="utf-8")
             temporary_path.chmod(0o600)
@@ -888,6 +1335,85 @@ class ProlongControllerTests(unittest.TestCase):
 
             self.assertFalse(session_directory.exists())
             controller.close()
+
+    def test_cold_close_refuses_an_inherited_nonprivate_projection_root(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            plugin_data = base / "plugin-data"
+            prolong = plugin_data / "prolong"
+            root = prolong / "sessions"
+            session_directory = root / "s1"
+            plugin_data.mkdir(mode=0o700)
+            prolong.mkdir(mode=0o700)
+            root.mkdir(mode=0o755)
+            session_directory.mkdir(mode=0o700)
+            log_path = session_directory / "trajectory.jsonl"
+            log_path.write_text(canonical_segment_line("s1"), encoding="utf-8")
+            log_path.chmod(0o400)
+            controller = module.ProlongController(
+                reader=FakeReader(),
+                projection_root=root,
+            )
+
+            with self.assertLogs("hermes.plugins.prolong", level="ERROR"):
+                controller.close()
+
+            self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o755)
+            self.assertTrue(log_path.is_file())
+
+    def test_cold_close_refuses_an_unsafe_inherited_projection_log(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            session_directory = create_private_anchor(root)
+            outside = Path(directory) / "outside"
+            outside.write_text("must remain", encoding="utf-8")
+            log_path = session_directory / "trajectory.jsonl"
+            log_path.symlink_to(outside)
+            controller = module.ProlongController(
+                reader=FakeReader(),
+                projection_root=root,
+            )
+
+            with self.assertLogs("hermes.plugins.prolong", level="ERROR"):
+                controller.close()
+
+            self.assertTrue(log_path.is_symlink())
+            self.assertEqual(outside.read_text(encoding="utf-8"), "must remain")
+
+    def test_cold_close_refuses_an_unsafe_inherited_lease_file(self) -> None:
+        load_plugin_module()
+        controller_module = importlib.import_module(
+            "test_hermes_prolong_plugin.controller"
+        )
+        projection_module = importlib.import_module(
+            "test_hermes_prolong_plugin.projection"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            log_path = root / "s1" / "trajectory.jsonl"
+            projection_module.ProjectionStore(log_path).sync(
+                tuple(FakeReader().records)
+            )
+            lease_directory = root / ".leases"
+            lease_directory.mkdir(mode=0o700)
+            lease_path = lease_directory / "s1"
+            lease_path.write_bytes(b"inherited")
+            lease_path.chmod(0o644)
+            controller = controller_module.ProlongController(
+                reader=FakeReader(),
+                projection_root=root,
+            )
+
+            with self.assertLogs("hermes.plugins.prolong", level="ERROR"):
+                controller.close()
+
+            self.assertTrue(log_path.is_file())
+            self.assertEqual(lease_path.read_bytes(), b"inherited")
+            self.assertEqual(stat.S_IMODE(lease_path.stat().st_mode), 0o644)
 
     def test_finalize_waits_for_an_admitted_projection_path(self) -> None:
         load_plugin_module()
@@ -1121,6 +1647,78 @@ class ProlongControllerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "finalized"):
                 controller.synchronize("s1")
             controller.close()
+
+    def test_new_acquisition_waits_for_exclusive_cleanup_under_root_lock(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            controller_a = module.ProlongController(
+                reader=FakeReader(),
+                projection_root=root,
+            )
+            controller_b = module.ProlongController(
+                reader=FakeReader(),
+                projection_root=root,
+            )
+            log_path = controller_a.projection_path("s1")
+            store = controller_a._stores["s1"]
+            real_cleanup = store.cleanup
+            cleanup_entered = threading.Event()
+            release_cleanup = threading.Event()
+            acquisition_attempted = threading.Event()
+            acquisition_entered = threading.Event()
+            errors: list[BaseException] = []
+            original_transaction = module.projection_root_transaction
+
+            @module.contextmanager
+            def tracking_transaction(projection_root: Path):
+                is_acquirer = threading.current_thread().name == "new-acquirer"
+                if is_acquirer:
+                    acquisition_attempted.set()
+                with original_transaction(projection_root):
+                    if is_acquirer:
+                        acquisition_entered.set()
+                    yield
+
+            def blocking_cleanup(*args, **kwargs) -> None:
+                cleanup_entered.set()
+                if not release_cleanup.wait(timeout=5):
+                    raise TimeoutError("test did not release exclusive cleanup")
+                real_cleanup(*args, **kwargs)
+
+            def acquire_projection() -> None:
+                try:
+                    controller_b.synchronize("s1")
+                except BaseException as error:
+                    errors.append(error)
+
+            store.cleanup = blocking_cleanup
+            setattr(module, "projection_root_transaction", tracking_transaction)
+            close_thread = threading.Thread(target=controller_a.close)
+            acquire_thread = threading.Thread(
+                target=acquire_projection,
+                name="new-acquirer",
+            )
+            try:
+                close_thread.start()
+                self.assertTrue(cleanup_entered.wait(timeout=2))
+                acquire_thread.start()
+                self.assertTrue(acquisition_attempted.wait(timeout=2))
+                self.assertFalse(acquisition_entered.wait(timeout=0.1))
+            finally:
+                release_cleanup.set()
+                close_thread.join(timeout=5)
+                acquire_thread.join(timeout=5)
+                setattr(module, "projection_root_transaction", original_transaction)
+
+            self.assertFalse(close_thread.is_alive())
+            self.assertFalse(acquire_thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertTrue(acquisition_entered.is_set())
+            self.assertTrue(log_path.is_file())
+            controller_b.close()
+            self.assertFalse(log_path.parent.exists())
 
     def test_sync_failure_is_visible_to_the_model_but_does_not_break_hooks(
         self,

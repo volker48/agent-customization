@@ -12,7 +12,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from .projection import ProjectionStore, SyncResult, projection_root_transaction
+from .projection import (
+    ProjectionStore,
+    SyncResult,
+    acquire_projection_lease,
+    projection_root_transaction,
+    release_projection_lease,
+)
 from .session_reader import HermesSessionReader
 
 LOGGER = logging.getLogger("hermes.plugins.prolong")
@@ -54,6 +60,7 @@ class ProlongController:
         self._snapshots: dict[str, Any] = {}
         self._session_roots: dict[str, str] = {}
         self._session_locks: dict[str, threading.RLock] = {}
+        self._leases: dict[str, int] = {}
         self._last_errors: dict[str, str] = {}
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
@@ -106,6 +113,24 @@ class ProlongController:
                 store = ProjectionStore(log_path_for(self._root(), root_session_id))
                 self._stores[root_session_id] = store
             return store
+
+    def _acquire_anchor_lease(self, root_session_id: str) -> None:
+        with self._lock:
+            if root_session_id in self._leases:
+                return
+        descriptor = acquire_projection_lease(self._root(), root_session_id)
+        if descriptor is None:
+            raise RuntimeError(
+                f"PRO-LONG could not acquire shared lease for {root_session_id}"
+            )
+        with self._lock:
+            self._leases[root_session_id] = descriptor
+
+    def _release_anchor_lease(self, root_session_id: str) -> None:
+        with self._lock:
+            descriptor = self._leases.pop(root_session_id, None)
+        if descriptor is not None:
+            release_projection_lease(descriptor)
 
     def _lineage_root(self, session_id: str) -> tuple[str, tuple[str, ...]]:
         lineage = tuple(self._reader.lineage(session_id)) or (session_id,)
@@ -190,18 +215,20 @@ class ProlongController:
                         "using its stable fallback path",
                         safe_id,
                     )
-                    with self._lock:
-                        root_session_id = self._session_roots.setdefault(
-                            safe_id, safe_id
-                        )
+                    with projection_root_transaction(self._root()):
+                        with self._lock:
+                            root_session_id = self._session_roots.setdefault(
+                                safe_id, safe_id
+                            )
+                        self._acquire_anchor_lease(root_session_id)
                 return log_path_for(self._root(), root_session_id)
         except Exception:
             LOGGER.exception(
                 "PRO-LONG controller rejected projection path admission for %s; "
-                "using an unregistered tip path",
+                "using a non-published unavailable path",
                 safe_id,
             )
-            return log_path_for(self._root(), safe_id)
+            return self._root() / ".unavailable" / safe_id / "trajectory.jsonl"
 
     def synchronize(
         self,
@@ -229,6 +256,7 @@ class ProlongController:
                 canonical_root,
                 lineage,
             )
+            self._acquire_anchor_lease(root_session_id)
             lock = self._session_lock(root_session_id)
             with lock:
                 store = self._store_for(root_session_id)
@@ -281,25 +309,33 @@ class ProlongController:
                         for segment_id, projection_root in self._session_roots.items()
                         if projection_root == root_session_id
                     )
-                lock = self._session_lock(root_session_id)
-                with lock:
+                log_path = log_path_for(self._root(), root_session_id)
+                try:
+                    log_path.parent.lstat()
+                except FileNotFoundError:
+                    store = None
+                else:
+                    self._validate_projection_directory(root_session_id)
                     with self._lock:
                         store = self._stores.get(root_session_id)
                     if store is None:
-                        log_path = log_path_for(self._root(), root_session_id)
-                        try:
-                            log_path.parent.lstat()
-                        except FileNotFoundError:
-                            pass
-                        else:
-                            store = self._store_for(root_session_id)
-                            store.sync(
-                                (),
-                                force_rebuild=True,
+                        store = self._store_for(root_session_id)
+                self._release_anchor_lease(root_session_id)
+                cleanup_lease = acquire_projection_lease(
+                    self._root(),
+                    root_session_id,
+                    exclusive=True,
+                    nonblocking=True,
+                )
+                try:
+                    if cleanup_lease is not None and store is not None:
+                        lock = self._session_lock(root_session_id)
+                        with lock:
+                            store.adopt_for_cleanup(
+                                allow_append_refresh=True,
                                 _process_lock_held=True,
                             )
-                    if store is not None:
-                        store.cleanup(_process_lock_held=True)
+                            store.cleanup(_process_lock_held=True)
                     with self._lock:
                         self._stores.pop(root_session_id, None)
                         self._snapshots.pop(root_session_id, None)
@@ -309,6 +345,9 @@ class ProlongController:
                             for segment_id, projection_root in self._session_roots.items()
                             if projection_root != root_session_id
                         }
+                finally:
+                    if cleanup_lease is not None:
+                        release_projection_lease(cleanup_lease)
         finally:
             with self._condition:
                 self._retired_sessions.update(retiring_ids)
@@ -336,6 +375,36 @@ class ProlongController:
                 )
         finally:
             os.close(descriptor)
+
+    def _discover_projection_anchors(self) -> tuple[str, ...]:
+        """Enumerate persisted anchors while the root transaction is held."""
+        root = self._root()
+        root_metadata = root.lstat()
+        if (
+            not stat.S_ISDIR(root_metadata.st_mode)
+            or root_metadata.st_uid != os.getuid()
+            or stat.S_IMODE(root_metadata.st_mode) != 0o700
+        ):
+            raise RuntimeError(f"unsafe PRO-LONG projection root: {root}")
+        anchors: list[str] = []
+        for path in root.iterdir():
+            if path.name in {".prolong.lock", ".leases"}:
+                continue
+            try:
+                anchors.append(validate_session_id(path.name))
+            except ValueError:
+                LOGGER.error("PRO-LONG ignored unexpected root artifact %s", path)
+        return tuple(sorted(anchors))
+
+    def _validate_projection_directory(self, root_session_id: str) -> None:
+        directory = log_path_for(self._root(), root_session_id).parent
+        metadata = directory.lstat()
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise RuntimeError(f"unsafe PRO-LONG projection directory: {directory}")
 
     def sweep_orphans(self) -> int:
         """Remove projections whose persisted lineage was directly deleted."""
@@ -375,10 +444,11 @@ class ProlongController:
                         )
                         if not segments or len(surviving_segments) == len(segments):
                             continue
-                        lock = self._session_lock(root_session_id)
-                        with lock:
-                            store = self._store_for(root_session_id)
-                            if surviving_segments:
+                        if surviving_segments:
+                            self._acquire_anchor_lease(root_session_id)
+                            lock = self._session_lock(root_session_id)
+                            with lock:
+                                store = self._store_for(root_session_id)
                                 survivor_id = surviving_segments[-1]
                                 snapshot = self._reader.snapshot(survivor_id)
                                 store.sync(
@@ -397,23 +467,48 @@ class ProlongController:
                                         self._session_roots[segment_id] = (
                                             root_session_id
                                         )
-                                continue
-                            store.sync(
-                                (),
-                                force_rebuild=True,
-                                _process_lock_held=True,
-                            )
-                            store.cleanup(_process_lock_held=True)
-                            with self._lock:
-                                self._stores.pop(root_session_id, None)
-                                self._snapshots.pop(root_session_id, None)
-                                self._session_locks.pop(root_session_id, None)
-                                self._session_roots = {
-                                    segment_id: projection_root
-                                    for segment_id, projection_root in self._session_roots.items()
-                                    if projection_root != root_session_id
-                                }
-                        removed += 1
+                            continue
+                        with self._lock:
+                            had_local_lease = root_session_id in self._leases
+                        self._release_anchor_lease(root_session_id)
+                        cleanup_lease = acquire_projection_lease(
+                            self._root(),
+                            root_session_id,
+                            exclusive=True,
+                            nonblocking=True,
+                        )
+                        if cleanup_lease is None:
+                            if had_local_lease:
+                                self._acquire_anchor_lease(root_session_id)
+                            continue
+                        try:
+                            lock = self._session_lock(root_session_id)
+                            with lock:
+                                store = self._store_for(root_session_id)
+                                store.adopt_for_cleanup(
+                                    allow_append_refresh=True,
+                                    _process_lock_held=True,
+                                )
+                                store.cleanup(_process_lock_held=True)
+                                with self._lock:
+                                    self._stores.pop(root_session_id, None)
+                                    self._snapshots.pop(root_session_id, None)
+                                    self._session_locks.pop(root_session_id, None)
+                                    self._session_roots = {
+                                        segment_id: projection_root
+                                        for segment_id, projection_root in self._session_roots.items()
+                                        if projection_root != root_session_id
+                                    }
+                            removed += 1
+                        except Exception:
+                            if had_local_lease:
+                                release_projection_lease(cleanup_lease)
+                                cleanup_lease = None
+                                self._acquire_anchor_lease(root_session_id)
+                            raise
+                        finally:
+                            if cleanup_lease is not None:
+                                release_projection_lease(cleanup_lease)
                     except FileNotFoundError:
                         continue
                     except Exception:
@@ -531,13 +626,60 @@ class ProlongController:
             self._retired_sessions.clear()
 
         try:
-            for root_session_id, store in stores:
+            try:
+                root = self._root()
                 try:
-                    store.cleanup()
-                except Exception:
-                    LOGGER.exception(
-                        "PRO-LONG unload cleanup failed for %s", root_session_id
-                    )
+                    root.lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    with projection_root_transaction(root):
+                        stores_by_anchor = dict(stores)
+                        anchors = set(stores_by_anchor)
+                        anchors.update(self._discover_projection_anchors())
+                        for root_session_id in sorted(anchors):
+                            cleanup_lease: int | None = None
+                            try:
+                                try:
+                                    self._validate_projection_directory(root_session_id)
+                                except FileNotFoundError:
+                                    self._release_anchor_lease(root_session_id)
+                                    continue
+                                self._release_anchor_lease(root_session_id)
+                                cleanup_lease = acquire_projection_lease(
+                                    root,
+                                    root_session_id,
+                                    exclusive=True,
+                                    nonblocking=True,
+                                )
+                                if cleanup_lease is None:
+                                    continue
+                                store = stores_by_anchor.get(root_session_id)
+                                if store is None:
+                                    store = ProjectionStore(
+                                        log_path_for(root, root_session_id)
+                                    )
+                                store.adopt_for_cleanup(
+                                    allow_append_refresh=True,
+                                    _process_lock_held=True,
+                                )
+                                store.cleanup(_process_lock_held=True)
+                            except Exception:
+                                LOGGER.exception(
+                                    "PRO-LONG unload cleanup failed for %s",
+                                    root_session_id,
+                                )
+                            finally:
+                                if cleanup_lease is not None:
+                                    release_projection_lease(cleanup_lease)
+            except Exception:
+                LOGGER.exception("PRO-LONG unload cleanup transaction failed")
+            finally:
+                with self._lock:
+                    remaining_leases = tuple(self._leases.values())
+                    self._leases.clear()
+                for descriptor in remaining_leases:
+                    release_projection_lease(descriptor)
             self._reader.close()
         finally:
             with self._condition:
