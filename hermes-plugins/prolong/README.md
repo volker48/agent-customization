@@ -142,7 +142,9 @@ micro-compaction can share the same in-place archival primitive. Consequently:
 - exact event-by-event classification of every in-place rewrite is impossible;
 - convergence is eventual after an abrupt early-return or process crash;
 - the plugin imports Hermes's internal `SessionDB`, which is a pinned compatibility
-  dependency rather than a documented stable plugin facade.
+  dependency rather than a documented stable plugin facade; if a future runtime adds
+  an unknown persisted message column, projection synchronization fails open with a
+  warning instead of silently omitting that field.
 
 See [ADR-0009](../../docs/adr/0009-hermes-prolong-programmatic-memory.md) for the
 full contract and rejected alternatives.

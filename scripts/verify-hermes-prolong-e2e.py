@@ -226,17 +226,6 @@ def projected_seed_messages(
     ]
 
 
-def parse_json(value: Any, default: Any) -> Any:
-    if value in (None, ""):
-        return default
-    if not isinstance(value, str):
-        return value
-    try:
-        return json.loads(value)
-    except (json.JSONDecodeError, TypeError):
-        return default
-
-
 def parse_strict_json(value: Any, *, label: str) -> Any:
     def reject_constant(constant: str) -> None:
         raise ValueError(f"non-finite JSON constant: {constant}")
@@ -515,19 +504,6 @@ def call_name(call: dict[str, Any]) -> str:
     if isinstance(function, dict):
         return str(function.get("name") or "")
     return str(call.get("name") or "")
-
-
-def call_arguments(call: dict[str, Any]) -> dict[str, Any]:
-    function = call.get("function")
-    raw = (
-        function.get("arguments")
-        if isinstance(function, dict)
-        else call.get("arguments")
-    )
-    if isinstance(raw, dict):
-        return raw
-    parsed = parse_json(raw, {})
-    return parsed if isinstance(parsed, dict) else {}
 
 
 def require_recovery_call_arguments(call: dict[str, Any]) -> dict[str, Any]:

@@ -111,6 +111,12 @@ def _message_record(
     session_id: str,
     lineage_index: int,
 ) -> dict[str, Any]:
+    unexpected_fields = set(message) - set(_MESSAGE_FIELDS)
+    if unexpected_fields:
+        raise RuntimeError(
+            "unsupported persisted message fields: "
+            + ", ".join(sorted(unexpected_fields))
+        )
     return {
         "record_type": "message",
         "lineage_index": lineage_index,

@@ -984,6 +984,42 @@ class ProlongControllerTests(unittest.TestCase):
             controller_a.close()
             self.assertFalse(advertised_path.parent.exists())
 
+    def test_orphan_sweep_preserves_cleanup_error_when_lease_restore_fails(
+        self,
+    ) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        reader = RotatingReader()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            controller = module.ProlongController(reader=reader, projection_root=root)
+            advertised_path = controller.projection_path("tip")
+            store = controller._stores["root"]
+
+            def fail_closed_cleanup(*args, **kwargs) -> None:
+                raise ValueError("original unsafe cleanup artifact")
+
+            def fail_lease_restore(root_session_id: str) -> None:
+                raise RuntimeError(f"restore failed for {root_session_id}")
+
+            store.cleanup = fail_closed_cleanup
+            controller._acquire_anchor_lease = fail_lease_restore
+            reader.existing.clear()
+
+            with self.assertLogs("hermes.plugins.prolong", level="ERROR") as captured:
+                self.assertEqual(controller.sweep_orphans(), 0)
+
+            orphan_failure = next(
+                record
+                for record in captured.records
+                if "orphan sweep failed" in record.getMessage()
+            )
+            self.assertIsNotNone(orphan_failure.exc_info)
+            if orphan_failure.exc_info is None:
+                self.fail("orphan failure log omitted exception information")
+            self.assertIsInstance(orphan_failure.exc_info[1], ValueError)
+            self.assertTrue(advertised_path.is_file())
+
     def test_finalize_preserves_a_locally_changed_projection_fail_closed(self) -> None:
         load_plugin_module()
         module = importlib.import_module("test_hermes_prolong_plugin.controller")

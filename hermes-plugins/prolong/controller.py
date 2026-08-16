@@ -11,7 +11,7 @@ import stat
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .projection import (
     ProjectionStore,
@@ -119,11 +119,10 @@ class ProlongController:
         with self._lock:
             if root_session_id in self._leases:
                 return
-        descriptor = acquire_projection_lease(self._root(), root_session_id)
-        if descriptor is None:
-            raise RuntimeError(
-                f"PRO-LONG could not acquire shared lease for {root_session_id}"
-            )
+        descriptor = cast(
+            int,
+            acquire_projection_lease(self._root(), root_session_id),
+        )
         with self._lock:
             self._leases[root_session_id] = descriptor
 
@@ -519,7 +518,13 @@ class ProlongController:
                             if had_local_lease:
                                 release_projection_lease(cleanup_lease)
                                 cleanup_lease = None
-                                self._acquire_anchor_lease(root_session_id)
+                                try:
+                                    self._acquire_anchor_lease(root_session_id)
+                                except Exception:
+                                    LOGGER.exception(
+                                        "PRO-LONG could not restore shared lease for %s",
+                                        root_session_id,
+                                    )
                             raise
                         finally:
                             if cleanup_lease is not None:

@@ -138,6 +138,18 @@ class FakeDataVersionConnection:
 
 
 class HermesSessionReaderTests(unittest.TestCase):
+    def test_unknown_persisted_message_fields_fail_loudly(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.session_reader")
+        database = FakeSessionDB()
+        database.messages["tip"][1]["future_persisted_field"] = "must-not-drop"
+        reader = module.HermesSessionReader(db_factory=lambda: database)
+
+        with self.assertRaisesRegex(
+            RuntimeError, "unsupported persisted message fields"
+        ):
+            reader.snapshot("tip")
+
     def test_matching_data_version_returns_the_previous_snapshot_unchanged(
         self,
     ) -> None:
