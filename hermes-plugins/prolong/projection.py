@@ -49,6 +49,22 @@ def _signature(metadata: os.stat_result) -> FileSignature:
     )
 
 
+def _same_captured_file(
+    actual: FileSignature,
+    expected: FileSignature,
+) -> bool:
+    """Compare an inode across a same-directory rename, which may change ctime."""
+    return (
+        actual.device == expected.device
+        and actual.inode == expected.inode
+        and actual.links == expected.links
+        and actual.size == expected.size
+        and actual.modified_ns == expected.modified_ns
+        and actual.mode == expected.mode
+        and actual.owner == expected.owner
+    )
+
+
 def _validate_regular_file(
     metadata: os.stat_result,
     *,
@@ -118,6 +134,12 @@ def _write_all(descriptor: int, payload: bytes) -> None:
 def _ensure_private_directory(path: Path) -> None:
     try:
         path.mkdir(mode=0o700)
+    except FileNotFoundError:
+        _ensure_private_directory(path.parent)
+        try:
+            path.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
     except FileExistsError:
         pass
     metadata = path.lstat()
@@ -135,7 +157,10 @@ def _ensure_private_directory(path: Path) -> None:
 def projection_root_transaction(projection_root: Path):
     """Serialize anchor selection and publication across plugin processes."""
     root = Path(projection_root)
-    for path in reversed(root.parents[:2]):
+    private_parents = list(root.parents[:2])
+    if len(root.parents) > 2 and root.parents[1].name == "plugin-data":
+        private_parents.append(root.parents[2])
+    for path in reversed(private_parents):
         _ensure_private_directory(path)
     _ensure_private_directory(root)
     lock_path = root / ".prolong.lock"
@@ -284,16 +309,21 @@ class ProjectionStore:
             self._cleanup_locked()
 
     def _cleanup_locked(self) -> None:
-        actual_signature = _read_signature(self.log_path)
+        actual_signature = self._validated_cleanup_signature()
         if actual_signature is not None:
-            if (
-                self._expected_signature is None
-                or actual_signature != self._expected_signature
-            ):
+            deletion_signature = self._validated_cleanup_signature()
+            if deletion_signature != actual_signature:
                 raise RuntimeError(
                     f"Refusing to remove changed PRO-LONG log: {self.log_path}"
                 )
-            self.log_path.unlink()
+            self._capture_and_unlink(
+                self.log_path,
+                actual_signature,
+                expected_payload=_jsonl(self._records),
+                error_message=(
+                    f"Refusing to remove changed PRO-LONG log: {self.log_path}"
+                ),
+            )
         try:
             _ensure_private_directory(self.directory_path)
             self.directory_path.rmdir()
@@ -308,15 +338,141 @@ class ProjectionStore:
         self._source_records = None
         self._expected_signature = None
 
+    def _validated_cleanup_signature(self) -> FileSignature | None:
+        actual_signature = _read_signature(
+            self.log_path,
+            allow_private_writable=True,
+        )
+        if actual_signature is None:
+            return None
+        if self._expected_signature is None:
+            raise RuntimeError(
+                f"Refusing to remove changed PRO-LONG log: {self.log_path}"
+            )
+        if actual_signature == self._expected_signature:
+            return actual_signature
+        if actual_signature.mode != 0o600:
+            raise RuntimeError(
+                f"Refusing to remove changed PRO-LONG log: {self.log_path}"
+            )
+
+        descriptor = os.open(self.log_path, _open_flags(os.O_RDONLY))
+        try:
+            metadata = os.fstat(descriptor)
+            _validate_regular_file(
+                metadata,
+                expected_mode=0o600,
+                label=str(self.log_path),
+            )
+            if _signature(metadata) != actual_signature:
+                raise RuntimeError(
+                    f"Refusing to remove changed PRO-LONG log: {self.log_path}"
+                )
+            with os.fdopen(os.dup(descriptor), "rb") as stream:
+                payload = stream.read()
+            if payload != _jsonl(self._records):
+                raise RuntimeError(
+                    f"Refusing to remove changed PRO-LONG log: {self.log_path}"
+                )
+            if _signature(os.fstat(descriptor)) != actual_signature:
+                raise RuntimeError(
+                    f"Refusing to remove changed PRO-LONG log: {self.log_path}"
+                )
+            return actual_signature
+        finally:
+            os.close(descriptor)
+
+    def _capture_and_unlink(
+        self,
+        path: Path,
+        expected_signature: FileSignature,
+        *,
+        expected_payload: bytes | None = None,
+        error_message: str,
+        allow_missing: bool = False,
+    ) -> None:
+        placeholder_descriptor, quarantine_name = tempfile.mkstemp(
+            prefix=".prolong-cleanup-",
+            suffix=".tmp",
+            dir=self.directory_path,
+        )
+        quarantine_path = Path(quarantine_name)
+        captured = False
+        try:
+            os.fchmod(placeholder_descriptor, 0o600)
+        finally:
+            os.close(placeholder_descriptor)
+        try:
+            try:
+                os.replace(path, quarantine_path)
+            except FileNotFoundError:
+                if allow_missing:
+                    return
+                raise RuntimeError(error_message) from None
+            captured = True
+            try:
+                metadata = quarantine_path.lstat()
+                _validate_regular_file(
+                    metadata,
+                    expected_mode=expected_signature.mode,
+                    label=str(quarantine_path),
+                )
+                if not _same_captured_file(_signature(metadata), expected_signature):
+                    raise RuntimeError(error_message)
+                if expected_payload is not None:
+                    descriptor = os.open(
+                        quarantine_path,
+                        _open_flags(os.O_RDONLY),
+                    )
+                    try:
+                        opened_signature = _signature(os.fstat(descriptor))
+                        if not _same_captured_file(
+                            opened_signature, expected_signature
+                        ):
+                            raise RuntimeError(error_message)
+                        with os.fdopen(os.dup(descriptor), "rb") as stream:
+                            if stream.read() != expected_payload:
+                                raise RuntimeError(error_message)
+                        if not _same_captured_file(
+                            _signature(os.fstat(descriptor)), expected_signature
+                        ):
+                            raise RuntimeError(error_message)
+                    finally:
+                        os.close(descriptor)
+            except Exception as error:
+                try:
+                    path.lstat()
+                except FileNotFoundError:
+                    os.replace(quarantine_path, path)
+                raise RuntimeError(error_message) from error
+            quarantine_path.unlink()
+        finally:
+            if not captured:
+                try:
+                    quarantine_path.unlink()
+                except FileNotFoundError:
+                    pass
+
     def _remove_private_temporary_files(self) -> None:
-        temporary_paths: list[Path] = []
+        temporary_paths: list[tuple[Path, FileSignature]] = []
         for path in self.directory_path.iterdir():
-            middle = path.name.removeprefix(".trajectory-").removesuffix(".tmp")
-            if (
-                not path.name.startswith(".trajectory-")
-                or not path.name.endswith(".tmp")
-                or not middle
-            ):
+            trajectory_middle = path.name.removeprefix(".trajectory-").removesuffix(
+                ".tmp"
+            )
+            quarantine_middle = path.name.removeprefix(
+                ".prolong-cleanup-"
+            ).removesuffix(".tmp")
+            is_trajectory_temporary = (
+                path.name.startswith(".trajectory-")
+                and path.name.endswith(".tmp")
+                and bool(trajectory_middle)
+            )
+            is_cleanup_quarantine = (
+                path.name.startswith(".prolong-cleanup-")
+                and path.name.endswith(".tmp")
+                and bool(quarantine_middle)
+            )
+            if not (is_trajectory_temporary or is_cleanup_quarantine):
                 raise RuntimeError(
                     f"Refusing unexpected PRO-LONG cleanup artifact: {path}"
                 )
@@ -329,15 +485,47 @@ class ProjectionStore:
                 expected_mode=mode,
                 label=str(path),
             )
-            temporary_paths.append(path)
-        for path in temporary_paths:
+            temporary_paths.append((path, _signature(metadata)))
+        for path, expected_signature in temporary_paths:
             try:
-                path.unlink()
+                metadata = path.lstat()
+                mode = stat.S_IMODE(metadata.st_mode)
+                try:
+                    _validate_regular_file(
+                        metadata,
+                        expected_mode=mode,
+                        label=str(path),
+                    )
+                except RuntimeError as error:
+                    raise RuntimeError(
+                        f"Refusing unsafe PRO-LONG cleanup artifact: {path}"
+                    ) from error
+                if (
+                    mode not in {0o400, 0o600}
+                    or _signature(metadata) != expected_signature
+                ):
+                    raise RuntimeError(
+                        f"Refusing unsafe PRO-LONG cleanup artifact: {path}"
+                    )
+                self._capture_and_unlink(
+                    path,
+                    expected_signature,
+                    error_message=(
+                        f"Refusing unsafe PRO-LONG cleanup artifact: {path}"
+                    ),
+                    allow_missing=True,
+                )
             except FileNotFoundError:
                 pass
 
     def _ensure_private_directories(self) -> None:
-        for path in reversed(self.directory_path.parents[:3]):
+        private_parents = list(self.directory_path.parents[:3])
+        if (
+            len(self.directory_path.parents) > 3
+            and self.directory_path.parents[2].name == "plugin-data"
+        ):
+            private_parents.append(self.directory_path.parents[3])
+        for path in reversed(private_parents):
             _ensure_private_directory(path)
         _ensure_private_directory(self.directory_path)
 

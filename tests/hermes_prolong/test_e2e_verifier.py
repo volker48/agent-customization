@@ -316,7 +316,6 @@ class E2EVerifierTests(unittest.TestCase):
     def test_receipt_write_is_exclusive_private_and_cleanup_is_verified(self) -> None:
         module = load_verifier()
         import stat
-        import tempfile
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

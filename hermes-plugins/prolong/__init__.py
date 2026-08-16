@@ -24,7 +24,6 @@ HOOK_NAMES = (
 def trajectory_path(
     session_id: str,
     *,
-    hermes_home: Path | None = None,
     projection_root: Path | None = None,
 ) -> Path:
     """Return the unhashed tip-session fallback under an explicit plugin namespace.
@@ -41,7 +40,6 @@ def trajectory_path(
 def build_prompt(
     session_info: Mapping[str, Any],
     *,
-    hermes_home: Path | None = None,
     projection_root: Path | None = None,
     controller: ProlongController | None = None,
 ) -> str:
@@ -57,7 +55,6 @@ def build_prompt(
     else:
         path = trajectory_path(
             session_id,
-            hermes_home=hermes_home,
             projection_root=projection_root,
         )
     return (

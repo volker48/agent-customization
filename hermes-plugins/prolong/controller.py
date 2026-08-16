@@ -59,7 +59,8 @@ class ProlongController:
         self._condition = threading.Condition(self._lock)
         self._active_operations = 0
         self._retired_sessions: set[str] = set()
-        self._startup_sweep_started = False
+        self._startup_sweep_running = False
+        self._startup_sweep_completed = False
         self._maintenance = False
         self._closing = False
         self._closed = False
@@ -367,15 +368,36 @@ class ProlongController:
                     log_path = directory / "trajectory.jsonl"
                     try:
                         segments = self._projection_segments(log_path)
-                        orphaned = bool(segments) and not any(
-                            self._reader.session_exists(segment_id)
+                        surviving_segments = tuple(
+                            segment_id
                             for segment_id in segments
+                            if self._reader.session_exists(segment_id)
                         )
-                        if not orphaned:
+                        if not segments or len(surviving_segments) == len(segments):
                             continue
                         lock = self._session_lock(root_session_id)
                         with lock:
                             store = self._store_for(root_session_id)
+                            if surviving_segments:
+                                survivor_id = surviving_segments[-1]
+                                snapshot = self._reader.snapshot(survivor_id)
+                                store.sync(
+                                    snapshot.records,
+                                    force_rebuild=True,
+                                    _process_lock_held=True,
+                                )
+                                with self._lock:
+                                    self._snapshots[root_session_id] = snapshot
+                                    self._session_roots = {
+                                        segment_id: projection_root
+                                        for segment_id, projection_root in self._session_roots.items()
+                                        if projection_root != root_session_id
+                                    }
+                                    for segment_id in snapshot.lineage:
+                                        self._session_roots[segment_id] = (
+                                            root_session_id
+                                        )
+                                continue
                             store.sync(
                                 (),
                                 force_rebuild=True,
@@ -404,7 +426,9 @@ class ProlongController:
         try:
             self.synchronize(session_id)
         except Exception as exc:
-            with self._lock:
+            with self._condition:
+                if self._closing or self._closed:
+                    return
                 self._last_errors[session_id] = f"{hook_name}: {exc}"
             LOGGER.exception(
                 "PRO-LONG %s synchronization failed for %s", hook_name, session_id
@@ -421,14 +445,30 @@ class ProlongController:
         with self._condition:
             while self._maintenance and not self._closing and not self._closed:
                 self._condition.wait()
+            if self._closing or self._closed:
+                return None
             self._retired_sessions.discard(safe_id)
-            run_startup_sweep = not self._startup_sweep_started
-            self._startup_sweep_started = True
+            while (
+                self._startup_sweep_running and not self._closing and not self._closed
+            ):
+                self._condition.wait()
+            if self._closing or self._closed:
+                return None
+            run_startup_sweep = not self._startup_sweep_completed
+            if run_startup_sweep:
+                self._startup_sweep_running = True
         if run_startup_sweep:
             try:
                 self.sweep_orphans()
             except Exception:
                 LOGGER.exception("PRO-LONG startup orphan sweep failed")
+            else:
+                with self._condition:
+                    self._startup_sweep_completed = True
+            finally:
+                with self._condition:
+                    self._startup_sweep_running = False
+                    self._condition.notify_all()
         self._safe_synchronize("on_session_start", safe_id)
         return None
 
@@ -474,6 +514,10 @@ class ProlongController:
         with self._condition:
             if self._closed:
                 return
+            if self._closing:
+                while not self._closed:
+                    self._condition.wait()
+                return
             self._closing = True
             self._condition.notify_all()
             while self._active_operations or self._maintenance:
@@ -485,13 +529,17 @@ class ProlongController:
             self._session_locks.clear()
             self._last_errors.clear()
             self._retired_sessions.clear()
-            self._closed = True
 
-        for root_session_id, store in stores:
-            try:
-                store.cleanup()
-            except Exception:
-                LOGGER.exception(
-                    "PRO-LONG unload cleanup failed for %s", root_session_id
-                )
-        self._reader.close()
+        try:
+            for root_session_id, store in stores:
+                try:
+                    store.cleanup()
+                except Exception:
+                    LOGGER.exception(
+                        "PRO-LONG unload cleanup failed for %s", root_session_id
+                    )
+            self._reader.close()
+        finally:
+            with self._condition:
+                self._closed = True
+                self._condition.notify_all()

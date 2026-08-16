@@ -13,6 +13,52 @@ from tests.hermes_prolong.test_plugin_registration import PLUGIN_DIR, load_plugi
 
 
 class ProjectionStoreTests(unittest.TestCase):
+    def test_sync_creates_a_private_fresh_runtime_home(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+
+        with tempfile.TemporaryDirectory() as directory:
+            runtime_home = Path(directory) / "new-hermes-home"
+            log_path = (
+                runtime_home
+                / "plugin-data"
+                / "prolong"
+                / "sessions"
+                / "session-1"
+                / "trajectory.jsonl"
+            )
+            store = module.ProjectionStore(log_path)
+
+            store.sync(({"record_type": "message", "message": {"id": 1}},))
+
+            self.assertTrue(log_path.is_file())
+            self.assertEqual(stat.S_IMODE(runtime_home.stat().st_mode), 0o700)
+
+    def test_sync_refuses_a_symlinked_runtime_home(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outside = root / "outside"
+            outside.mkdir(mode=0o700)
+            runtime_home = root / "hermes-home"
+            runtime_home.symlink_to(outside, target_is_directory=True)
+            log_path = (
+                runtime_home
+                / "plugin-data"
+                / "prolong"
+                / "sessions"
+                / "session-1"
+                / "trajectory.jsonl"
+            )
+            store = module.ProjectionStore(log_path)
+
+            with self.assertRaisesRegex(RuntimeError, "unsafe PRO-LONG directory"):
+                store.sync(({"record_type": "message", "message": {"id": 1}},))
+
+            self.assertFalse((outside / "plugin-data").exists())
+
     def test_rebuilds_then_appends_only_a_new_suffix_and_noops_when_unchanged(
         self,
     ) -> None:
@@ -279,6 +325,230 @@ class ProjectionStoreTests(unittest.TestCase):
             store.cleanup()
 
             self.assertFalse(log_path.parent.exists())
+
+    def test_cleanup_removes_private_cleanup_quarantine_residue(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = (
+                Path(directory)
+                / "runtime"
+                / "prolong"
+                / "session-1"
+                / "trajectory.jsonl"
+            )
+            store = module.ProjectionStore(log_path)
+            store.sync(({"record_type": "message", "message": {"id": 1}},))
+            quarantine = log_path.parent / ".prolong-cleanup-crash.tmp"
+            quarantine.write_bytes(b"captured derived projection")
+            quarantine.chmod(0o600)
+
+            store.cleanup()
+
+            self.assertFalse(log_path.parent.exists())
+
+    def test_cleanup_removes_an_unchanged_private_log_left_writable(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = (
+                Path(directory)
+                / "runtime"
+                / "prolong"
+                / "session-1"
+                / "trajectory.jsonl"
+            )
+            store = module.ProjectionStore(log_path)
+            store.sync(({"record_type": "message", "message": {"id": 1}},))
+            log_path.chmod(0o600)
+
+            store.cleanup()
+
+            self.assertFalse(log_path.parent.exists())
+
+    def test_cleanup_revalidates_log_identity_immediately_before_unlink(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = (
+                Path(directory)
+                / "runtime"
+                / "prolong"
+                / "session-1"
+                / "trajectory.jsonl"
+            )
+            store = module.ProjectionStore(log_path)
+            store.sync(({"record_type": "message", "message": {"id": 1}},))
+            saved_original = log_path.parent / "saved-original"
+            replacement = log_path.parent / "replacement"
+            replacement.write_text('{"record_type":"replacement"}\n', encoding="utf-8")
+            replacement.chmod(0o400)
+            original_read_signature = module._read_signature
+            swapped = False
+
+            def swap_after_validation(path, *args, **kwargs):
+                nonlocal swapped
+                signature = original_read_signature(path, *args, **kwargs)
+                if Path(path) == log_path and not swapped:
+                    swapped = True
+                    os.replace(log_path, saved_original)
+                    os.replace(replacement, log_path)
+                return signature
+
+            with unittest.mock.patch.object(
+                module, "_read_signature", side_effect=swap_after_validation
+            ):
+                with self.assertRaisesRegex(RuntimeError, "changed PRO-LONG log"):
+                    store.cleanup()
+
+            self.assertEqual(
+                log_path.read_text(encoding="utf-8"),
+                '{"record_type":"replacement"}\n',
+            )
+            self.assertTrue(saved_original.is_file())
+
+    def test_cleanup_captures_log_before_deleting_after_final_validation(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = (
+                Path(directory)
+                / "runtime"
+                / "prolong"
+                / "session-1"
+                / "trajectory.jsonl"
+            )
+            store = module.ProjectionStore(log_path)
+            store.sync(({"record_type": "message", "message": {"id": 1}},))
+            saved_original = log_path.parent / "saved-original"
+            replacement = log_path.parent / "replacement"
+            replacement.write_text('{"record_type":"replacement"}\n', encoding="utf-8")
+            replacement.chmod(0o400)
+            original_read_signature = module._read_signature
+            validation_count = 0
+
+            def swap_after_final_validation(path, *args, **kwargs):
+                nonlocal validation_count
+                signature = original_read_signature(path, *args, **kwargs)
+                if Path(path) == log_path:
+                    validation_count += 1
+                    if validation_count == 2:
+                        os.replace(log_path, saved_original)
+                        os.replace(replacement, log_path)
+                return signature
+
+            with unittest.mock.patch.object(
+                module, "_read_signature", side_effect=swap_after_final_validation
+            ):
+                with self.assertRaisesRegex(RuntimeError, "changed PRO-LONG log"):
+                    store.cleanup()
+
+            self.assertEqual(
+                log_path.read_text(encoding="utf-8"),
+                '{"record_type":"replacement"}\n',
+            )
+            self.assertTrue(saved_original.is_file())
+
+    def test_cleanup_revalidates_temporary_artifact_before_unlink(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = (
+                Path(directory)
+                / "runtime"
+                / "prolong"
+                / "session-1"
+                / "trajectory.jsonl"
+            )
+            store = module.ProjectionStore(log_path)
+            store.sync(({"record_type": "message", "message": {"id": 1}},))
+            temporary = log_path.parent / ".trajectory-race.tmp"
+            temporary.write_bytes(b"private temporary")
+            temporary.chmod(0o600)
+            outside = Path(directory) / "outside"
+            outside.write_bytes(b"outside")
+            original_validate = module._validate_regular_file
+            swapped = False
+
+            def swap_after_validation(metadata, *, expected_mode, label):
+                nonlocal swapped
+                original_validate(
+                    metadata,
+                    expected_mode=expected_mode,
+                    label=label,
+                )
+                if Path(label) == temporary and not swapped:
+                    swapped = True
+                    temporary.unlink()
+                    temporary.symlink_to(outside)
+
+            with unittest.mock.patch.object(
+                module,
+                "_validate_regular_file",
+                side_effect=swap_after_validation,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "unsafe PRO-LONG cleanup artifact"
+                ):
+                    store.cleanup()
+
+            self.assertTrue(temporary.is_symlink())
+            self.assertEqual(outside.read_bytes(), b"outside")
+
+    def test_cleanup_captures_temporary_before_deleting_after_final_validation(
+        self,
+    ) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.projection")
+
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = (
+                Path(directory)
+                / "runtime"
+                / "prolong"
+                / "session-1"
+                / "trajectory.jsonl"
+            )
+            store = module.ProjectionStore(log_path)
+            store.sync(({"record_type": "message", "message": {"id": 1}},))
+            temporary = log_path.parent / ".trajectory-final-race.tmp"
+            temporary.write_bytes(b"private temporary")
+            temporary.chmod(0o600)
+            outside = Path(directory) / "outside"
+            outside.write_bytes(b"outside")
+            original_validate = module._validate_regular_file
+            validation_count = 0
+
+            def swap_after_final_validation(metadata, *, expected_mode, label):
+                nonlocal validation_count
+                original_validate(
+                    metadata,
+                    expected_mode=expected_mode,
+                    label=label,
+                )
+                if Path(label) == temporary:
+                    validation_count += 1
+                    if validation_count == 2:
+                        temporary.unlink()
+                        temporary.symlink_to(outside)
+
+            with unittest.mock.patch.object(
+                module,
+                "_validate_regular_file",
+                side_effect=swap_after_final_validation,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError, "unsafe PRO-LONG cleanup artifact"
+                ):
+                    store.cleanup()
+
+            self.assertTrue(temporary.is_symlink())
+            self.assertEqual(outside.read_bytes(), b"outside")
 
     def test_cleanup_refuses_arbitrary_non_trajectory_artifacts(self) -> None:
         load_plugin_module()

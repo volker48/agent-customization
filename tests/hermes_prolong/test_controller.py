@@ -301,6 +301,105 @@ class ProlongControllerTests(unittest.TestCase):
             self.assertEqual(set(synchronized), set(session_ids))
             controller.close()
 
+    def test_failed_startup_orphan_sweep_is_retried_by_a_later_session(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        reader = MultiSessionReader()
+
+        with tempfile.TemporaryDirectory() as directory:
+            controller = module.ProlongController(
+                reader=reader,
+                projection_root=(
+                    Path(directory) / "plugin-data" / "prolong" / "sessions"
+                ),
+            )
+            sweep_calls = 0
+            synchronized: list[str] = []
+
+            def flaky_sweep() -> int:
+                nonlocal sweep_calls
+                sweep_calls += 1
+                if sweep_calls == 1:
+                    raise OSError("temporary sweep failure")
+                return 0
+
+            def record_synchronize(hook_name: str, session_id: str) -> None:
+                self.assertEqual(hook_name, "on_session_start")
+                synchronized.append(session_id)
+
+            controller.sweep_orphans = flaky_sweep
+            controller._safe_synchronize = record_synchronize
+
+            with self.assertLogs("hermes.plugins.prolong", level="ERROR"):
+                controller.on_session_start(session_id="s1")
+            controller.on_session_start(session_id="s2")
+
+            self.assertEqual(sweep_calls, 2)
+            self.assertEqual(synchronized, ["s1", "s2"])
+            controller.close()
+
+    def test_overlapping_session_start_retries_a_failed_startup_sweep(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        reader = MultiSessionReader()
+        session_ids = tuple(f"s{index}" for index in range(6))
+
+        with tempfile.TemporaryDirectory() as directory:
+            controller = module.ProlongController(
+                reader=reader,
+                projection_root=(
+                    Path(directory) / "plugin-data" / "prolong" / "sessions"
+                ),
+            )
+            first_sweep_entered = threading.Event()
+            release_first_sweep = threading.Event()
+            start_barrier = threading.Barrier(len(session_ids) + 1)
+            calls_lock = threading.Lock()
+            sweep_calls = 0
+            synchronized: list[str] = []
+
+            def fail_once_sweep() -> int:
+                nonlocal sweep_calls
+                with calls_lock:
+                    sweep_calls += 1
+                    call_number = sweep_calls
+                if call_number == 1:
+                    first_sweep_entered.set()
+                    if not release_first_sweep.wait(timeout=5):
+                        raise TimeoutError("test did not release failed sweep")
+                    raise OSError("temporary sweep failure")
+                return 0
+
+            def record_synchronize(hook_name: str, session_id: str) -> None:
+                self.assertEqual(hook_name, "on_session_start")
+                with calls_lock:
+                    synchronized.append(session_id)
+
+            controller.sweep_orphans = fail_once_sweep
+            controller._safe_synchronize = record_synchronize
+
+            def start_session(session_id: str) -> None:
+                start_barrier.wait(timeout=5)
+                controller.on_session_start(session_id=session_id)
+
+            threads = [
+                threading.Thread(target=start_session, args=(session_id,))
+                for session_id in session_ids
+            ]
+            for thread in threads:
+                thread.start()
+            start_barrier.wait(timeout=5)
+            self.assertTrue(first_sweep_entered.wait(timeout=2))
+            with self.assertLogs("hermes.plugins.prolong", level="ERROR"):
+                release_first_sweep.set()
+                for thread in threads:
+                    thread.join(timeout=2)
+
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(sweep_calls, 2)
+            self.assertEqual(set(synchronized), set(session_ids))
+            controller.close()
+
     def test_hooks_synchronize_and_lifecycle_cleanup_the_session_projection(
         self,
     ) -> None:
@@ -500,6 +599,19 @@ class ProlongControllerTests(unittest.TestCase):
             reader.existing.remove("tip")
             self.assertEqual(controller.sweep_orphans(), 0)
             self.assertTrue(root_log.exists())
+            surviving_records = [
+                json.loads(line)
+                for line in root_log.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(
+                [
+                    record["session"]["id"]
+                    for record in surviving_records
+                    if record["record_type"] == "session_segment"
+                ],
+                ["root"],
+            )
+            self.assertNotIn("tip", json.dumps(surviving_records, sort_keys=True))
 
             reader.existing.clear()
             self.assertEqual(controller.sweep_orphans(), 1)
@@ -868,6 +980,88 @@ class ProlongControllerTests(unittest.TestCase):
             self.assertFalse(path_thread.is_alive())
             self.assertFalse(close_thread.is_alive())
             self.assertFalse((root / "s1").exists())
+
+    def test_concurrent_close_waits_for_physical_cleanup_completion(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        reader = FakeReader()
+        cleanup_entered = threading.Event()
+        release_cleanup = threading.Event()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            controller = module.ProlongController(reader=reader, projection_root=root)
+            controller.synchronize("s1")
+            log_path = root / "s1" / "trajectory.jsonl"
+            store = controller._stores["s1"]
+            real_cleanup = store.cleanup
+
+            def blocking_cleanup(*args, **kwargs) -> None:
+                cleanup_entered.set()
+                if not release_cleanup.wait(timeout=5):
+                    raise TimeoutError("test did not release close cleanup")
+                real_cleanup(*args, **kwargs)
+
+            store.cleanup = blocking_cleanup
+            first_close = threading.Thread(target=controller.close)
+            second_close = threading.Thread(target=controller.close)
+            first_close.start()
+            self.assertTrue(cleanup_entered.wait(timeout=2))
+            second_close.start()
+            time.sleep(0.05)
+
+            try:
+                self.assertTrue(first_close.is_alive())
+                self.assertTrue(second_close.is_alive())
+                self.assertTrue(log_path.exists())
+                self.assertFalse(reader.closed)
+            finally:
+                release_cleanup.set()
+                first_close.join(timeout=2)
+                second_close.join(timeout=2)
+
+            self.assertFalse(first_close.is_alive())
+            self.assertFalse(second_close.is_alive())
+            self.assertFalse(log_path.exists())
+            self.assertTrue(reader.closed)
+
+    def test_session_start_during_close_does_not_resurrect_controller_state(
+        self,
+    ) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        reader = FakeReader()
+        cleanup_entered = threading.Event()
+        release_cleanup = threading.Event()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            controller = module.ProlongController(reader=reader, projection_root=root)
+            controller.synchronize("s1")
+            store = controller._stores["s1"]
+            real_cleanup = store.cleanup
+
+            def blocking_cleanup(*args, **kwargs) -> None:
+                cleanup_entered.set()
+                if not release_cleanup.wait(timeout=5):
+                    raise TimeoutError("test did not release close cleanup")
+                real_cleanup(*args, **kwargs)
+
+            store.cleanup = blocking_cleanup
+            close_thread = threading.Thread(target=controller.close)
+            close_thread.start()
+            self.assertTrue(cleanup_entered.wait(timeout=2))
+
+            try:
+                self.assertIsNone(controller.on_session_start(session_id="s2"))
+                self.assertEqual(controller._session_roots, {})
+                self.assertEqual(controller._last_errors, {})
+            finally:
+                release_cleanup.set()
+                close_thread.join(timeout=2)
+
+            self.assertFalse(close_thread.is_alive())
+            self.assertTrue(reader.closed)
 
     def test_close_waits_for_in_flight_sync_and_prevents_republication(self) -> None:
         load_plugin_module()
