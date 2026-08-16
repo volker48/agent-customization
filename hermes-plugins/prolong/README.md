@@ -34,7 +34,10 @@ anchor and each divergent lineage receives a distinct stable anchor. One branch 
 therefore never overwrite or disclose another branch's projection. If an ancestor is
 resumed while a descendant still advertises that root anchor, the resumed ancestor
 receives a deterministic synthetic anchor instead of replacing the descendant's
-projection.
+projection. A compatible prefix is reused only when no other session—whether in this
+controller or another process—still advertises it; internal synchronization alone does
+not freeze a path. Failed synchronization retains the safely resolved anchor mapping,
+so fallback never selects an occupied raw session-ID path.
 
 The plugin synchronizes on session start, before model and tool calls, after the
 model call, and at the end of each turn. It uses the canonical database as the

@@ -62,6 +62,7 @@ class ProlongController:
         self._session_roots: dict[str, str] = {}
         self._session_locks: dict[str, threading.RLock] = {}
         self._leases: dict[str, int] = {}
+        self._advertised_sessions: dict[str, set[str]] = {}
         self._last_errors: dict[str, str] = {}
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
@@ -137,6 +138,44 @@ class ProlongController:
         root_session_id = validate_session_id(lineage[0])
         return root_session_id, lineage
 
+    def _mark_advertised(self, session_id: str, root_session_id: str) -> None:
+        with self._lock:
+            self._advertised_sessions.setdefault(root_session_id, set()).add(session_id)
+
+    def _anchor_is_advertised(
+        self,
+        root_session_id: str,
+        requesting_session_id: str,
+    ) -> bool:
+        with self._lock:
+            local_advertisers = self._advertised_sessions.get(root_session_id, set())
+            if local_advertisers - {requesting_session_id}:
+                return True
+            local_descriptor = self._leases.pop(root_session_id, None)
+        if local_descriptor is not None:
+            release_projection_lease(local_descriptor)
+        probe: int | None = None
+        try:
+            probe = acquire_projection_lease(
+                self._root(),
+                root_session_id,
+                exclusive=True,
+                nonblocking=True,
+            )
+            return probe is None
+        finally:
+            if probe is not None:
+                release_projection_lease(probe)
+            if local_descriptor is not None:
+                restored = cast(
+                    int,
+                    acquire_projection_lease(self._root(), root_session_id),
+                )
+                with self._lock:
+                    existing = self._leases.setdefault(root_session_id, restored)
+                if existing != restored:
+                    release_projection_lease(restored)
+
     def _find_projection_anchor(
         self,
         session_id: str,
@@ -170,7 +209,11 @@ class ProlongController:
                 segments = self._projection_segments(directory / "trajectory.jsonl")
                 if segments and segments[-1] == session_id:
                     exact.append((len(segments), anchor))
-                elif segments and lineage[: len(segments)] == segments:
+                elif (
+                    segments
+                    and lineage[: len(segments)] == segments
+                    and not self._anchor_is_advertised(anchor, session_id)
+                ):
                     compatible.append((len(segments), anchor))
             except (FileNotFoundError, RuntimeError, json.JSONDecodeError):
                 continue
@@ -231,10 +274,28 @@ class ProlongController:
                     )
                     with projection_root_transaction(self._root()):
                         with self._lock:
-                            root_session_id = self._session_roots.setdefault(
-                                safe_id, safe_id
-                            )
-                        self._acquire_anchor_lease(root_session_id)
+                            known_root = self._session_roots.get(safe_id)
+                        if known_root is None:
+                            canonical_root, lineage = self._lineage_root(safe_id)
+                            raw_fallback = log_path_for(self._root(), safe_id)
+                            if raw_fallback.exists() or self._anchor_is_advertised(
+                                safe_id,
+                                safe_id,
+                            ):
+                                fallback_root = self._projection_root_for(
+                                    safe_id,
+                                    canonical_root,
+                                    lineage,
+                                )
+                            else:
+                                fallback_root = safe_id
+                            with self._lock:
+                                self._session_roots[safe_id] = fallback_root
+                        else:
+                            fallback_root = known_root
+                        self._acquire_anchor_lease(fallback_root)
+                        root_session_id = fallback_root
+                self._mark_advertised(safe_id, root_session_id)
                 return log_path_for(self._root(), root_session_id)
         except Exception:
             LOGGER.exception(
@@ -271,6 +332,8 @@ class ProlongController:
                 lineage,
             )
             self._acquire_anchor_lease(root_session_id)
+            with self._lock:
+                self._session_roots[safe_id] = root_session_id
             lock = self._session_lock(root_session_id)
             with lock:
                 store = self._store_for(root_session_id)
@@ -354,6 +417,7 @@ class ProlongController:
                         self._stores.pop(root_session_id, None)
                         self._snapshots.pop(root_session_id, None)
                         self._session_locks.pop(root_session_id, None)
+                        self._advertised_sessions.pop(root_session_id, None)
                         self._session_roots = {
                             segment_id: projection_root
                             for segment_id, projection_root in self._session_roots.items()
@@ -642,6 +706,7 @@ class ProlongController:
             self._snapshots.clear()
             self._session_roots.clear()
             self._session_locks.clear()
+            self._advertised_sessions.clear()
             self._last_errors.clear()
             self._retired_sessions.clear()
 

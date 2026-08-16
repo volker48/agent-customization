@@ -670,6 +670,132 @@ class ProlongControllerTests(unittest.TestCase):
             tip_controller.close()
             self.assertFalse(tip_path.parent.exists())
 
+    def test_descendant_does_not_overwrite_live_resumed_ancestor_projection(
+        self,
+    ) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            ancestor_controller = module.ProlongController(
+                reader=RotatingReader(),
+                projection_root=root,
+            )
+            descendant_controller = module.ProlongController(
+                reader=RotatingReader(),
+                projection_root=root,
+            )
+
+            ancestor_path = ancestor_controller.projection_path("root")
+            ancestor_bytes = ancestor_path.read_bytes()
+            descendant_path = descendant_controller.projection_path("tip")
+
+            self.assertNotEqual(descendant_path, ancestor_path)
+            self.assertEqual(ancestor_path.read_bytes(), ancestor_bytes)
+            self.assertNotIn('"id":"tip"', ancestor_bytes.decode())
+            self.assertIn(
+                '"id":"tip"',
+                descendant_path.read_text(encoding="utf-8"),
+            )
+
+            descendant_controller.close()
+            self.assertFalse(descendant_path.parent.exists())
+            self.assertEqual(ancestor_path.read_bytes(), ancestor_bytes)
+            ancestor_controller.close()
+            self.assertFalse(ancestor_path.parent.exists())
+
+    def test_descendant_does_not_overwrite_same_controller_advertised_ancestor(
+        self,
+    ) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            controller = module.ProlongController(
+                reader=RotatingReader(),
+                projection_root=root,
+            )
+
+            ancestor_path = controller.projection_path("root")
+            ancestor_bytes = ancestor_path.read_bytes()
+            descendant_path = controller.projection_path("tip")
+
+            self.assertNotEqual(descendant_path, ancestor_path)
+            self.assertEqual(ancestor_path.read_bytes(), ancestor_bytes)
+            self.assertIn(
+                '"id":"tip"',
+                descendant_path.read_text(encoding="utf-8"),
+            )
+            controller.close()
+            self.assertFalse(ancestor_path.parent.exists())
+            self.assertFalse(descendant_path.parent.exists())
+
+    def test_foreign_advertiser_blocks_locally_synchronized_prefix_reuse(
+        self,
+    ) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            rotating_controller = module.ProlongController(
+                reader=RotatingReader(),
+                projection_root=root,
+            )
+            foreign_advertiser = module.ProlongController(
+                reader=RotatingReader(),
+                projection_root=root,
+            )
+
+            rotating_controller.synchronize("root")
+            advertised_path = foreign_advertiser.projection_path("root")
+            advertised_bytes = advertised_path.read_bytes()
+            rotating_controller.synchronize("tip")
+            tip_path = rotating_controller.projection_path("tip")
+
+            self.assertNotEqual(tip_path, advertised_path)
+            self.assertEqual(advertised_path.read_bytes(), advertised_bytes)
+            self.assertIn('"id":"tip"', tip_path.read_text(encoding="utf-8"))
+
+            rotating_controller.close()
+            self.assertEqual(advertised_path.read_bytes(), advertised_bytes)
+            foreign_advertiser.close()
+            self.assertFalse(advertised_path.parent.exists())
+
+    def test_failed_resumed_ancestor_uses_isolated_fallback_anchor(self) -> None:
+        load_plugin_module()
+        module = importlib.import_module("test_hermes_prolong_plugin.controller")
+
+        class FailingResumedReader(RotatingReader):
+            def snapshot(self, session_id: str, *, previous=None):
+                if session_id == "root":
+                    raise OSError("resumed snapshot unavailable")
+                return super().snapshot(session_id, previous=previous)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "plugin-data" / "prolong" / "sessions"
+            tip_controller = module.ProlongController(
+                reader=RotatingReader(),
+                projection_root=root,
+            )
+            resumed_controller = module.ProlongController(
+                reader=FailingResumedReader(),
+                projection_root=root,
+            )
+
+            tip_path = tip_controller.projection_path("tip")
+            tip_bytes = tip_path.read_bytes()
+            fallback_path = resumed_controller.projection_path("root")
+
+            self.assertNotEqual(fallback_path, tip_path)
+            self.assertNotIn(".unavailable", fallback_path.parts)
+            self.assertEqual(tip_path.read_bytes(), tip_bytes)
+            self.assertFalse(fallback_path.is_file())
+
+            resumed_controller.close()
+            self.assertEqual(tip_path.read_bytes(), tip_bytes)
+            tip_controller.close()
+            self.assertFalse(tip_path.parent.exists())
+
     def test_shared_projection_survives_first_controller_close_until_last_lease(
         self,
     ) -> None:
