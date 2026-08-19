@@ -141,8 +141,12 @@ export class PiPairwiseBatchScorer implements DirectedPairBatchScorer {
       this.options.signal,
     );
     const reward = mapSlotRewardToCandidateOrder(job, slotReward);
-    await this.options.cache?.set(evaluation.cacheKey, reward);
     rewards.set(evaluation.evaluationKey, reward);
+    try {
+      await this.options.cache?.set(evaluation.cacheKey, reward);
+    } catch {
+      // Cache persistence is an optimization; a completed verifier score stays valid.
+    }
   }
 }
 
@@ -200,18 +204,23 @@ async function mapWithConcurrency<T>(
   operation: (value: T) => Promise<void>,
 ): Promise<void> {
   let nextIndex = 0;
-  const workers = Array.from(
-    { length: Math.min(concurrency, values.length) },
-    async () => {
-      while (true) {
-        const index = nextIndex;
-        nextIndex += 1;
-        if (index >= values.length) return;
+  let firstFailure: unknown;
+  const workers = Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+    while (true) {
+      if (firstFailure !== undefined) return;
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= values.length) return;
+      try {
         await operation(values[index]);
+      } catch (error) {
+        firstFailure ??= error;
+        return;
       }
-    },
-  );
+    }
+  });
   await Promise.all(workers);
+  if (firstFailure !== undefined) throw firstFailure;
 }
 
 function positiveInteger(value: number, label: string): number {
