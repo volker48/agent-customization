@@ -28,6 +28,11 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
       - name: Configure pnpm security
         run: |
           pnpm config set minimumReleaseAge 1440
@@ -56,6 +61,9 @@ jobs:
 
       - name: Run unit tests
         run: pnpm test:unit
+
+      - name: Run Hermes PRO-LONG plugin unit tests
+        run: pnpm test:hermes-prolong
 
   swift-remote-control:
     name: Swift checks and iOS simulator build
