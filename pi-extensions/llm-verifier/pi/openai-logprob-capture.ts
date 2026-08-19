@@ -29,12 +29,7 @@ export function parseOpenAiSseLogprobs(text: string): TokenPositionDistribution[
       .join("\n")
       .trim();
     if (!data || data === "[DONE]") continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(data);
-    } catch {
-      continue;
-    }
+    const parsed = JSON.parse(data) as unknown;
     positions.push(...extractPositions(parsed));
   }
   return positions;
@@ -43,7 +38,7 @@ export function parseOpenAiSseLogprobs(text: string): TokenPositionDistribution[
 export class OpenAiSseLogprobCapture {
   readonly fetch: typeof globalThis.fetch;
   private readonly pending: Promise<void>[] = [];
-  private readonly positions: TokenPositionDistribution[] = [];
+  private readonly responseGroups: TokenPositionDistribution[][] = [];
   private requests = 0;
 
   constructor(baseFetch: typeof globalThis.fetch = globalThis.fetch) {
@@ -52,12 +47,9 @@ export class OpenAiSseLogprobCapture {
       const response = await baseFetch(input, init);
       if (response.body) {
         const clone = response.clone();
-        const pending = clone
-          .text()
-          .then((text) => {
-            this.positions.push(...parseOpenAiSseLogprobs(text));
-          })
-          .catch(() => undefined);
+        const pending = clone.text().then((text) => {
+          this.responseGroups.push(parseOpenAiSseLogprobs(text));
+        });
         this.pending.push(pending);
       }
       return response;
@@ -68,9 +60,9 @@ export class OpenAiSseLogprobCapture {
     return this.requests;
   }
 
-  async finish(): Promise<TokenPositionDistribution[]> {
+  async finish(): Promise<TokenPositionDistribution[][]> {
     await Promise.all(this.pending);
-    return [...this.positions];
+    return this.responseGroups.map((group) => [...group]);
   }
 }
 
