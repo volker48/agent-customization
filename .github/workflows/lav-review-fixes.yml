@@ -1,0 +1,42 @@
+name: LAV Review Fixup
+
+on:
+  push:
+    branches:
+      - feat/pi-llm-verifier-core
+
+permissions:
+  contents: write
+
+jobs:
+  fixup:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: feat/pi-llm-verifier-core
+          fetch-depth: 0
+      - uses: pnpm/action-setup@8912a9102ac27614460f54aedde9e1e7f9aec20d # v6.0.5
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install current lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Align Pi runtime and regenerate lockfile
+        run: pnpm add -D @earendil-works/pi-ai@0.84.2 @earendil-works/pi-coding-agent@0.84.2 @earendil-works/pi-tui@0.84.2 --lockfile-only --ignore-scripts
+      - name: Format verifier changes
+        run: pnpm exec oxfmt --write pi-extensions/llm-verifier.ts pi-extensions/llm-verifier tests/llm-verifier-*.test.ts package.json
+      - name: Commit generated changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json pnpm-lock.yaml pi-extensions/llm-verifier.ts pi-extensions/llm-verifier tests/llm-verifier-*.test.ts
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "chore: align verifier runtime and formatting"
+          git push origin HEAD:feat/pi-llm-verifier-core
