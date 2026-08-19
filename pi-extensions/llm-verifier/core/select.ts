@@ -11,9 +11,7 @@ import {
 import type { DirectedPair, DirectedPairReward, TournamentResult } from "./types.js";
 
 export interface DirectedPairBatchScorer {
-  scorePairs(
-    pairs: readonly DirectedPair[],
-  ): Promise<ReadonlyMap<string, DirectedPairReward>>;
+  scorePairs(pairs: readonly DirectedPair[]): Promise<ReadonlyMap<string, DirectedPairReward>>;
 }
 
 export async function selectBestCandidate(args: {
@@ -65,18 +63,8 @@ export async function selectBestCandidate(args: {
 
   const wins = Array<number>(args.candidateCount).fill(0);
   const counts = Array<number>(args.candidateCount).fill(0);
-  accumulate(
-    ringPairs,
-    (pair) => requireScore(ringScores, pair, "ring pass"),
-    wins,
-    counts,
-  );
-  accumulate(
-    pivotPairs,
-    (pair) => requireScore(pivotScores, pair, "pivot round"),
-    wins,
-    counts,
-  );
+  accumulate(ringPairs, (pair) => requireScore(ringScores, pair, "ring pass"), wins, counts);
+  accumulate(pivotPairs, (pair) => requireScore(pivotScores, pair, "pivot round"), wins, counts);
 
   const ranking = rankByMeanPreference(wins, counts);
   return {

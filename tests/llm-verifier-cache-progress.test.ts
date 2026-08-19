@@ -54,12 +54,8 @@ describe("content-addressed cache", () => {
     expect(computeRunHash({ ...base, candidateEvidence: ["different", "patch B"] })).not.toBe(
       first,
     );
-    expect(computeRunHash({ ...base, model: { ...base.model, model: "v5" } })).not.toBe(
-      first,
-    );
-    expect(scoreCacheEntryKey("c", 0, 1, 0)).not.toBe(
-      scoreCacheEntryKey("c", 1, 0, 0),
-    );
+    expect(computeRunHash({ ...base, model: { ...base.model, model: "v5" } })).not.toBe(first);
+    expect(scoreCacheEntryKey("c", 0, 1, 0)).not.toBe(scoreCacheEntryKey("c", 1, 0, 0));
     expect(canonicalText(" a  \r\n b\n")).toBe("a\n b");
     expect(stableStringify({ b: 2, a: 1 })).toBe('{"a":1,"b":2}');
 
@@ -123,6 +119,11 @@ describe("progress scoring", () => {
     const scores = extractProgressScores(completion, 2, 2);
     expect(scores[0]).toBeLessThan(0.02);
     expect(scores[1]).toBeGreaterThan(0.98);
-    expect(averageProgressRepetitions([[0, null], [1, null]])).toEqual([0.5, null]);
+    expect(
+      averageProgressRepetitions([
+        [0, null],
+        [1, null],
+      ]),
+    ).toEqual([0.5, null]);
   });
 });

@@ -51,9 +51,7 @@ export function mapSlotRewardToCandidateOrder(
     : { candidateA: reward.slotA, candidateB: reward.slotB };
 }
 
-export function averageDirectedRewards(
-  rewards: readonly DirectedPairReward[],
-): DirectedPairReward {
+export function averageDirectedRewards(rewards: readonly DirectedPairReward[]): DirectedPairReward {
   if (rewards.length === 0) throw new Error("Cannot average an empty reward list");
   let candidateA = 0;
   let candidateB = 0;

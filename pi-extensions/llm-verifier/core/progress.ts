@@ -34,8 +34,6 @@ export function averageProgressRepetitions(
     const values = repetitions
       .map((repetition) => repetition[checkpoint])
       .filter((value): value is number => value !== null);
-    return values.length
-      ? values.reduce((sum, value) => sum + value, 0) / values.length
-      : null;
+    return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
   });
 }

@@ -2,10 +2,7 @@ import type { Api, AssistantMessage, Context, Model } from "@earendil-works/pi-a
 import { describe, expect, it } from "vitest";
 
 import type { PairScoreCache } from "../pi-extensions/llm-verifier/core/cache.js";
-import type {
-  Criterion,
-  DirectedPairReward,
-} from "../pi-extensions/llm-verifier/core/types.js";
+import type { Criterion, DirectedPairReward } from "../pi-extensions/llm-verifier/core/types.js";
 import {
   PiVerifierModelClient,
   requirePiModelRegistry,
@@ -67,10 +64,7 @@ function sseDataUrl(positions: unknown[]): string {
   return `data:text/event-stream;charset=utf-8,${encodeURIComponent(body)}`;
 }
 
-function position(
-  token: string,
-  alternatives: readonly { token: string; logprob: number }[],
-) {
+function position(token: string, alternatives: readonly { token: string; logprob: number }[]) {
   return {
     token,
     logprob: alternatives[0]?.logprob ?? 0,
@@ -157,13 +151,13 @@ describe("OpenAI-compatible logprob observation", () => {
       const sampled = scoreA ? " A" : " T";
       const alternatives = scoreA
         ? [
-          { token: " A", logprob: -0.1 },
-          { token: "T", logprob: -2.1 },
-        ]
+            { token: " A", logprob: -0.1 },
+            { token: "T", logprob: -2.1 },
+          ]
         : [
-          { token: "A", logprob: -2.1 },
-          { token: " T", logprob: -0.1 },
-        ];
+            { token: "A", logprob: -2.1 },
+            { token: " T", logprob: -0.1 },
+          ];
       const payload = await options.onPayload?.({ model: model.id, stream: true }, model);
       if (payload && typeof payload === "object") payloads.push(payload);
       await options.fetch?.(sseDataUrl([position(sampled, alternatives)]));
@@ -192,7 +186,7 @@ describe("OpenAI-compatible logprob observation", () => {
   });
 
   it("fails clearly on unsupported Pi/provider capability", async () => {
-    expect(() => requirePiModelRegistry({ find() { } })).toThrow(/0\.84\.2/);
+    expect(() => requirePiModelRegistry({ find() {} })).toThrow(/0\.84\.2/);
     expect(
       () =>
         new PiVerifierModelClient(
@@ -247,8 +241,12 @@ describe("cached Pi batch scorer", () => {
   it("caches directed criterion/repetition scores and maps odd slots back", async () => {
     const entries = new Map<string, DirectedPairReward>();
     const cache: PairScoreCache = {
-      async get(key) { return entries.get(key); },
-      async set(key, value) { entries.set(key, value); },
+      async get(key) {
+        return entries.get(key);
+      },
+      async set(key, value) {
+        entries.set(key, value);
+      },
     };
     const seen: Array<[string, string]> = [];
     const scorer = new PiPairwiseBatchScorer(

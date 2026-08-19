@@ -99,11 +99,10 @@ describe("score scales and expectations", () => {
 
   it("throws on missing distributions instead of manufacturing a neutral tie", () => {
     expect(() =>
-      extractTaggedExpectation(
-        { text: "<score_A> A </score_A>", positions: [] },
-        "<score_A>",
-        { direction: "pairwise", minScaleTokens: 2 },
-      ),
+      extractTaggedExpectation({ text: "<score_A> A </score_A>", positions: [] }, "<score_A>", {
+        direction: "pairwise",
+        minScaleTokens: 2,
+      }),
     ).toThrow(MissingScoreDistributionError);
     expect(parseTaggedSampledLetter("<score_A> b </score_A>", "<score_A>")).toBe("B");
   });
@@ -153,9 +152,10 @@ describe("repeated pairwise evaluation", () => {
       [1, 4, 1],
       [2, 1, 4],
     ]);
-    expect(
-      mapSlotRewardToCandidateOrder(jobs[1], { slotA: 0.2, slotB: 0.9 }),
-    ).toEqual({ candidateA: 0.9, candidateB: 0.2 });
+    expect(mapSlotRewardToCandidateOrder(jobs[1], { slotA: 0.2, slotB: 0.9 })).toEqual({
+      candidateA: 0.9,
+      candidateB: 0.2,
+    });
   });
 
   it("averages criteria and repetitions in candidate order", async () => {
@@ -167,9 +167,7 @@ describe("repeated pairwise evaluation", () => {
       repetitions: 2,
       async scoreSlots(job, candidateA, candidateB) {
         seen.push([job.repetition, candidateA, candidateB]);
-        return job.swapped
-          ? { slotA: 0.1, slotB: 0.8 }
-          : { slotA: 0.8, slotB: 0.1 };
+        return job.swapped ? { slotA: 0.1, slotB: 0.8 } : { slotA: 0.8, slotB: 0.1 };
       },
     });
     expect(seen).toEqual([
@@ -245,9 +243,12 @@ describe("Probabilistic Pivot Tournament", () => {
         candidateCount: 3,
         pivots: 1,
         seed: 0,
-        scorer: { async scorePairs() { return new Map(); } },
+        scorer: {
+          async scorePairs() {
+            return new Map();
+          },
+        },
       }),
     ).rejects.toThrow(/materially failed/);
   });
 });
-

@@ -97,8 +97,8 @@ export function buildProgressPrompt(input: ProgressPromptInput): string {
     "",
     `You will score the trajectory at ${input.checkpointSteps.length} CHECKPOINTS. The score measures exactly ONE thing:`,
     "",
-    '    "Given everything the agent has done up to and including this step, would the agent\'s CURRENT state ' +
-      'actually satisfy the task\'s hidden grader (i.e. produce the expected files / output / behavior the task requires)?"',
+    "    \"Given everything the agent has done up to and including this step, would the agent's CURRENT state " +
+      "actually satisfy the task's hidden grader (i.e. produce the expected files / output / behavior the task requires)?\"",
     "",
     "Use the 20-letter A..T scale:",
     "  A = certainly NO — nothing useful done yet, or the agent is going down a clearly wrong path.",
@@ -127,9 +127,7 @@ export function buildProgressPrompt(input: ProgressPromptInput): string {
     "Score each checkpoint INDEPENDENTLY based on the agent's current best attempt at that point. " +
       `Output EXACTLY ${input.checkpointSteps.length} lines and nothing else, in the format:`,
   );
-  input.checkpointSteps.forEach((_, index) =>
-    output.push(`<c${index + 1}>LETTER</c${index + 1}>`),
-  );
+  input.checkpointSteps.forEach((_, index) => output.push(`<c${index + 1}>LETTER</c${index + 1}>`));
   output.push("", "where each LETTER is a single letter from A to T.");
   return output.join("\n");
 }

@@ -150,9 +150,7 @@ export class PiPairwiseBatchScorer implements DirectedPairBatchScorer {
   }
 }
 
-export function partitionPrefixWarmup(
-  evaluations: readonly PendingPairwiseEvaluation[],
-): {
+export function partitionPrefixWarmup(evaluations: readonly PendingPairwiseEvaluation[]): {
   warm: PendingPairwiseEvaluation[];
   rest: PendingPairwiseEvaluation[];
 } {

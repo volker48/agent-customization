@@ -1,8 +1,4 @@
-import {
-  computeRunHash,
-  JsonPairScoreCache,
-  type RunFingerprintInput,
-} from "../core/cache.js";
+import { computeRunHash, JsonPairScoreCache, type RunFingerprintInput } from "../core/cache.js";
 import { selectBestCandidate } from "../core/select.js";
 import type { Criterion, TournamentResult } from "../core/types.js";
 import {
@@ -47,9 +43,7 @@ export async function selectWithNativeVerifier(
   }
 
   const runHash = computeRunHash(buildRunFingerprint(options));
-  const cache = options.cachePath
-    ? new JsonPairScoreCache(options.cachePath, runHash)
-    : undefined;
+  const cache = options.cachePath ? new JsonPairScoreCache(options.cachePath, runHash) : undefined;
   const scorer = new PiPairwiseBatchScorer(options.client, {
     problem: options.problem,
     candidates: options.candidates,
@@ -73,9 +67,7 @@ export async function selectWithNativeVerifier(
   return { ...result, runHash };
 }
 
-export function buildRunFingerprint(
-  options: NativeVerifierSelectionOptions,
-): RunFingerprintInput {
+export function buildRunFingerprint(options: NativeVerifierSelectionOptions): RunFingerprintInput {
   const client = options.client.fingerprint();
   return {
     implementation: {

@@ -86,10 +86,7 @@ function parsePosition(value: unknown): TokenPositionDistribution[] {
     for (const rawAlternative of position.top_logprobs) {
       if (!isObject(rawAlternative)) continue;
       const alternative = rawAlternative as OpenAiTopLogprob;
-      if (
-        typeof alternative.token === "string" &&
-        typeof alternative.logprob === "number"
-      ) {
+      if (typeof alternative.token === "string" && typeof alternative.logprob === "number") {
         alternatives.push({ token: alternative.token, logprob: alternative.logprob });
       }
     }

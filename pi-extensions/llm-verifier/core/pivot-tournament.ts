@@ -31,9 +31,7 @@ class PythonRandom implements RandomSource {
 
   integerBelow(exclusiveMaximum: number): number {
     if (!Number.isSafeInteger(exclusiveMaximum) || exclusiveMaximum < 1) {
-      throw new Error(
-        `exclusiveMaximum must be a positive safe integer: ${exclusiveMaximum}`,
-      );
+      throw new Error(`exclusiveMaximum must be a positive safe integer: ${exclusiveMaximum}`);
     }
     const bitCount = bitLength(exclusiveMaximum);
     while (true) {
@@ -44,9 +42,7 @@ class PythonRandom implements RandomSource {
 
   private getRandomBits(bitCount: number): number {
     if (bitCount < 1 || bitCount > 32) {
-      throw new Error(
-        `Python-compatible getRandomBits supports 1..32 bits, got ${bitCount}`,
-      );
+      throw new Error(`Python-compatible getRandomBits supports 1..32 bits, got ${bitCount}`);
     }
     return this.nextUint32() >>> (32 - bitCount);
   }
@@ -55,8 +51,7 @@ class PythonRandom implements RandomSource {
     this.state[0] = seed >>> 0;
     for (let index = 1; index < PythonRandom.stateSize; index += 1) {
       const previous = this.state[index - 1];
-      this.state[index] =
-        (Math.imul(previous ^ (previous >>> 30), 1812433253) + index) >>> 0;
+      this.state[index] = (Math.imul(previous ^ (previous >>> 30), 1812433253) + index) >>> 0;
     }
     this.index = PythonRandom.stateSize;
   }
@@ -69,8 +64,7 @@ class PythonRandom implements RandomSource {
     while (remaining > 0) {
       const previous = this.state[stateIndex - 1];
       this.state[stateIndex] =
-        ((this.state[stateIndex] ^
-          Math.imul(previous ^ (previous >>> 30), 1664525)) +
+        ((this.state[stateIndex] ^ Math.imul(previous ^ (previous >>> 30), 1664525)) +
           key[keyIndex] +
           keyIndex) >>>
         0;
@@ -88,8 +82,7 @@ class PythonRandom implements RandomSource {
     while (remaining > 0) {
       const previous = this.state[stateIndex - 1];
       this.state[stateIndex] =
-        ((this.state[stateIndex] ^
-          Math.imul(previous ^ (previous >>> 30), 1566083941)) -
+        ((this.state[stateIndex] ^ Math.imul(previous ^ (previous >>> 30), 1566083941)) -
           stateIndex) >>>
         0;
       stateIndex += 1;
@@ -118,13 +111,10 @@ class PythonRandom implements RandomSource {
     const lowerMask = 0x7fffffff;
     for (let index = 0; index < PythonRandom.stateSize; index += 1) {
       const nextIndex = (index + 1) % PythonRandom.stateSize;
-      const middleIndex =
-        (index + PythonRandom.middleWord) % PythonRandom.stateSize;
-      const combined =
-        (this.state[index] & upperMask) | (this.state[nextIndex] & lowerMask);
+      const middleIndex = (index + PythonRandom.middleWord) % PythonRandom.stateSize;
+      const combined = (this.state[index] & upperMask) | (this.state[nextIndex] & lowerMask);
       const matrix = combined & 1 ? 0x9908b0df : 0;
-      this.state[index] =
-        (this.state[middleIndex] ^ (combined >>> 1) ^ matrix) >>> 0;
+      this.state[index] = (this.state[middleIndex] ^ (combined >>> 1) ^ matrix) >>> 0;
     }
     this.index = 0;
   }
@@ -152,10 +142,7 @@ export function ringCycle(n: number, random: RandomSource): DirectedPair[] {
     const swapIndex = random.integerBelow
       ? random.integerBelow(index + 1)
       : Math.floor(random.next() * (index + 1));
-    [permutation[index], permutation[swapIndex]] = [
-      permutation[swapIndex],
-      permutation[index],
-    ];
+    [permutation[index], permutation[swapIndex]] = [permutation[swapIndex], permutation[index]];
   }
   return permutation.map((candidate, index) => ({
     a: candidate,
@@ -189,18 +176,12 @@ export function accumulate(
   }
 }
 
-export function meanPreferences(
-  wins: readonly number[],
-  counts: readonly number[],
-): number[] {
+export function meanPreferences(wins: readonly number[], counts: readonly number[]): number[] {
   if (wins.length !== counts.length) throw new Error("wins and counts lengths differ");
   return wins.map((win, index) => (counts[index] ? win / counts[index] : 0));
 }
 
-export function rankByMeanPreference(
-  wins: readonly number[],
-  counts: readonly number[],
-): number[] {
+export function rankByMeanPreference(wins: readonly number[], counts: readonly number[]): number[] {
   const means = meanPreferences(wins, counts);
   return means
     .map((_, index) => index)
@@ -215,10 +196,7 @@ export function selectPivots(
   if (!Number.isInteger(requestedPivots) || requestedPivots < 0) {
     throw new Error("requestedPivots must be a non-negative integer");
   }
-  return rankByMeanPreference(wins, counts).slice(
-    0,
-    Math.min(requestedPivots, wins.length),
-  );
+  return rankByMeanPreference(wins, counts).slice(0, Math.min(requestedPivots, wins.length));
 }
 
 export function pivotRoundPairs(n: number, pivots: readonly number[]): DirectedPair[] {
