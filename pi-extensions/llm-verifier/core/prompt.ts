@@ -125,7 +125,7 @@ export function buildProgressPrompt(input: ProgressPromptInput): string {
   output.push(
     "",
     "Score each checkpoint INDEPENDENTLY based on the agent's current best attempt at that point. " +
-      "Output EXACTLY N lines and nothing else, in the format:",
+      `Output EXACTLY ${input.checkpointSteps.length} lines and nothing else, in the format:`,
   );
   input.checkpointSteps.forEach((_, index) =>
     output.push(`<c${index + 1}>LETTER</c${index + 1}>`),
