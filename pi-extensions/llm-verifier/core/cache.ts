@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import type { Criterion, DirectedPairReward } from "./types.js";
@@ -76,9 +76,7 @@ export function canonicalText(value: string): string {
     .trim();
 }
 
-export function canonicalRunFingerprint(
-  input: RunFingerprintInput,
-): RunFingerprintInput {
+export function canonicalRunFingerprint(input: RunFingerprintInput): RunFingerprintInput {
   return {
     ...input,
     problem: canonicalText(input.problem),
@@ -127,16 +125,22 @@ export class JsonPairScoreCache implements PairScoreCache {
 
   async set(entryKey: string, reward: DirectedPairReward): Promise<void> {
     const write = this.writeTail.then(async () => {
-      const cache = await this.load();
-      const run = (cache.runs[this.runHash] ??= {
-        createdAt: new Date().toISOString(),
-        entries: {},
-      });
-      run.entries[entryKey] = {
-        ...reward,
-        createdAt: new Date().toISOString(),
-      };
-      await atomicWriteJson(this.path, cache);
+      const release = await acquireFileLock(`${this.path}.lock`);
+      try {
+        const cache = await readCacheFile(this.path);
+        const run = (cache.runs[this.runHash] ??= {
+          createdAt: new Date().toISOString(),
+          entries: {},
+        });
+        run.entries[entryKey] = {
+          ...reward,
+          createdAt: new Date().toISOString(),
+        };
+        await atomicWriteJson(this.path, cache);
+        this.cacheFile = Promise.resolve(cache);
+      } finally {
+        await release();
+      }
     });
     this.writeTail = write.catch(() => undefined);
     await write;
@@ -185,11 +189,50 @@ async function readCacheFile(path: string): Promise<CacheFile> {
 
 async function atomicWriteJson(path: string, value: CacheFile): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  const temporaryPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(temporaryPath, `${JSON.stringify(value)}\n`, { mode: 0o600 });
   await rename(temporaryPath, path);
 }
 
+async function acquireFileLock(lockPath: string): Promise<() => Promise<void>> {
+  await mkdir(dirname(lockPath), { recursive: true });
+  const deadline = Date.now() + 10_000;
+  while (true) {
+    try {
+      await mkdir(lockPath);
+      return async () => rm(lockPath, { recursive: true, force: true });
+    } catch (error) {
+      if (!isAlreadyExists(error)) throw error;
+      if (await isStaleLock(lockPath)) {
+        await rm(lockPath, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for verifier cache lock ${lockPath}`);
+      }
+      await delay(25);
+    }
+  }
+}
+
+async function isStaleLock(lockPath: string): Promise<boolean> {
+  try {
+    const metadata = await stat(lockPath);
+    return Date.now() - metadata.mtimeMs > 60_000;
+  } catch (error) {
+    if (isMissingFile(error)) return false;
+    throw error;
+  }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 function isMissingFile(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "EEXIST";
 }
