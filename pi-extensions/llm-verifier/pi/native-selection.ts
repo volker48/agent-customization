@@ -39,6 +39,12 @@ export async function selectWithNativeVerifier(
 ): Promise<NativeVerifierSelectionResult> {
   if (options.candidates.length < 1) throw new Error("Need at least one candidate");
   if (options.criteria.length < 1) throw new Error("Need at least one verifier criterion");
+  if (!Number.isInteger(options.repetitions) || options.repetitions < 1) {
+    throw new Error("repetitions must be a positive integer");
+  }
+  if (!Number.isSafeInteger(options.seed)) {
+    throw new Error("seed must be a safe integer");
+  }
 
   const runHash = computeRunHash(buildRunFingerprint(options));
   const cache = options.cachePath
