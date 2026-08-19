@@ -95,12 +95,12 @@ export function findPositionAfterTag(
   for (let index = 0; index < positions.length; index += 1) {
     textSoFar += positions[index].token;
     const trimmed = textSoFar.trimEnd();
-    if (
-      (trimmed.endsWith(tag) || trimmed.endsWith(tag.slice(0, -1))) &&
-      index + 1 < positions.length
-    ) {
-      latestPositionIndex = index + 1;
-    }
+    if (index + 1 >= positions.length) continue;
+    const nextToken = positions[index + 1].token;
+    const completesTag =
+      trimmed.endsWith(tag) ||
+      (trimmed.endsWith(tag.slice(0, -1)) && nextToken.trimStart().startsWith(">"));
+    if (completesTag) latestPositionIndex = index + 1;
   }
   return latestPositionIndex >= 0 ? positions[latestPositionIndex] : undefined;
 }
