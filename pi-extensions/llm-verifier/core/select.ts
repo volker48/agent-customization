@@ -32,10 +32,10 @@ export async function selectBestCandidate(args: {
     return {
       index: 0,
       ranking: [0],
-      meanPreferences: [1],
-      wins: [1],
-      counts: [1],
-      pivots: [0],
+      meanPreferences: [0],
+      wins: [0],
+      counts: [0],
+      pivots: args.pivots > 0 ? [0] : [],
       ringPairs: [],
       pivotPairs: [],
       nComparisons: 0,
@@ -57,8 +57,11 @@ export async function selectBestCandidate(args: {
   const pivots = selectPivots(ringWins, ringCounts, args.pivots);
 
   const pivotPairs = pivotRoundPairs(args.candidateCount, pivots);
-  const pivotScores = await args.scorer.scorePairs(pivotPairs);
-  assertAllScores(pivotPairs, pivotScores, "pivot round");
+  const uncachedPivotPairs = pivotPairs.filter((pair) => !ringScores.has(directedPairKey(pair)));
+  const newPivotScores = await args.scorer.scorePairs(uncachedPivotPairs);
+  assertAllScores(uncachedPivotPairs, newPivotScores, "pivot round");
+  const pivotScores = new Map<string, DirectedPairReward>(ringScores);
+  for (const [key, reward] of newPivotScores) pivotScores.set(key, reward);
 
   const wins = Array<number>(args.candidateCount).fill(0);
   const counts = Array<number>(args.candidateCount).fill(0);
