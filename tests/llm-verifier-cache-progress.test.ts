@@ -75,6 +75,26 @@ describe("content-addressed cache", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it("merges writes from separate cache instances sharing one file", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "lav-cache-shared-"));
+    try {
+      const path = join(directory, "scores.json");
+      const first = new JsonPairScoreCache(path, "run");
+      const second = new JsonPairScoreCache(path, "run");
+      const keyA = scoreCacheEntryKey("c", 0, 1, 0);
+      const keyB = scoreCacheEntryKey("c", 1, 0, 0);
+      await Promise.all([
+        first.set(keyA, { candidateA: 0.8, candidateB: 0.2 }),
+        second.set(keyB, { candidateA: 0.3, candidateB: 0.7 }),
+      ]);
+      const stored = JSON.parse(await readFile(path, "utf8"));
+      expect(stored.runs.run.entries[keyA]).toMatchObject({ candidateA: 0.8, candidateB: 0.2 });
+      expect(stored.runs.run.entries[keyB]).toMatchObject({ candidateA: 0.3, candidateB: 0.7 });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("progress scoring", () => {
@@ -106,4 +126,3 @@ describe("progress scoring", () => {
     expect(averageProgressRepetitions([[0, null], [1, null]])).toEqual([0.5, null]);
   });
 });
-
