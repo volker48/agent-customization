@@ -104,6 +104,7 @@ export class PiVerifierModelClient {
           "Choose an openai-completions model or add Pi token-distribution support; sampled labels are not accepted.",
       );
     }
+    const modelMaxTokens = positiveInteger(options.model.maxTokens, "model.maxTokens");
     this.mode = resolveExtractionMode(options.model, options.extractionMode ?? "auto");
     this.topLogprobs = boundedInteger(options.topLogprobs ?? 20, 1, 20, "topLogprobs");
     this.minimumScaleTokens = boundedInteger(
@@ -113,15 +114,15 @@ export class PiVerifierModelClient {
       "minimumScaleTokens",
     );
     this.maxAnalysisTokens = boundedInteger(
-      Math.min(options.maxAnalysisTokens ?? 4096, options.model.maxTokens),
+      Math.min(options.maxAnalysisTokens ?? 4096, modelMaxTokens),
       1,
-      options.model.maxTokens,
+      modelMaxTokens,
       "maxAnalysisTokens",
     );
     this.directTagMaxTokens = boundedInteger(
-      Math.min(options.directTagMaxTokens ?? 32768, options.model.maxTokens),
+      Math.min(options.directTagMaxTokens ?? 32768, modelMaxTokens),
       1,
-      options.model.maxTokens,
+      modelMaxTokens,
       "directTagMaxTokens",
     );
   }
@@ -203,7 +204,6 @@ export class PiVerifierModelClient {
     );
     const analysis = stripScoreTags(extractText(analysisMessage));
 
-    // Preserve upstream ordering: score B is conditioned on the sampled A tag.
     const scoreA = await this.scorePrefilledTag(prompt, analysis, "<score_A>", signal);
     const analysisWithA = `${analysis.trimEnd()}\n<score_A>${scoreA.sampledLetter}</score_A>`;
     const scoreB = await this.scorePrefilledTag(prompt, analysisWithA, "<score_B>", signal);
@@ -258,9 +258,7 @@ export class PiVerifierModelClient {
       temperature: 1,
       fetch: capture.fetch,
       onPayload: async (payload, model) => {
-        const transformed = callerOnPayload
-          ? await callerOnPayload(payload, model)
-          : undefined;
+        const transformed = callerOnPayload ? await callerOnPayload(payload, model) : undefined;
         return mergePayload(transformed ?? payload, {
           ...payloadOverrides,
           logprobs: true,
@@ -268,13 +266,17 @@ export class PiVerifierModelClient {
         });
       },
     });
-    const positions = await capture.finish();
+    const responseGroups = await capture.finish();
     if (capture.requestCount === 0) {
       throw new UnsupportedVerifierModelError(
         "Pi did not route the verifier request through the supplied fetch implementation. " +
           `This provider path requires Pi ${MINIMUM_PI_LOGPROB_RUNTIME} or newer; ` +
           "sampled score labels are not accepted.",
       );
+    }
+    const positions = responseGroups.at(-1);
+    if (!positions) {
+      throw new Error("Verifier provider response contained no observable logprob stream");
     }
     return { text: extractText(message), positions };
   }
@@ -369,6 +371,13 @@ function mergePayload(payload: unknown, overrides: JsonObject): JsonObject {
 function boundedInteger(value: number, minimum: number, maximum: number, label: string): number {
   if (!Number.isInteger(value) || value < minimum || value > maximum) {
     throw new Error(`${label} must be an integer from ${minimum} to ${maximum}`);
+  }
+  return value;
+}
+
+function positiveInteger(value: number | undefined, label: string): number {
+  if (!Number.isInteger(value) || value === undefined || value < 1) {
+    throw new Error(`${label} must be a positive integer`);
   }
   return value;
 }
