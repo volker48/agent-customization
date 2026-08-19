@@ -76,6 +76,12 @@ export async function scoreDirectedPair(args: {
   repetitions: number;
   scoreSlots(job: PairwiseEvaluationJob, slotA: string, slotB: string): Promise<SlotPairReward>;
 }): Promise<DirectedPairReward> {
+  for (const index of [args.pair.a, args.pair.b]) {
+    if (!Number.isInteger(index) || index < 0 || index >= args.candidates.length) {
+      throw new Error(`Candidate index out of range: ${index}`);
+    }
+  }
+
   const jobs = planPairwiseEvaluations([args.pair], args.criteria, args.repetitions);
   const rewards = await Promise.all(
     jobs.map(async (job) => {
