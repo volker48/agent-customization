@@ -59,6 +59,12 @@ export interface LavRepository {
   readonly baseCommit: string;
   readonly worktrees: readonly CandidateWorktree[];
   freeze(worktree: CandidateWorktree, signal: AbortSignal): Promise<FrozenRepositoryState>;
+  preserveFrozenPatch?(
+    patch: string,
+    patchHash: string,
+    candidateIndex: number,
+    signal: AbortSignal,
+  ): Promise<string>;
   applyFrozenPatch(patch: string, signal: AbortSignal): Promise<boolean>;
   cleanup(): Promise<void>;
 }
@@ -128,5 +134,7 @@ export interface LavRunResult {
   selectedCandidateIndex: number;
   ranking: readonly number[];
   verifierRunHash?: string;
+  winnerPatchPath?: string;
+  applicationError?: string;
   applied: boolean;
 }

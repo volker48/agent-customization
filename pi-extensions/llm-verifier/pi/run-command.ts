@@ -1,24 +1,20 @@
-import { resolve } from "node:path";
-
 import {
   BorderedLoader,
+  getAgentDir,
   type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 
 import { parseLavRunArgs, LAV_RUN_USAGE } from "../run/args.js";
+import { resolveLavCachePath } from "../run/cache-path.js";
 import { GitLavRepositoryFactory } from "../run/git.js";
 import { formatLavProgress, runLav } from "../run/orchestrator.js";
-import type {
-  CandidateSelector,
-  LavProgressEvent,
-  LavRunConfig,
-} from "../run/types.js";
+import type { CandidateSelector, LavProgressEvent, LavRunConfig } from "../run/types.js";
+import { PiAgentSessionCandidateRunner } from "./candidate-runner.js";
 import {
   PiVerifierModelClient,
   requirePiModelRegistry,
   resolveVerifierModel,
 } from "./model-client.js";
-import { PiAgentSessionCandidateRunner } from "./candidate-runner.js";
 import { selectWithNativeVerifier } from "./native-selection.js";
 
 const LOADER_KEY = "lav-run";
@@ -46,11 +42,16 @@ export async function handleLavRunCommand(
     return;
   }
 
+  let cachePath: string | undefined;
+  try {
+    cachePath = resolveLavCachePath(parsed.config.cachePath, getAgentDir());
+  } catch (error) {
+    ctx.ui.notify(`Invalid verifier cache path: ${errorMessage(error)}`, "error");
+    return;
+  }
   const config: LavRunConfig = {
     ...parsed.config,
-    cachePath: parsed.config.cachePath
-      ? resolve(ctx.cwd, parsed.config.cachePath)
-      : undefined,
+    cachePath,
   };
   const controller = new AbortController();
   let progressMessage = "LAV: preparing isolated worktrees";
@@ -87,14 +88,21 @@ export async function handleLavRunCommand(
 
     const failures = result.candidates.filter((candidate) => candidate.status !== "completed");
     const application = config.applyWinner
-      ? result.applied
-        ? "The frozen winning patch was applied unstaged."
-        : "The selected candidate produced no repository patch."
+      ? result.applicationError
+        ? `The frozen winning patch was not applied: ${result.applicationError}`
+        : result.applied
+          ? "The frozen winning patch was applied unstaged."
+          : "The selected candidate produced no repository patch."
       : "The winning patch was not applied because --no-apply was used.";
+    const recovery =
+      !result.applied && result.winnerPatchPath
+        ? `Recovery patch: ${result.winnerPatchPath}`
+        : "";
     ctx.ui.notify(
       [
         `LAV selected candidate ${result.selectedCandidateIndex + 1}.`,
         application,
+        recovery,
         failures.length
           ? `${failures.length} candidate(s) failed or were cancelled and were ` +
             "excluded from verification."
@@ -103,14 +111,11 @@ export async function handleLavRunCommand(
       ]
         .filter(Boolean)
         .join("\n"),
-      failures.length ? "warning" : "info",
+      failures.length || result.applicationError ? "warning" : "info",
     );
   } catch (error) {
     if (controller.signal.aborted || isAbortError(error)) {
-      ctx.ui.notify(
-        "LAV run cancelled; candidate sessions and worktrees were cleaned up.",
-        "info",
-      );
+      ctx.ui.notify("LAV run cancelled; candidate sessions and worktrees were cleaned up.", "info");
       return;
     }
     ctx.ui.notify(`LAV run failed: ${errorMessage(error)}`, "error");

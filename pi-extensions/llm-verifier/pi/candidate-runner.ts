@@ -31,11 +31,7 @@ export class PiAgentSessionCandidateRunner implements CandidateRunner {
 
     const agentDir = this.options.agentDir ?? getAgentDir();
     const settingsManager = SettingsManager.inMemory();
-    const resourceLoader = createLavChildResourceLoader(
-      input.cwd,
-      agentDir,
-      settingsManager,
-    );
+    const resourceLoader = createLavChildResourceLoader(input.cwd, agentDir, settingsManager);
     await resourceLoader.reload();
     if (input.signal.aborted) throw abortError();
 
@@ -176,8 +172,7 @@ function captureEvent(event: AgentSessionEvent, state: CaptureState): void {
       toolName: "",
       input: "",
       output: text,
-      isError:
-        event.message.stopReason === "error" || event.message.stopReason === "aborted",
+      isError: event.message.stopReason === "error" || event.message.stopReason === "aborted",
     });
     state.setFinalMessage(text);
   }
@@ -210,9 +205,7 @@ function extractText(value: unknown): string {
   if (!Array.isArray(content)) return safeJson(value);
   return content
     .flatMap((part) =>
-      isObject(part) && part.type === "text" && typeof part.text === "string"
-        ? [part.text]
-        : [],
+      isObject(part) && part.type === "text" && typeof part.text === "string" ? [part.text] : [],
     )
     .join("\n");
 }
@@ -234,11 +227,7 @@ function toJsonSafe(value: unknown, seen: WeakSet<object>, depth: number): unkno
   ) {
     return value;
   }
-  if (
-    typeof value === "bigint" ||
-    typeof value === "function" ||
-    typeof value === "symbol"
-  ) {
+  if (typeof value === "bigint" || typeof value === "function" || typeof value === "symbol") {
     return String(value);
   }
   if (value === undefined) return null;
@@ -252,11 +241,7 @@ function toJsonSafe(value: unknown, seen: WeakSet<object>, depth: number): unkno
   }
   const output: { [key: string]: unknown } = {};
   for (const key of Object.keys(value).sort()) {
-    output[key] = toJsonSafe(
-      (value as { [key: string]: unknown })[key],
-      seen,
-      depth + 1,
-    );
+    output[key] = toJsonSafe((value as { [key: string]: unknown })[key], seen, depth + 1);
   }
   return output;
 }

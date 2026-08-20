@@ -1,3 +1,4 @@
+import { assertCachePathOutsideRepository } from "./cache-path.js";
 import { buildCandidateEvidence } from "./evidence.js";
 import { abortError } from "./git.js";
 import type {
@@ -28,12 +29,9 @@ export async function runLav(
   validateConfig(config);
   throwIfAborted(signal);
 
-  const repository = await dependencies.repositoryFactory.open(
-    cwd,
-    config.candidateCount,
-    signal,
-  );
+  const repository = await dependencies.repositoryFactory.open(cwd, config.candidateCount, signal);
   try {
+    assertCachePathOutsideRepository(repository.repoRoot, config.cachePath);
     emitProgress(dependencies, {
       type: "repository-ready",
       baseCommit: repository.baseCommit,
@@ -53,16 +51,12 @@ export async function runLav(
     );
     throwIfAborted(signal);
 
-    const eligible = frozenCandidates.filter(
-      (candidate) => candidate.status === "completed",
-    );
+    const eligible = frozenCandidates.filter((candidate) => candidate.status === "completed");
     if (eligible.length === 0) {
       const failures = frozenCandidates
         .map(
           (candidate) =>
-            `candidate ${candidate.candidateIndex + 1}: ${
-              candidate.error || candidate.status
-            }`,
+            `candidate ${candidate.candidateIndex + 1}: ${candidate.error || candidate.status}`,
         )
         .join("; ");
       throw new Error(`All LAV candidates failed. ${failures}`);
@@ -100,10 +94,24 @@ export async function runLav(
       selectedCandidateIndex: selectedCandidate.candidateIndex,
     });
 
-    const applied = config.applyWinner
-      ? await repository.applyFrozenPatch(selectedCandidate.patch, signal)
-      : false;
+    const winnerPatchPath =
+      selectedCandidate.patch.trim() && repository.preserveFrozenPatch
+        ? await repository.preserveFrozenPatch(
+            selectedCandidate.patch,
+            selectedCandidate.patchHash,
+            selectedCandidate.candidateIndex,
+            signal,
+          )
+        : undefined;
+    let applied = false;
+    let applicationError: string | undefined;
     if (config.applyWinner) {
+      try {
+        applied = await repository.applyFrozenPatch(selectedCandidate.patch, signal);
+      } catch (error) {
+        if (signal.aborted || isAbortError(error)) throw error;
+        applicationError = errorMessage(error);
+      }
       emitProgress(dependencies, {
         type: "patch-applied",
         candidateIndex: selectedCandidate.candidateIndex,
@@ -119,6 +127,8 @@ export async function runLav(
       selectedCandidateIndex: selectedCandidate.candidateIndex,
       ranking,
       verifierRunHash: selection.runHash,
+      winnerPatchPath,
+      applicationError,
       applied,
     };
   } finally {
@@ -139,7 +149,10 @@ async function generateAndFreezeCandidates(
   externalSignal.addEventListener("abort", onExternalAbort, { once: true });
   if (externalSignal.aborted) controller.abort(externalSignal.reason);
 
-  const results: Array<FrozenCandidate | undefined> = new Array(config.candidateCount);
+  const results: Array<FrozenCandidate | undefined> = Array.from(
+    { length: config.candidateCount },
+    () => undefined,
+  );
   let nextIndex = 0;
   let fatalError: unknown;
 
@@ -151,16 +164,13 @@ async function generateAndFreezeCandidates(
       const worktree = repository.worktrees[candidateIndex];
       emitProgress(dependencies, { type: "candidate-started", candidateIndex });
 
-      const attempt = await runCandidateAttempt(
-        dependencies,
-        {
-          task: config.task,
-          candidateIndex,
-          candidateCount: config.candidateCount,
-          cwd: worktree.path,
-          signal: controller.signal,
-        },
-      );
+      const attempt = await runCandidateAttempt(dependencies, {
+        task: config.task,
+        candidateIndex,
+        candidateCount: config.candidateCount,
+        cwd: worktree.path,
+        signal: controller.signal,
+      });
 
       if (controller.signal.aborted) return;
 
@@ -256,10 +266,7 @@ function singletonSelection(): CandidateSelectionResult {
   };
 }
 
-function validateSelection(
-  selection: CandidateSelectionResult,
-  candidateCount: number,
-): void {
+function validateSelection(selection: CandidateSelectionResult, candidateCount: number): void {
   if (
     !Number.isInteger(selection.index) ||
     selection.index < 0 ||
@@ -290,10 +297,7 @@ function validateConfig(config: LavRunConfig): void {
   ) {
     throw new Error("candidateConcurrency must be from 1 through candidateCount");
   }
-  if (
-    !Number.isInteger(config.verifierConcurrency) ||
-    config.verifierConcurrency < 1
-  ) {
+  if (!Number.isInteger(config.verifierConcurrency) || config.verifierConcurrency < 1) {
     throw new Error("verifierConcurrency must be a positive integer");
   }
   if (!Number.isInteger(config.repetitions) || config.repetitions < 1) {
@@ -306,10 +310,7 @@ function validateConfig(config: LavRunConfig): void {
   if (config.criteria.length < 1) throw new Error("Need at least one verifier criterion");
 }
 
-function emitProgress(
-  dependencies: LavRunDependencies,
-  event: LavProgressEvent,
-): void {
+function emitProgress(dependencies: LavRunDependencies, event: LavProgressEvent): void {
   try {
     dependencies.onProgress?.(event);
   } catch {
@@ -351,7 +352,7 @@ export function formatLavProgress(event: LavProgressEvent): string {
     case "patch-applied":
       return event.changed
         ? `LAV: applied candidate ${event.candidateIndex + 1} patch`
-        : `LAV: candidate ${event.candidateIndex + 1} produced no patch`;
+        : `LAV: candidate ${event.candidateIndex + 1} patch was not applied`;
     case "cleanup-started":
       return "LAV: cleaning candidate worktrees";
     case "cleanup-finished":

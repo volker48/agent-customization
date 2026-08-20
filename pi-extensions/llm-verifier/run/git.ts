@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -28,11 +28,7 @@ export class GitCommandError extends Error {
 }
 
 export class GitLavRepositoryFactory implements LavRepositoryFactory {
-  async open(
-    cwd: string,
-    candidateCount: number,
-    signal: AbortSignal,
-  ): Promise<LavRepository> {
+  async open(cwd: string, candidateCount: number, signal: AbortSignal): Promise<LavRepository> {
     return GitLavRepository.open(cwd, candidateCount, signal);
   }
 }
@@ -45,6 +41,7 @@ export class GitLavRepository implements LavRepository {
     readonly baseCommit: string,
     worktrees: readonly CandidateWorktree[],
     private readonly temporaryRoot: string,
+    private readonly commonGitDir: string,
   ) {
     this.worktrees = worktrees;
   }
@@ -72,6 +69,10 @@ export class GitLavRepository implements LavRepository {
       );
     }
     const baseCommit = (await git(repoRoot, ["rev-parse", "HEAD"], { signal })).stdout.trim();
+    const commonGitDir = resolve(
+      repoRoot,
+      (await git(repoRoot, ["rev-parse", "--git-common-dir"], { signal })).stdout.trim(),
+    );
     const temporaryRoot = await mkdtemp(join(tmpdir(), "pi-lav-run-"));
     const worktrees: CandidateWorktree[] = [];
 
@@ -86,18 +87,27 @@ export class GitLavRepository implements LavRepository {
         await git(repoRoot, ["worktree", "add", "--detach", path, baseCommit], { signal });
         worktrees.push({ candidateIndex, path });
       }
-      return new GitLavRepository(repoRoot, baseCommit, worktrees, temporaryRoot);
+      return new GitLavRepository(
+        repoRoot,
+        baseCommit,
+        worktrees,
+        temporaryRoot,
+        commonGitDir,
+      );
     } catch (error) {
-      const partial = new GitLavRepository(repoRoot, baseCommit, worktrees, temporaryRoot);
+      const partial = new GitLavRepository(
+        repoRoot,
+        baseCommit,
+        worktrees,
+        temporaryRoot,
+        commonGitDir,
+      );
       await partial.cleanup();
       throw error;
     }
   }
 
-  async freeze(
-    worktree: CandidateWorktree,
-    signal: AbortSignal,
-  ): Promise<FrozenRepositoryState> {
+  async freeze(worktree: CandidateWorktree, signal: AbortSignal): Promise<FrozenRepositoryState> {
     this.assertOwnedWorktree(worktree);
     throwIfAborted(signal);
 
@@ -132,6 +142,39 @@ export class GitLavRepository implements LavRepository {
     }
   }
 
+  async preserveFrozenPatch(
+    patch: string,
+    patchHash: string,
+    candidateIndex: number,
+    signal: AbortSignal,
+  ): Promise<string> {
+    throwIfAborted(signal);
+    if (!patch.trim()) throw new Error("Cannot preserve an empty candidate patch");
+
+    const verifiedHash = /^[0-9a-f]{64}$/i.test(patchHash)
+      ? patchHash.toLowerCase()
+      : createHash("sha256").update(patch).digest("hex");
+    const recoveryDirectory = join(this.commonGitDir, "pi-lav-recovery");
+    await mkdir(recoveryDirectory, { recursive: true, mode: 0o700 });
+    await chmod(recoveryDirectory, 0o700);
+    const patchPath = join(
+      recoveryDirectory,
+      `lav-${this.baseCommit.slice(0, 12)}-candidate-${String(candidateIndex + 1).padStart(
+        3,
+        "0",
+      )}-${verifiedHash.slice(0, 16)}.patch`,
+    );
+    const temporaryPath = `${patchPath}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporaryPath, patch, { encoding: "utf8", mode: 0o600 });
+      throwIfAborted(signal);
+      await rename(temporaryPath, patchPath);
+      return patchPath;
+    } finally {
+      await rm(temporaryPath, { force: true });
+    }
+  }
+
   async applyFrozenPatch(patch: string, signal: AbortSignal): Promise<boolean> {
     throwIfAborted(signal);
     await this.assertPrimaryUnchanged(signal);
@@ -142,11 +185,10 @@ export class GitLavRepository implements LavRepository {
       ["apply", "--check", "--binary", "--recount", "--whitespace=nowarn", "-"],
       { input: patch, signal },
     );
-    await git(
-      this.repoRoot,
-      ["apply", "--binary", "--recount", "--whitespace=nowarn", "-"],
-      { input: patch, signal },
-    );
+    await git(this.repoRoot, ["apply", "--binary", "--recount", "--whitespace=nowarn", "-"], {
+      input: patch,
+      signal,
+    });
     return true;
   }
 
@@ -169,11 +211,9 @@ export class GitLavRepository implements LavRepository {
           "the winning patch was not applied.",
       );
     }
-    const status = await git(
-      this.repoRoot,
-      ["status", "--porcelain=v1", "--untracked-files=all"],
-      { signal },
-    );
+    const status = await git(this.repoRoot, ["status", "--porcelain=v1", "--untracked-files=all"], {
+      signal,
+    });
     if (status.stdout.trim()) {
       throw new Error(
         "Primary worktree changed while /lav-run was active; the winning patch was not applied.",
@@ -236,9 +276,7 @@ async function git(
         return;
       }
       if (exitCode !== 0 && !options.allowFailure) {
-        finish(() =>
-          rejectPromise(new GitCommandError(cwd, args, exitCode, result.stderr)),
-        );
+        finish(() => rejectPromise(new GitCommandError(cwd, args, exitCode, result.stderr)));
         return;
       }
       finish(() => resolvePromise(result));

@@ -29,9 +29,7 @@ export interface CandidateEvidenceResult {
   redactionCount: number;
 }
 
-export function buildCandidateEvidence(
-  input: CandidateEvidenceInput,
-): CandidateEvidenceResult {
+export function buildCandidateEvidence(input: CandidateEvidenceInput): CandidateEvidenceResult {
   let redactionCount = 0;
   const clean = (value: string, maximum: number): string => {
     const withoutPaths = replaceIncidentalPaths(value, input.repoRoot, input.worktreePath);
@@ -40,11 +38,7 @@ export function buildCandidateEvidence(
     return canonicalText(redacted.value).slice(0, maximum);
   };
 
-  const patchWithoutPaths = replaceIncidentalPaths(
-    input.patch,
-    input.repoRoot,
-    input.worktreePath,
-  );
+  const patchWithoutPaths = replaceIncidentalPaths(input.patch, input.repoRoot, input.worktreePath);
   const redactedPatch = redactEvidenceText(patchWithoutPaths);
   redactionCount += redactedPatch.redactionCount;
   const canonicalPatch = canonicalText(redactedPatch.value);
@@ -136,11 +130,7 @@ export function redactEvidenceText(value: string): {
   return { value: output, redactionCount };
 }
 
-function replaceIncidentalPaths(
-  value: string,
-  repoRoot: string,
-  worktreePath: string,
-): string {
+function replaceIncidentalPaths(value: string, repoRoot: string, worktreePath: string): string {
   let output = value;
   const replacements: Array<[string, string]> = [
     [worktreePath, "<WORKTREE>"],

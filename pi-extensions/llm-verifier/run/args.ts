@@ -31,7 +31,7 @@ export const LAV_RUN_USAGE =
   "  --seed <safe integer>\n" +
   "  --candidate-concurrency <1-8>\n" +
   "  --verifier-concurrency <1-32>\n" +
-  "  --cache <path> | --no-cache\n" +
+  "  --cache <path> | --no-cache (relative paths use Pi state)\n" +
   "  --apply | --no-apply\n" +
   "\n" +
   "V1 requires the primary Git worktree to be clean. The selected patch is applied unstaged.";
@@ -110,20 +110,10 @@ export function parseLavRunArgs(
           seed = safeInteger(readValue(), "--seed");
           break;
         case "--candidate-concurrency":
-          candidateConcurrency = boundedInteger(
-            readValue(),
-            1,
-            8,
-            "--candidate-concurrency",
-          );
+          candidateConcurrency = boundedInteger(readValue(), 1, 8, "--candidate-concurrency");
           break;
         case "--verifier-concurrency":
-          verifierConcurrency = boundedInteger(
-            readValue(),
-            1,
-            32,
-            "--verifier-concurrency",
-          );
+          verifierConcurrency = boundedInteger(readValue(), 1, 32, "--verifier-concurrency");
           break;
         case "--cache":
           cachePath = readValue().trim();
@@ -165,10 +155,7 @@ export function parseLavRunArgs(
     };
   }
   const verifierSlash = verifierModelRef.indexOf("/");
-  if (
-    verifierModelRef &&
-    (verifierSlash <= 0 || verifierSlash === verifierModelRef.length - 1)
-  ) {
+  if (verifierModelRef && (verifierSlash <= 0 || verifierSlash === verifierModelRef.length - 1)) {
     return {
       error: `Expected verifier model as provider/model, got ${verifierModelRef}`,
       help: false,
@@ -229,12 +216,7 @@ function rejectInlineValue(flag: { name: string; value?: string }): void {
   if (flag.value !== undefined) throw new Error(`${flag.name} does not accept a value`);
 }
 
-function boundedInteger(
-  value: string,
-  minimum: number,
-  maximum: number,
-  label: string,
-): number {
+function boundedInteger(value: string, minimum: number, maximum: number, label: string): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) {
     throw new Error(`${label} must be an integer from ${minimum} to ${maximum}`);
