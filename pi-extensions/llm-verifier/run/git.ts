@@ -4,6 +4,9 @@ import { chmod, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+const GIT_TERMINATION_GRACE_MS = 2_000;
+const GIT_CLEANUP_TIMEOUT_MS = 30_000;
+
 import type {
   CandidateWorktree,
   FrozenRepositoryState,
@@ -132,6 +135,7 @@ export class GitLavRepository implements LavRepository {
     } finally {
       await git(worktree.path, ["reset", "--mixed", "--quiet", "HEAD", "--"], {
         allowFailure: true,
+        timeoutMs: GIT_CLEANUP_TIMEOUT_MS,
       });
     }
   }
@@ -190,10 +194,14 @@ export class GitLavRepository implements LavRepository {
     for (const worktree of [...this.worktrees].reverse()) {
       await git(this.repoRoot, ["worktree", "remove", "--force", worktree.path], {
         allowFailure: true,
+        timeoutMs: GIT_CLEANUP_TIMEOUT_MS,
       });
       await rm(worktree.path, { recursive: true, force: true });
     }
-    await git(this.repoRoot, ["worktree", "prune"], { allowFailure: true });
+    await git(this.repoRoot, ["worktree", "prune"], {
+      allowFailure: true,
+      timeoutMs: GIT_CLEANUP_TIMEOUT_MS,
+    });
     await rm(this.temporaryRoot, { recursive: true, force: true });
   }
 
@@ -228,6 +236,7 @@ interface GitOptions {
   input?: string;
   signal?: AbortSignal;
   allowFailure?: boolean;
+  timeoutMs?: number;
 }
 
 async function git(
@@ -245,16 +254,28 @@ async function git(
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let settled = false;
+    let terminationReason: "abort" | "timeout" | undefined;
+    let escalationTimer: NodeJS.Timeout | undefined;
+    let timeoutTimer: NodeJS.Timeout | undefined;
 
+    const clearTimers = () => {
+      if (escalationTimer) clearTimeout(escalationTimer);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+    };
     const finish = (callback: () => void) => {
       if (settled) return;
       settled = true;
+      clearTimers();
       options.signal?.removeEventListener("abort", onAbort);
       callback();
     };
-    const onAbort = () => {
+    const terminate = (reason: "abort" | "timeout") => {
+      terminationReason ??= reason;
       child.kill("SIGTERM");
+      escalationTimer ??= setTimeout(() => child.kill("SIGKILL"), GIT_TERMINATION_GRACE_MS);
+      escalationTimer.unref();
     };
+    const onAbort = () => terminate("abort");
 
     child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
     child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
@@ -265,8 +286,16 @@ async function git(
         stderr: Buffer.concat(stderr).toString("utf8"),
         exitCode,
       };
-      if (options.signal?.aborted) {
+      if (options.signal?.aborted || terminationReason === "abort") {
         finish(() => rejectPromise(abortError()));
+        return;
+      }
+      if (terminationReason === "timeout" && !options.allowFailure) {
+        finish(() =>
+          rejectPromise(
+            new Error(`git ${args.join(" ")} timed out after ${options.timeoutMs}ms`),
+          ),
+        );
         return;
       }
       if (exitCode !== 0 && !options.allowFailure) {
@@ -278,6 +307,10 @@ async function git(
 
     if (options.signal) {
       options.signal.addEventListener("abort", onAbort, { once: true });
+    }
+    if (options.timeoutMs !== undefined) {
+      timeoutTimer = setTimeout(() => terminate("timeout"), options.timeoutMs);
+      timeoutTimer.unref();
     }
     child.stdin.on("error", () => {});
     child.stdin.end(options.input);

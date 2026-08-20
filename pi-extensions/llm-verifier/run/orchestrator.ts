@@ -30,7 +30,15 @@ export async function runLav(
   throwIfAborted(signal);
 
   const repository = await dependencies.repositoryFactory.open(cwd, config.candidateCount, signal);
+  let result: LavRunResult | undefined;
+  let primaryError: unknown;
   try {
+    if (repository.worktrees.length !== config.candidateCount) {
+      throw new Error(
+        `Repository prepared ${repository.worktrees.length} candidate worktree(s), expected ` +
+          `${config.candidateCount}`,
+      );
+    }
     assertCachePathOutsideRepository(repository.repoRoot, config.cachePath);
     emitProgress(dependencies, {
       type: "repository-ready",
@@ -119,7 +127,7 @@ export async function runLav(
       });
     }
 
-    return {
+    result = {
       baseCommit: repository.baseCommit,
       repoRoot: repository.repoRoot,
       candidates: frozenCandidates,
@@ -131,10 +139,31 @@ export async function runLav(
       applicationError,
       applied,
     };
+    return result;
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
     emitProgress(dependencies, { type: "cleanup-started" });
-    await repository.cleanup();
+    let cleanupError: string | undefined;
+    try {
+      await repository.cleanup();
+    } catch (error) {
+      cleanupError = errorMessage(error);
+    }
     emitProgress(dependencies, { type: "cleanup-finished" });
+
+    if (cleanupError) {
+      if (primaryError instanceof Error) {
+        Object.defineProperty(primaryError, "cleanupError", {
+          configurable: true,
+          enumerable: false,
+          value: cleanupError,
+        });
+      } else if (result) {
+        result.cleanupError = cleanupError;
+      }
+    }
   }
 }
 

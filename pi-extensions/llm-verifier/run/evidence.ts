@@ -35,7 +35,7 @@ export function buildCandidateEvidence(input: CandidateEvidenceInput): Candidate
     const withoutPaths = replaceIncidentalPaths(value, input.repoRoot, input.worktreePath);
     const redacted = redactEvidenceText(withoutPaths);
     redactionCount += redacted.redactionCount;
-    return canonicalText(redacted.value).slice(0, maximum);
+    return truncateWithMarker(canonicalText(redacted.value), maximum);
   };
 
   const patchWithoutPaths = replaceIncidentalPaths(input.patch, input.repoRoot, input.worktreePath);
@@ -82,6 +82,19 @@ export function buildCandidateEvidence(input: CandidateEvidenceInput): Candidate
   };
 
   return { evidence: stableStringify(packet), redactionCount };
+}
+
+function truncateWithMarker(value: string, maximum: number): string {
+  if (value.length <= maximum) return value;
+
+  let retainedCharacters = maximum;
+  let marker = "";
+  for (let iteration = 0; iteration < 2; iteration += 1) {
+    const omittedCharacters = value.length - retainedCharacters;
+    marker = `\n[TRUNCATED ${omittedCharacters} characters]`;
+    retainedCharacters = Math.max(0, maximum - marker.length);
+  }
+  return `${value.slice(0, retainedCharacters)}${marker}`;
 }
 
 export function redactEvidenceText(value: string): {

@@ -145,7 +145,7 @@ function captureEvent(event: AgentSessionEvent, state: CaptureState): void {
   if (event.type === "tool_execution_start") {
     state.toolInputs.set(event.toolCallId, {
       toolName: event.toolName,
-      input: safeJson(event.args),
+      input: serializeCandidateValue(event.args),
     });
     return;
   }
@@ -199,10 +199,10 @@ function isAssistantMessage(value: unknown): value is {
 }
 
 function extractText(value: unknown): string {
-  if (!isObject(value)) return typeof value === "string" ? value : safeJson(value);
+  if (!isObject(value)) return typeof value === "string" ? value : serializeCandidateValue(value);
   const content = value.content;
   if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return safeJson(value);
+  if (!Array.isArray(content)) return serializeCandidateValue(value);
   return content
     .flatMap((part) =>
       isObject(part) && part.type === "text" && typeof part.text === "string" ? [part.text] : [],
@@ -210,7 +210,7 @@ function extractText(value: unknown): string {
     .join("\n");
 }
 
-function safeJson(value: unknown): string {
+export function serializeCandidateValue(value: unknown): string {
   try {
     return JSON.stringify(toJsonSafe(value, new WeakSet<object>(), 0)) ?? "";
   } catch {
@@ -236,14 +236,18 @@ function toJsonSafe(value: unknown, seen: WeakSet<object>, depth: number): unkno
   if (seen.has(value)) return "[Circular]";
   seen.add(value);
 
-  if (Array.isArray(value)) {
-    return value.map((item) => toJsonSafe(item, seen, depth + 1));
+  try {
+    if (Array.isArray(value)) {
+      return value.map((item) => toJsonSafe(item, seen, depth + 1));
+    }
+    const output: { [key: string]: unknown } = {};
+    for (const key of Object.keys(value).sort()) {
+      output[key] = toJsonSafe((value as { [key: string]: unknown })[key], seen, depth + 1);
+    }
+    return output;
+  } finally {
+    seen.delete(value);
   }
-  const output: { [key: string]: unknown } = {};
-  for (const key of Object.keys(value).sort()) {
-    output[key] = toJsonSafe((value as { [key: string]: unknown })[key], seen, depth + 1);
-  }
-  return output;
 }
 
 function isObject(value: unknown): value is { [key: string]: unknown } {

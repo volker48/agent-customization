@@ -138,11 +138,10 @@ describe("Git worktree isolation and frozen patches", () => {
       expect(frozen.status).toContain("new.txt");
     } finally {
       await lav.cleanup();
+      const worktreeList = git(repo, "worktree", "list", "--porcelain");
+      expect(worktreeList.match(/^worktree /gm)).toHaveLength(1);
+      await rm(repo, { recursive: true, force: true });
     }
-
-    const worktreeList = git(repo, "worktree", "list", "--porcelain");
-    expect(worktreeList.match(/^worktree /gm)).toHaveLength(1);
-    await rm(repo, { recursive: true, force: true });
   });
 
   it("applies only a checked frozen patch to an unchanged primary worktree", async () => {

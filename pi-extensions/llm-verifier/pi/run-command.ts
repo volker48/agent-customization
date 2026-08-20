@@ -96,11 +96,13 @@ export async function handleLavRunCommand(
       : "The winning patch was not applied because --no-apply was used.";
     const recovery =
       !result.applied && result.winnerPatchPath ? `Recovery patch: ${result.winnerPatchPath}` : "";
+    const cleanup = result.cleanupError ? `Cleanup also failed: ${result.cleanupError}` : "";
     ctx.ui.notify(
       [
         `LAV selected candidate ${result.selectedCandidateIndex + 1}.`,
         application,
         recovery,
+        cleanup,
         failures.length
           ? `${failures.length} candidate(s) failed or were cancelled and were ` +
             "excluded from verification."
@@ -109,7 +111,7 @@ export async function handleLavRunCommand(
       ]
         .filter(Boolean)
         .join("\n"),
-      failures.length || result.applicationError ? "warning" : "info",
+      failures.length || result.applicationError || result.cleanupError ? "warning" : "info",
     );
   } catch (error) {
     if (controller.signal.aborted || isAbortError(error)) {
@@ -170,5 +172,15 @@ function isAbortError(error: unknown): boolean {
 }
 
 function errorMessage(error: unknown): string {
+  const primaryMessage = error instanceof Error ? error.message : String(error);
+  if (!(error instanceof Error) || !("cleanupError" in error)) return primaryMessage;
+
+  const cleanupError = (error as Error & { cleanupError?: unknown }).cleanupError;
+  return cleanupError === undefined
+    ? primaryMessage
+    : `${primaryMessage} Cleanup also failed: ${plainErrorMessage(cleanupError)}`;
+}
+
+function plainErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

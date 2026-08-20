@@ -136,5 +136,6 @@ export interface LavRunResult {
   verifierRunHash?: string;
   winnerPatchPath?: string;
   applicationError?: string;
+  cleanupError?: string;
   applied: boolean;
 }
