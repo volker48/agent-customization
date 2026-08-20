@@ -12,9 +12,7 @@ export function resolveLavCachePath(
   const cacheRoot = resolve(agentDir, CACHE_ROOT_DIRECTORY);
   const cachePath = resolve(cacheRoot, configuredPath);
   if (!isPathWithin(cacheRoot, cachePath)) {
-    throw new Error(
-      `Relative verifier cache path escapes Pi's cache directory: ${configuredPath}`,
-    );
+    throw new Error(`Relative verifier cache path escapes Pi's cache directory: ${configuredPath}`);
   }
   return cachePath;
 }
@@ -36,8 +34,6 @@ function isPathWithin(root: string, candidate: string): boolean {
   const pathFromRoot = relative(root, candidate);
   return (
     pathFromRoot === "" ||
-    (pathFromRoot !== ".." &&
-      !pathFromRoot.startsWith(`..${sep}`) &&
-      !isAbsolute(pathFromRoot))
+    (pathFromRoot !== ".." && !pathFromRoot.startsWith(`..${sep}`) && !isAbsolute(pathFromRoot))
   );
 }

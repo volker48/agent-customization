@@ -95,9 +95,7 @@ export async function handleLavRunCommand(
           : "The selected candidate produced no repository patch."
       : "The winning patch was not applied because --no-apply was used.";
     const recovery =
-      !result.applied && result.winnerPatchPath
-        ? `Recovery patch: ${result.winnerPatchPath}`
-        : "";
+      !result.applied && result.winnerPatchPath ? `Recovery patch: ${result.winnerPatchPath}` : "";
     ctx.ui.notify(
       [
         `LAV selected candidate ${result.selectedCandidateIndex + 1}.`,

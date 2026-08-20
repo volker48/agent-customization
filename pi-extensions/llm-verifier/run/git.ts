@@ -87,13 +87,7 @@ export class GitLavRepository implements LavRepository {
         await git(repoRoot, ["worktree", "add", "--detach", path, baseCommit], { signal });
         worktrees.push({ candidateIndex, path });
       }
-      return new GitLavRepository(
-        repoRoot,
-        baseCommit,
-        worktrees,
-        temporaryRoot,
-        commonGitDir,
-      );
+      return new GitLavRepository(repoRoot, baseCommit, worktrees, temporaryRoot, commonGitDir);
     } catch (error) {
       const partial = new GitLavRepository(
         repoRoot,
