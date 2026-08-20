@@ -4,15 +4,15 @@ import { chmod, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-const GIT_TERMINATION_GRACE_MS = 2_000;
-const GIT_CLEANUP_TIMEOUT_MS = 30_000;
-
 import type {
   CandidateWorktree,
   FrozenRepositoryState,
   LavRepository,
   LavRepositoryFactory,
 } from "./types.js";
+
+const GIT_TERMINATION_GRACE_MS = 2_000;
+const GIT_CLEANUP_TIMEOUT_MS = 30_000;
 
 export class GitCommandError extends Error {
   constructor(
