@@ -115,9 +115,6 @@ export class GitLavRepository implements LavRepository {
           `${this.baseCommit}; committed candidate state is not accepted.`,
       );
     }
-    const status = (
-      await git(worktree.path, ["status", "--porcelain=v1", "--untracked-files=all"], { signal })
-    ).stdout;
     try {
       await git(worktree.path, ["add", "--intent-to-add", "--all"], { signal });
       const patch = (
@@ -127,6 +124,13 @@ export class GitLavRepository implements LavRepository {
           { signal },
         )
       ).stdout;
+      const status = normalizeIntentToAddStatus(
+        (
+          await git(worktree.path, ["status", "--porcelain=v1", "--untracked-files=all"], {
+            signal,
+          })
+        ).stdout,
+      );
       return {
         patch,
         patchHash: createHash("sha256").update(patch).digest("hex"),
@@ -148,10 +152,14 @@ export class GitLavRepository implements LavRepository {
   ): Promise<string> {
     throwIfAborted(signal);
     if (!patch.trim()) throw new Error("Cannot preserve an empty candidate patch");
+    if (!/^[0-9a-f]{64}$/i.test(patchHash)) {
+      throw new Error("Frozen patch hash must be a 64-character hexadecimal SHA-256 digest");
+    }
 
-    const verifiedHash = /^[0-9a-f]{64}$/i.test(patchHash)
-      ? patchHash.toLowerCase()
-      : createHash("sha256").update(patch).digest("hex");
+    const verifiedHash = createHash("sha256").update(patch).digest("hex");
+    if (patchHash.toLowerCase() !== verifiedHash) {
+      throw new Error("Frozen patch hash does not match patch bytes");
+    }
     const recoveryDirectory = join(this.commonGitDir, "pi-lav-recovery");
     await mkdir(recoveryDirectory, { recursive: true, mode: 0o700 });
     await chmod(recoveryDirectory, 0o700);
@@ -175,6 +183,7 @@ export class GitLavRepository implements LavRepository {
 
   async applyFrozenPatch(patch: string, signal: AbortSignal): Promise<boolean> {
     throwIfAborted(signal);
+    // ADR-0010 accepts the check/apply TOCTOU window for V1; stronger atomicity is future work.
     await this.assertPrimaryUnchanged(signal);
     if (!patch.trim()) return false;
 
@@ -292,9 +301,7 @@ async function git(
       }
       if (terminationReason === "timeout" && !options.allowFailure) {
         finish(() =>
-          rejectPromise(
-            new Error(`git ${args.join(" ")} timed out after ${options.timeoutMs}ms`),
-          ),
+          rejectPromise(new Error(`git ${args.join(" ")} timed out after ${options.timeoutMs}ms`)),
         );
         return;
       }
@@ -315,6 +322,10 @@ async function git(
     child.stdin.on("error", () => {});
     child.stdin.end(options.input);
   });
+}
+
+function normalizeIntentToAddStatus(status: string): string {
+  return status.replace(/^ A /gm, "?? ");
 }
 
 function throwIfAborted(signal: AbortSignal): void {

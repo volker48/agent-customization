@@ -7,7 +7,7 @@ import {
 import { parseLavRunArgs, LAV_RUN_USAGE } from "../run/args.js";
 import { resolveLavCachePath } from "../run/cache-path.js";
 import { GitLavRepositoryFactory } from "../run/git.js";
-import { formatLavProgress, runLav } from "../run/orchestrator.js";
+import { CleanupFailedError, formatLavProgress, runLav } from "../run/orchestrator.js";
 import type { CandidateSelector, LavProgressEvent, LavRunConfig } from "../run/types.js";
 import { PiAgentSessionCandidateRunner } from "./candidate-runner.js";
 import {
@@ -114,7 +114,10 @@ export async function handleLavRunCommand(
       failures.length || result.applicationError || result.cleanupError ? "warning" : "info",
     );
   } catch (error) {
-    if (controller.signal.aborted || isAbortError(error)) {
+    if (
+      !(error instanceof CleanupFailedError) &&
+      (controller.signal.aborted || isAbortError(error))
+    ) {
       ctx.ui.notify("LAV run cancelled; candidate sessions and worktrees were cleaned up.", "info");
       return;
     }
@@ -172,13 +175,10 @@ function isAbortError(error: unknown): boolean {
 }
 
 function errorMessage(error: unknown): string {
-  const primaryMessage = error instanceof Error ? error.message : String(error);
-  if (!(error instanceof Error) || !("cleanupError" in error)) return primaryMessage;
-
-  const cleanupError = (error as Error & { cleanupError?: unknown }).cleanupError;
-  return cleanupError === undefined
-    ? primaryMessage
-    : `${primaryMessage} Cleanup also failed: ${plainErrorMessage(cleanupError)}`;
+  if (error instanceof CleanupFailedError) {
+    return `${plainErrorMessage(error.primaryError)} Cleanup also failed: ${error.cleanupError}`;
+  }
+  return plainErrorMessage(error);
 }
 
 function plainErrorMessage(error: unknown): string {

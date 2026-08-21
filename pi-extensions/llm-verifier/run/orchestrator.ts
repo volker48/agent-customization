@@ -20,6 +20,16 @@ interface CandidateAttempt {
   error: string;
 }
 
+export class CleanupFailedError extends Error {
+  constructor(
+    readonly primaryError: unknown,
+    readonly cleanupError: string,
+  ) {
+    super(errorMessage(primaryError), { cause: primaryError });
+    this.name = "CleanupFailedError";
+  }
+}
+
 export async function runLav(
   cwd: string,
   config: LavRunConfig,
@@ -32,6 +42,7 @@ export async function runLav(
   const repository = await dependencies.repositoryFactory.open(cwd, config.candidateCount, signal);
   let result: LavRunResult | undefined;
   let primaryError: unknown;
+  let primaryFailed = false;
   try {
     if (repository.worktrees.length !== config.candidateCount) {
       throw new Error(
@@ -139,32 +150,33 @@ export async function runLav(
       applicationError,
       applied,
     };
-    return result;
   } catch (error) {
+    primaryFailed = true;
     primaryError = error;
-    throw error;
-  } finally {
-    emitProgress(dependencies, { type: "cleanup-started" });
-    let cleanupError: string | undefined;
-    try {
-      await repository.cleanup();
-    } catch (error) {
-      cleanupError = errorMessage(error);
-    }
-    emitProgress(dependencies, { type: "cleanup-finished" });
-
-    if (cleanupError) {
-      if (primaryError instanceof Error) {
-        Object.defineProperty(primaryError, "cleanupError", {
-          configurable: true,
-          enumerable: false,
-          value: cleanupError,
-        });
-      } else if (result) {
-        result.cleanupError = cleanupError;
-      }
-    }
   }
+
+  emitProgress(dependencies, { type: "cleanup-started" });
+  let cleanupError: string | undefined;
+  try {
+    await repository.cleanup();
+  } catch (error) {
+    cleanupError = errorMessage(error);
+  }
+  emitProgress(dependencies, { type: "cleanup-finished" });
+
+  if (primaryFailed) {
+    if (cleanupError) {
+      throw new CleanupFailedError(primaryError, cleanupError);
+    }
+    throw primaryError;
+  }
+  if (!result) {
+    throw new Error("LAV run completed without producing a result");
+  }
+  if (cleanupError) {
+    result.cleanupError = cleanupError;
+  }
+  return result;
 }
 
 async function generateAndFreezeCandidates(
