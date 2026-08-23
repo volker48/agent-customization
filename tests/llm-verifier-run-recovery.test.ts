@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { JsonPairScoreCache } from "../pi-extensions/llm-verifier/core/cache.js";
 import {
   assertCachePathOutsideRepository,
   resolveLavCachePath,
@@ -44,6 +45,52 @@ describe("LAV cache and recovery policy", () => {
       expect(() =>
         assertCachePathOutsideRepository(repo, join(repositoryLink, "new", "scores.json")),
       ).toThrow("outside the guarded repository");
+    } finally {
+      await rm(external, { recursive: true, force: true });
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a dangling cache symlink targeting a missing repository path", async () => {
+    if (process.platform === "win32") return;
+
+    const repo = await createRepository();
+    const external = await mkdtemp(join(tmpdir(), "lav-cache-dangling-symlink-test-"));
+    try {
+      const repositoryLink = join(external, "repository-link");
+      await symlink(join(repo, "future-cache"), repositoryLink, "dir");
+
+      expect(() =>
+        assertCachePathOutsideRepository(repo, join(repositoryLink, "scores.json")),
+      ).toThrow("outside the guarded repository");
+    } finally {
+      await rm(external, { recursive: true, force: true });
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("revalidates the cache path before writing after an ancestor swap", async () => {
+    const repo = await createRepository();
+    const external = await mkdtemp(join(tmpdir(), "lav-cache-swap-test-"));
+    try {
+      const cacheDirectory = join(external, "cache");
+      const configuredPath = join(cacheDirectory, "scores.json");
+      await mkdir(cacheDirectory);
+      const verifiedPath = assertCachePathOutsideRepository(repo, configuredPath);
+      if (!verifiedPath) throw new Error("Expected a verified cache path");
+      const cache = new JsonPairScoreCache(verifiedPath, "run-hash", (path) => {
+        const guardedPath = assertCachePathOutsideRepository(repo, path);
+        if (!guardedPath) throw new Error("Expected a guarded cache path");
+        return guardedPath;
+      });
+
+      await rm(cacheDirectory, { recursive: true, force: true });
+      await symlink(repo, cacheDirectory, process.platform === "win32" ? "junction" : "dir");
+
+      await expect(cache.set("entry", { candidateA: 1, candidateB: 0 })).rejects.toThrow(
+        "outside the guarded repository",
+      );
+      expect(git(repo, "status", "--porcelain=v1", "--untracked-files=all")).toBe("");
     } finally {
       await rm(external, { recursive: true, force: true });
       await rm(repo, { recursive: true, force: true });

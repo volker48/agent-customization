@@ -1,4 +1,4 @@
-import { realpathSync } from "node:fs";
+import { lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 const CACHE_ROOT_DIRECTORY = "llm-verifier-cache";
@@ -42,11 +42,26 @@ function canonicalizeWithExistingAncestor(path: string): string {
       return resolve(realpathSync.native(current), ...missingSegments.reverse());
     } catch (error) {
       if (!isMissingPath(error)) throw error;
+      const symlinkTarget = readDanglingSymlinkTarget(current);
+      if (symlinkTarget) {
+        current = symlinkTarget;
+        continue;
+      }
       const parent = dirname(current);
       if (parent === current) throw error;
       missingSegments.push(basename(current));
       current = parent;
     }
+  }
+}
+
+function readDanglingSymlinkTarget(path: string): string | undefined {
+  try {
+    if (!lstatSync(path).isSymbolicLink()) return undefined;
+    return resolve(dirname(path), readlinkSync(path));
+  } catch (error) {
+    if (isMissingPath(error)) return undefined;
+    throw error;
   }
 }
 

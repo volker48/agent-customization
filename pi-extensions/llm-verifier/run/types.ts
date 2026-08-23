@@ -95,6 +95,7 @@ export interface CandidateSelectionInput {
   seed: number;
   maxConcurrency: number;
   cachePath?: string;
+  cachePathGuard?: (path: string) => string;
   signal: AbortSignal;
 }
 

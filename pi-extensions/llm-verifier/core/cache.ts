@@ -49,6 +49,8 @@ export interface PairScoreCache {
   set(entryKey: string, reward: DirectedPairReward): Promise<void>;
 }
 
+export type CachePathGuard = (path: string) => string;
+
 interface CacheEntryIndex {
   [entryKey: string]: CacheEntry;
 }
@@ -110,13 +112,18 @@ export function scoreCacheEntryKey(
 }
 
 export class JsonPairScoreCache implements PairScoreCache {
+  readonly path: string;
+
   private writeTail: Promise<void> = Promise.resolve();
   private cacheFile: Promise<CacheFile> | undefined;
 
   constructor(
-    readonly path: string,
+    path: string,
     readonly runHash: string,
-  ) {}
+    private readonly pathGuard?: CachePathGuard,
+  ) {
+    this.path = guardPath(path, pathGuard);
+  }
 
   async get(entryKey: string): Promise<CacheEntry | undefined> {
     const cache = await this.load();
@@ -125,9 +132,9 @@ export class JsonPairScoreCache implements PairScoreCache {
 
   async set(entryKey: string, reward: DirectedPairReward): Promise<void> {
     const write = this.writeTail.then(async () => {
-      const release = await acquireFileLock(`${this.path}.lock`);
+      const release = await acquireFileLock(`${this.path}.lock`, this.pathGuard);
       try {
-        const cache = await readCacheFile(this.path);
+        const cache = await readCacheFile(this.path, this.pathGuard);
         const run = (cache.runs[this.runHash] ??= {
           createdAt: new Date().toISOString(),
           entries: {},
@@ -136,7 +143,7 @@ export class JsonPairScoreCache implements PairScoreCache {
           ...reward,
           createdAt: new Date().toISOString(),
         };
-        await atomicWriteJson(this.path, cache);
+        await atomicWriteJson(this.path, cache, this.pathGuard);
         this.cacheFile = Promise.resolve(cache);
       } finally {
         await release();
@@ -147,7 +154,7 @@ export class JsonPairScoreCache implements PairScoreCache {
   }
 
   private load(): Promise<CacheFile> {
-    this.cacheFile ??= readCacheFile(this.path);
+    this.cacheFile ??= readCacheFile(this.path, this.pathGuard);
     return this.cacheFile;
   }
 }
@@ -174,11 +181,12 @@ function canonicalize(value: unknown): unknown {
   return output;
 }
 
-async function readCacheFile(path: string): Promise<CacheFile> {
+async function readCacheFile(path: string, pathGuard?: CachePathGuard): Promise<CacheFile> {
   try {
-    const parsed = JSON.parse(await readFile(path, "utf8")) as Partial<CacheFile>;
+    const guardedPath = guardPath(path, pathGuard);
+    const parsed = JSON.parse(await readFile(guardedPath, "utf8")) as Partial<CacheFile>;
     if (parsed.schemaVersion !== 1 || !parsed.runs || typeof parsed.runs !== "object") {
-      throw new Error(`Unsupported verifier cache schema in ${path}`);
+      throw new Error(`Unsupported verifier cache schema in ${guardedPath}`);
     }
     return parsed as CacheFile;
   } catch (error) {
@@ -187,42 +195,70 @@ async function readCacheFile(path: string): Promise<CacheFile> {
   }
 }
 
-async function atomicWriteJson(path: string, value: CacheFile): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(temporaryPath, `${JSON.stringify(value)}\n`, { mode: 0o600 });
-  await rename(temporaryPath, path);
+async function atomicWriteJson(
+  path: string,
+  value: CacheFile,
+  pathGuard?: CachePathGuard,
+): Promise<void> {
+  let guardedPath = guardPath(path, pathGuard);
+  await mkdir(dirname(guardedPath), { recursive: true });
+  guardedPath = guardPath(path, pathGuard);
+  const temporaryPath = guardPath(
+    `${guardedPath}.${process.pid}.${randomUUID()}.tmp`,
+    pathGuard,
+  );
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(value)}\n`, { flag: "wx", mode: 0o600 });
+    const sourcePath = guardPath(temporaryPath, pathGuard);
+    const destinationPath = guardPath(path, pathGuard);
+    if (dirname(destinationPath) !== dirname(sourcePath)) {
+      throw new Error("Verifier cache path changed during an atomic write");
+    }
+    await rename(sourcePath, destinationPath);
+    guardPath(path, pathGuard);
+  } finally {
+    await rm(guardPath(temporaryPath, pathGuard), { force: true });
+  }
 }
 
-async function acquireFileLock(lockPath: string): Promise<() => Promise<void>> {
-  await mkdir(dirname(lockPath), { recursive: true });
+async function acquireFileLock(
+  lockPath: string,
+  pathGuard?: CachePathGuard,
+): Promise<() => Promise<void>> {
+  let guardedLockPath = guardPath(lockPath, pathGuard);
+  await mkdir(dirname(guardedLockPath), { recursive: true });
   const deadline = Date.now() + 10_000;
   while (true) {
+    guardedLockPath = guardPath(lockPath, pathGuard);
     try {
-      await mkdir(lockPath);
-      return async () => rm(lockPath, { recursive: true, force: true });
+      await mkdir(guardedLockPath);
+      return async () => rm(guardPath(lockPath, pathGuard), { recursive: true, force: true });
     } catch (error) {
       if (!isAlreadyExists(error)) throw error;
-      if (await isStaleLock(lockPath)) {
-        await rm(lockPath, { recursive: true, force: true });
+      if (await isStaleLock(lockPath, pathGuard)) {
+        await rm(guardPath(lockPath, pathGuard), { recursive: true, force: true });
         continue;
       }
       if (Date.now() >= deadline) {
-        throw new Error(`Timed out waiting for verifier cache lock ${lockPath}`);
+        throw new Error(`Timed out waiting for verifier cache lock ${guardedLockPath}`);
       }
       await delay(25);
     }
   }
 }
 
-async function isStaleLock(lockPath: string): Promise<boolean> {
+async function isStaleLock(lockPath: string, pathGuard?: CachePathGuard): Promise<boolean> {
   try {
-    const metadata = await stat(lockPath);
+    const metadata = await stat(guardPath(lockPath, pathGuard));
     return Date.now() - metadata.mtimeMs > 60_000;
   } catch (error) {
     if (isMissingFile(error)) return false;
     throw error;
   }
+}
+
+function guardPath(path: string, pathGuard?: CachePathGuard): string {
+  return pathGuard?.(path) ?? path;
 }
 
 function delay(milliseconds: number): Promise<void> {

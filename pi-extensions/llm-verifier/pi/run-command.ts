@@ -170,6 +170,7 @@ function createVerifierDependencies(
           seed: input.seed,
           client,
           cachePath: input.cachePath,
+          cachePathGuard: input.cachePathGuard,
           maxConcurrency: input.maxConcurrency,
           signal: input.signal,
           preflight: false,

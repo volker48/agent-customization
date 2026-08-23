@@ -50,10 +50,12 @@ export async function runLav(
           `${config.candidateCount}`,
       );
     }
-    const verifiedCachePath = assertCachePathOutsideRepository(
-      repository.repoRoot,
-      config.cachePath,
-    );
+    const cachePathGuard = (path: string): string => {
+      const verifiedPath = assertCachePathOutsideRepository(repository.repoRoot, path);
+      if (!verifiedPath) throw new Error("Verifier cache path must not be empty");
+      return verifiedPath;
+    };
+    const verifiedCachePath = config.cachePath ? cachePathGuard(config.cachePath) : undefined;
     emitProgress(dependencies, {
       type: "repository-ready",
       baseCommit: repository.baseCommit,
@@ -101,6 +103,7 @@ export async function runLav(
         seed: config.seed,
         maxConcurrency: config.verifierConcurrency,
         cachePath: verifiedCachePath,
+        cachePathGuard: verifiedCachePath ? cachePathGuard : undefined,
         signal,
       });
       throwIfAborted(signal);
