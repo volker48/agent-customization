@@ -64,6 +64,14 @@ describe("/lav-run arguments", () => {
     expect(parsed.config?.verifierModelRef).toBe("");
   });
 
+  it("ignores a malformed default verifier on the one-candidate path", () => {
+    const parsed = parseLavRunArgs("--candidates 1 -- update docs", {
+      verifierModelRef: "malformed-model-ref",
+    });
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.config?.verifierModelRef).toBe("malformed-model-ref");
+  });
+
   it("rejects unknown criteria and missing multi-candidate verifier configuration", () => {
     expect(parseLavRunArgs("--criteria nope -- task").error).toContain("Unknown criterion");
     expect(parseLavRunArgs("--candidates 2 -- task").error).toContain("verifier model");
@@ -109,13 +117,39 @@ describe("candidate evidence", () => {
   it("redacts common secret forms", () => {
     const result = redactEvidenceText(
       "api_key=abcdef token=second Bearer top-secret " +
-        "ghp_abcdefghijklmnopqrstuvwxyz012345",
+        "ghp_abcdefghijklmnopqrstuvwxyz012345 " +
+        "OPENAI_API_KEY=openai-secret AWS_SECRET_ACCESS_KEY=aws-secret",
     );
     expect(result.value).toContain("api_key=[REDACTED]");
     expect(result.value).toContain("token=[REDACTED]");
     expect(result.value).toContain("Bearer [REDACTED]");
     expect(result.value).toContain("[REDACTED SECRET]");
-    expect(result.redactionCount).toBe(4);
+    expect(result.value).toContain("OPENAI_API_KEY=[REDACTED]");
+    expect(result.value).toContain("AWS_SECRET_ACCESS_KEY=[REDACTED]");
+    expect(result.redactionCount).toBe(6);
+  });
+
+  it("redacts and bounds task text before publishing evidence", () => {
+    const result = buildCandidateEvidence({
+      task: `OPENAI_API_KEY=task-secret ${"x".repeat(20_000)}`,
+      candidateIndex: 0,
+      status: "completed",
+      baseCommit: "abc",
+      patch: "",
+      patchHash: "hash",
+      repositoryStatus: "",
+      actions: [],
+      finalMessage: "done",
+      error: "",
+      repoRoot: "/repo",
+      worktreePath: "/tmp/candidate",
+    });
+    const packet = JSON.parse(result.evidence) as { task: string };
+
+    expect(packet.task).toContain("OPENAI_API_KEY=[REDACTED]");
+    expect(packet.task).not.toContain("task-secret");
+    expect(packet.task).toContain("[TRUNCATED ");
+    expect(packet.task.length).toBeLessThanOrEqual(12_000);
   });
 });
 
@@ -244,6 +278,37 @@ describe("LAV orchestration", () => {
       expect(repository.cleanupCount).toBe(1);
     },
   );
+
+  it("keeps independent candidates after a repository freeze failure", async () => {
+    const repository = new FakeRepository(3);
+    repository.freezeFailures.set(0, "moved HEAD");
+    let verifierCandidates = 0;
+
+    const result = await runLav(
+      "/repo",
+      config({ candidateCount: 3 }),
+      {
+        repositoryFactory: fixedRepository(repository),
+        candidateRunner: { run: async () => completed("candidate") },
+        selector: {
+          select: async (input) => {
+            verifierCandidates = input.candidates.length;
+            return selection(1, [1, 0]);
+          },
+        },
+      },
+      new AbortController().signal,
+    );
+
+    expect(verifierCandidates).toBe(2);
+    expect(result.eligibleCandidateIndices).toEqual([1, 2]);
+    expect(result.selectedCandidateIndex).toBe(2);
+    expect(result.candidates[0]).toMatchObject({
+      status: "failed",
+      error: "Repository freeze failed: moved HEAD",
+    });
+    expect(repository.cleanupCount).toBe(1);
+  });
 
   it("does not invoke the verifier for one completed candidate", async () => {
     const repository = new FakeRepository(1);
@@ -407,6 +472,7 @@ class FakeRepository implements LavRepository {
   appliedPatch = "";
   preservedPatch = "";
   cleanupCount = 0;
+  readonly freezeFailures = new Map<number, string>();
 
   constructor(candidateCount: number) {
     this.worktrees = Array.from({ length: candidateCount }, (_, candidateIndex) => ({
@@ -416,6 +482,8 @@ class FakeRepository implements LavRepository {
   }
 
   async freeze(worktree: CandidateWorktree): Promise<FrozenRepositoryState> {
+    const failure = this.freezeFailures.get(worktree.candidateIndex);
+    if (failure) throw new Error(failure);
     return {
       patch: `patch-${worktree.candidateIndex}`,
       patchHash: `hash-${worktree.candidateIndex}`,

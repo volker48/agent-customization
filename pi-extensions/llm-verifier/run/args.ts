@@ -146,20 +146,22 @@ export function parseLavRunArgs(
       help: false,
     };
   }
-  if (candidateCount > 1 && !verifierModelRef) {
-    return {
-      error:
-        "A verifier model is required for multiple candidates. Pass --verifier " +
-        "provider/model or set PI_LAV_VERIFIER_MODEL.",
-      help: false,
-    };
-  }
-  const verifierSlash = verifierModelRef.indexOf("/");
-  if (verifierModelRef && (verifierSlash <= 0 || verifierSlash === verifierModelRef.length - 1)) {
-    return {
-      error: `Expected verifier model as provider/model, got ${verifierModelRef}`,
-      help: false,
-    };
+  if (candidateCount > 1) {
+    if (!verifierModelRef) {
+      return {
+        error:
+          "A verifier model is required for multiple candidates. Pass --verifier " +
+          "provider/model or set PI_LAV_VERIFIER_MODEL.",
+        help: false,
+      };
+    }
+    const verifierSlash = verifierModelRef.indexOf("/");
+    if (verifierSlash <= 0 || verifierSlash === verifierModelRef.length - 1) {
+      return {
+        error: `Expected verifier model as provider/model, got ${verifierModelRef}`,
+        help: false,
+      };
+    }
   }
 
   return {

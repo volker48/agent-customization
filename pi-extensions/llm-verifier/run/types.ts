@@ -116,7 +116,7 @@ export type LavProgressEvent =
   | { type: "verification-finished"; selectedCandidateIndex: number }
   | { type: "patch-applied"; candidateIndex: number; changed: boolean }
   | { type: "cleanup-started" }
-  | { type: "cleanup-finished" };
+  | { type: "cleanup-finished"; error?: string };
 
 export interface LavRunDependencies {
   repositoryFactory: LavRepositoryFactory;

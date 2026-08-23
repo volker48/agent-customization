@@ -16,6 +16,7 @@ import type {
   CandidateSelectionResult,
   CandidateWorktree,
   FrozenRepositoryState,
+  LavProgressEvent,
   LavRepository,
   LavRunConfig,
 } from "../pi-extensions/llm-verifier/run/types.js";
@@ -97,6 +98,7 @@ describe("LAV cache and recovery policy", () => {
 
   it("preserves a completed recovery result when cleanup also fails", async () => {
     const repository = new RecoveryRepository("cleanup failed");
+    const progress: LavProgressEvent[] = [];
     const result = await runLav(
       "/repo",
       config(),
@@ -104,6 +106,7 @@ describe("LAV cache and recovery policy", () => {
         repositoryFactory: { open: async () => repository },
         candidateRunner: { run: async () => completed() },
         selector: { select: async () => singletonSelection() },
+        onProgress: (event) => progress.push(event),
       },
       new AbortController().signal,
     );
@@ -112,6 +115,7 @@ describe("LAV cache and recovery policy", () => {
     expect(result.applicationError).toBe("primary drift");
     expect(result.winnerPatchPath).toBe("/repo/.git/pi-lav-recovery/winner.patch");
     expect(result.cleanupError).toBe("cleanup failed");
+    expect(progress.at(-1)).toEqual({ type: "cleanup-finished", error: "cleanup failed" });
     expect(repository.cleanupCount).toBe(1);
   });
 });

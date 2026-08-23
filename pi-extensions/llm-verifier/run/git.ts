@@ -99,7 +99,14 @@ export class GitLavRepository implements LavRepository {
         temporaryRoot,
         commonGitDir,
       );
-      await partial.cleanup();
+      try {
+        await partial.cleanup();
+      } catch (cleanupError) {
+        throw new Error(
+          `${errorMessage(error)} Cleanup also failed: ${errorMessage(cleanupError)}`,
+          { cause: error },
+        );
+      }
       throw error;
     }
   }
@@ -191,28 +198,39 @@ export class GitLavRepository implements LavRepository {
     await git(
       this.repoRoot,
       ["apply", "--check", "--binary", "--recount", "--whitespace=nowarn", "-"],
-      { input: patch, signal },
+      { input: patch, signal, timeoutMs: GIT_CLEANUP_TIMEOUT_MS },
     );
     await git(this.repoRoot, ["apply", "--binary", "--recount", "--whitespace=nowarn", "-"], {
       input: patch,
       signal,
+      timeoutMs: GIT_CLEANUP_TIMEOUT_MS,
     });
     return true;
   }
 
   async cleanup(): Promise<void> {
+    const failures: string[] = [];
     for (const worktree of [...this.worktrees].reverse()) {
-      await git(this.repoRoot, ["worktree", "remove", "--force", worktree.path], {
-        allowFailure: true,
-        timeoutMs: GIT_CLEANUP_TIMEOUT_MS,
-      });
-      await rm(worktree.path, { recursive: true, force: true });
+      await captureCleanupFailure(failures, `remove Git worktree ${worktree.path}`, () =>
+        git(this.repoRoot, ["worktree", "remove", "--force", worktree.path], {
+          timeoutMs: GIT_CLEANUP_TIMEOUT_MS,
+        }),
+      );
+      await captureCleanupFailure(failures, `remove worktree directory ${worktree.path}`, () =>
+        rm(worktree.path, { recursive: true, force: true }),
+      );
     }
-    await git(this.repoRoot, ["worktree", "prune"], {
-      allowFailure: true,
-      timeoutMs: GIT_CLEANUP_TIMEOUT_MS,
-    });
-    await rm(this.temporaryRoot, { recursive: true, force: true });
+    await captureCleanupFailure(failures, "prune Git worktree metadata", () =>
+      git(this.repoRoot, ["worktree", "prune"], {
+        timeoutMs: GIT_CLEANUP_TIMEOUT_MS,
+      }),
+    );
+    await captureCleanupFailure(failures, `remove temporary root ${this.temporaryRoot}`, () =>
+      rm(this.temporaryRoot, { recursive: true, force: true }),
+    );
+    if (failures.length > 0) {
+      throw new Error(`LAV repository cleanup failed: ${failures.join("; ")}`);
+    }
   }
 
   private async assertPrimaryUnchanged(signal: AbortSignal): Promise<void> {
@@ -323,6 +341,22 @@ async function git(
     child.stdin.on("error", () => {});
     child.stdin.end(options.input);
   });
+}
+
+async function captureCleanupFailure(
+  failures: string[],
+  label: string,
+  operation: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    await operation();
+  } catch (error) {
+    failures.push(`${label}: ${errorMessage(error)}`);
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function normalizeIntentToAddStatus(status: string): string {

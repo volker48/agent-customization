@@ -4,6 +4,7 @@ import type { CandidateAction, CandidateRunStatus } from "./types.js";
 const MAX_ACTIONS = 120;
 const MAX_ACTION_INPUT_CHARS = 4_000;
 const MAX_ACTION_OUTPUT_CHARS = 12_000;
+const MAX_TASK_CHARS = 12_000;
 const MAX_FINAL_MESSAGE_CHARS = 12_000;
 const MAX_ERROR_CHARS = 4_000;
 const MAX_PATCH_CHARS = 240_000;
@@ -56,7 +57,7 @@ export function buildCandidateEvidence(input: CandidateEvidenceInput): Candidate
 
   const packet = {
     schemaVersion: 1,
-    task: canonicalText(input.task),
+    task: clean(input.task, MAX_TASK_CHARS),
     candidate: {
       index: input.candidateIndex,
       status: input.status,
@@ -132,7 +133,7 @@ export function redactEvidenceText(value: string): {
     "(?:api[_-]?key|access[_-]?(?:key|token)|refresh[_-]?token|token|password|" +
     "passwd|secret|credential|client[_-]?secret)";
   const secretAssignment = new RegExp(
-    String.raw`(\b${secretKeyName}\b\s*(?:=|:)\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)`,
+    String.raw`((?:\b|[_-])${secretKeyName}\b\s*(?:=|:)\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)`,
     "gi",
   );
   output = output.replace(secretAssignment, (_match, prefix: string) => {

@@ -21,8 +21,8 @@ export function resolveLavCachePath(
 export function assertCachePathOutsideRepository(
   repoRoot: string,
   cachePath: string | undefined,
-): void {
-  if (!cachePath) return;
+): string | undefined {
+  if (!cachePath) return undefined;
   const canonicalRepoRoot = canonicalizeWithExistingAncestor(repoRoot);
   const canonicalCachePath = canonicalizeWithExistingAncestor(cachePath);
   if (isPathWithin(canonicalRepoRoot, canonicalCachePath)) {
@@ -31,6 +31,7 @@ export function assertCachePathOutsideRepository(
         "trigger primary-worktree drift.",
     );
   }
+  return canonicalCachePath;
 }
 
 function canonicalizeWithExistingAncestor(path: string): string {

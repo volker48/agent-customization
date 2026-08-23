@@ -50,7 +50,10 @@ export async function runLav(
           `${config.candidateCount}`,
       );
     }
-    assertCachePathOutsideRepository(repository.repoRoot, config.cachePath);
+    const verifiedCachePath = assertCachePathOutsideRepository(
+      repository.repoRoot,
+      config.cachePath,
+    );
     emitProgress(dependencies, {
       type: "repository-ready",
       baseCommit: repository.baseCommit,
@@ -97,7 +100,7 @@ export async function runLav(
         pivots: config.pivots,
         seed: config.seed,
         maxConcurrency: config.verifierConcurrency,
-        cachePath: config.cachePath,
+        cachePath: verifiedCachePath,
         signal,
       });
       throwIfAborted(signal);
@@ -161,7 +164,7 @@ export async function runLav(
   } catch (error) {
     cleanupError = errorMessage(error);
   }
-  emitProgress(dependencies, { type: "cleanup-finished" });
+  emitProgress(dependencies, { type: "cleanup-finished", error: cleanupError });
 
   if (primaryFailed) {
     if (cleanupError) {
@@ -214,45 +217,54 @@ async function generateAndFreezeCandidates(
 
       if (controller.signal.aborted) return;
 
-      let frozen: FrozenRepositoryState;
+      let frozen: FrozenRepositoryState = { patch: "", patchHash: "", status: "" };
+      let candidateStatus = attempt.status;
+      let candidateError = attempt.error;
       try {
         frozen = await repository.freeze(worktree, controller.signal);
       } catch (error) {
-        fatalError = error;
-        controller.abort(error);
-        return;
+        if (controller.signal.aborted || isAbortError(error)) {
+          fatalError = error;
+          controller.abort(error);
+          return;
+        }
+        candidateStatus = "failed";
+        const freezeError = errorMessage(error);
+        candidateError = candidateError
+          ? `${candidateError}; repository freeze failed: ${freezeError}`
+          : `Repository freeze failed: ${freezeError}`;
       }
 
       const evidence = buildCandidateEvidence({
         task: config.task,
         candidateIndex,
-        status: attempt.status,
+        status: candidateStatus,
         baseCommit: repository.baseCommit,
         patch: frozen.patch,
         patchHash: frozen.patchHash,
         repositoryStatus: frozen.status,
         actions: attempt.execution?.actions ?? [],
         finalMessage: attempt.execution?.finalMessage ?? "",
-        error: attempt.error,
+        error: candidateError,
         repoRoot: repository.repoRoot,
         worktreePath: worktree.path,
       });
       results[candidateIndex] = {
         candidateIndex,
-        status: attempt.status,
+        status: candidateStatus,
         baseCommit: repository.baseCommit,
         patch: frozen.patch,
         patchHash: frozen.patchHash,
         repositoryStatus: frozen.status,
         actions: attempt.execution?.actions ?? [],
         finalMessage: attempt.execution?.finalMessage ?? "",
-        error: attempt.error,
+        error: candidateError,
         evidence: evidence.evidence,
       };
       emitProgress(dependencies, {
         type: "candidate-finished",
         candidateIndex,
-        status: attempt.status,
+        status: candidateStatus,
       });
     }
   };
@@ -396,6 +408,6 @@ export function formatLavProgress(event: LavProgressEvent): string {
     case "cleanup-started":
       return "LAV: cleaning candidate worktrees";
     case "cleanup-finished":
-      return "LAV: cleanup complete";
+      return event.error ? `LAV: cleanup failed: ${event.error}` : "LAV: cleanup complete";
   }
 }

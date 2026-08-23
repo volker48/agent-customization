@@ -17,7 +17,7 @@ export default function llmVerifierExtension(pi: ExtensionAPI): void {
       if (!ref) {
         ctx.ui.notify(
           `LLM-as-a-Verifier is loaded. Set ${DEFAULT_MODEL_ENV}=provider/model ` +
-            "for provider preflight and multi-candidate /lav-run.",
+            "for provider preflight and multi-candidate /lav-run (or pass --verifier).",
           "info",
         );
         return;

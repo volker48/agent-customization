@@ -54,6 +54,13 @@ export async function handleLavRunCommand(
     cachePath,
   };
   const controller = new AbortController();
+  const commandSignal = ctx.signal;
+  const onCommandAbort = () => controller.abort(commandSignal?.reason);
+  if (commandSignal?.aborted) {
+    onCommandAbort();
+  } else {
+    commandSignal?.addEventListener("abort", onCommandAbort, { once: true });
+  }
   let progressMessage = "LAV: preparing isolated worktrees";
   const updateProgress = (event?: LavProgressEvent) => {
     if (event) progressMessage = formatLavProgress(event);
@@ -66,9 +73,9 @@ export async function handleLavRunCommand(
       return loader;
     });
   };
-  updateProgress();
 
   try {
+    updateProgress();
     const verifier = createVerifierDependencies(config, ctx);
     const result = await runLav(
       ctx.cwd,
@@ -123,6 +130,7 @@ export async function handleLavRunCommand(
     }
     ctx.ui.notify(`LAV run failed: ${errorMessage(error)}`, "error");
   } finally {
+    commandSignal?.removeEventListener("abort", onCommandAbort);
     ctx.ui.setStatus(LOADER_KEY, undefined);
     ctx.ui.setWidget(LOADER_KEY, undefined);
   }
