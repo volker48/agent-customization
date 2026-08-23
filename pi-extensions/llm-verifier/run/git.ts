@@ -175,6 +175,7 @@ export class GitLavRepository implements LavRepository {
       await writeFile(temporaryPath, patch, { encoding: "utf8", mode: 0o600 });
       throwIfAborted(signal);
       await rename(temporaryPath, patchPath);
+      throwIfAborted(signal);
       return patchPath;
     } finally {
       await rm(temporaryPath, { force: true });

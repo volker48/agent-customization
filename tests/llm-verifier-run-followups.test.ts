@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -62,6 +62,33 @@ describe("LAV review follow-ups", () => {
     }
   });
 
+  it("propagates cancellation immediately after preserving the recovery patch", async () => {
+    const repo = await createRepository();
+    const signal = new AbortController().signal;
+    const lav = await GitLavRepository.open(repo, 1, signal);
+    try {
+      const worktree = lav.worktrees[0];
+      await writeFile(join(worktree.path, "tracked.txt"), "changed\n");
+      const frozen = await lav.freeze(worktree, signal);
+      let abortChecks = 0;
+      const postRenameAbortSignal = {
+        get aborted() {
+          abortChecks += 1;
+          return abortChecks >= 3;
+        },
+      } as unknown as AbortSignal;
+
+      await expect(
+        lav.preserveFrozenPatch(frozen.patch, frozen.patchHash, 0, postRenameAbortSignal),
+      ).rejects.toMatchObject({ name: "AbortError" });
+      expect(abortChecks).toBe(3);
+      expect(await readdir(join(repo, ".git", "pi-lav-recovery"))).toHaveLength(1);
+    } finally {
+      await lav.cleanup();
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
   it("wraps primary and cleanup failures in CleanupFailedError", async () => {
     const repository = new CleanupFailingRepository();
     let caught: unknown;
@@ -108,6 +135,10 @@ class CleanupFailingRepository implements LavRepository {
       patchHash: "hash",
       status: " M tracked.txt",
     };
+  }
+
+  async preserveFrozenPatch(): Promise<string> {
+    return "/tmp/recovery.patch";
   }
 
   async applyFrozenPatch(): Promise<boolean> {

@@ -1,4 +1,5 @@
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 const CACHE_ROOT_DIRECTORY = "llm-verifier-cache";
 
@@ -22,11 +23,29 @@ export function assertCachePathOutsideRepository(
   cachePath: string | undefined,
 ): void {
   if (!cachePath) return;
-  if (isPathWithin(resolve(repoRoot), resolve(cachePath))) {
+  const canonicalRepoRoot = canonicalizeWithExistingAncestor(repoRoot);
+  const canonicalCachePath = canonicalizeWithExistingAncestor(cachePath);
+  if (isPathWithin(canonicalRepoRoot, canonicalCachePath)) {
     throw new Error(
       "Verifier cache paths must be outside the guarded repository so cache writes cannot " +
         "trigger primary-worktree drift.",
     );
+  }
+}
+
+function canonicalizeWithExistingAncestor(path: string): string {
+  let current = resolve(path);
+  const missingSegments: string[] = [];
+  while (true) {
+    try {
+      return resolve(realpathSync.native(current), ...missingSegments.reverse());
+    } catch (error) {
+      if (!isMissingPath(error)) throw error;
+      const parent = dirname(current);
+      if (parent === current) throw error;
+      missingSegments.push(basename(current));
+      current = parent;
+    }
   }
 }
 
@@ -36,4 +55,8 @@ function isPathWithin(root: string, candidate: string): boolean {
     pathFromRoot === "" ||
     (pathFromRoot !== ".." && !pathFromRoot.startsWith(`..${sep}`) && !isAbsolute(pathFromRoot))
   );
+}
+
+function isMissingPath(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }

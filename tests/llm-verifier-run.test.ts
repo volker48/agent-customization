@@ -405,6 +405,7 @@ class FakeRepository implements LavRepository {
   readonly baseCommit = "base";
   readonly worktrees: readonly CandidateWorktree[];
   appliedPatch = "";
+  preservedPatch = "";
   cleanupCount = 0;
 
   constructor(candidateCount: number) {
@@ -420,6 +421,11 @@ class FakeRepository implements LavRepository {
       patchHash: `hash-${worktree.candidateIndex}`,
       status: `status-${worktree.candidateIndex}`,
     };
+  }
+
+  async preserveFrozenPatch(patch: string): Promise<string> {
+    this.preservedPatch = patch;
+    return "/tmp/recovery.patch";
   }
 
   async applyFrozenPatch(patch: string): Promise<boolean> {

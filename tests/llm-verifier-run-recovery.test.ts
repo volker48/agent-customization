@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -31,6 +31,22 @@ describe("LAV cache and recovery policy", () => {
     expect(() =>
       assertCachePathOutsideRepository("/repo", "/repo/.lav-cache.json"),
     ).toThrow("outside the guarded repository");
+  });
+
+  it("rejects an external cache symlink that resolves into the primary worktree", async () => {
+    const repo = await createRepository();
+    const external = await mkdtemp(join(tmpdir(), "lav-cache-symlink-test-"));
+    try {
+      const repositoryLink = join(external, "repository-link");
+      await symlink(repo, repositoryLink, process.platform === "win32" ? "junction" : "dir");
+
+      expect(() =>
+        assertCachePathOutsideRepository(repo, join(repositoryLink, "new", "scores.json")),
+      ).toThrow("outside the guarded repository");
+    } finally {
+      await rm(external, { recursive: true, force: true });
+      await rm(repo, { recursive: true, force: true });
+    }
   });
 
   it("preserves the exact winning patch after worktree cleanup", async () => {
@@ -78,6 +94,26 @@ describe("LAV cache and recovery policy", () => {
     expect(result.winnerPatchPath).toBe("/repo/.git/pi-lav-recovery/winner.patch");
     expect(repository.cleanupCount).toBe(1);
   });
+
+  it("preserves a completed recovery result when cleanup also fails", async () => {
+    const repository = new RecoveryRepository("cleanup failed");
+    const result = await runLav(
+      "/repo",
+      config(),
+      {
+        repositoryFactory: { open: async () => repository },
+        candidateRunner: { run: async () => completed() },
+        selector: { select: async () => singletonSelection() },
+      },
+      new AbortController().signal,
+    );
+
+    expect(result.applied).toBe(false);
+    expect(result.applicationError).toBe("primary drift");
+    expect(result.winnerPatchPath).toBe("/repo/.git/pi-lav-recovery/winner.patch");
+    expect(result.cleanupError).toBe("cleanup failed");
+    expect(repository.cleanupCount).toBe(1);
+  });
 });
 
 class RecoveryRepository implements LavRepository {
@@ -85,6 +121,8 @@ class RecoveryRepository implements LavRepository {
   readonly baseCommit = "base";
   readonly worktrees: readonly CandidateWorktree[] = [{ candidateIndex: 0, path: "/tmp/candidate" }];
   cleanupCount = 0;
+
+  constructor(private readonly cleanupFailure?: string) {}
 
   async freeze(): Promise<FrozenRepositoryState> {
     return { patch: "patch", patchHash: "hash", status: " M tracked.txt" };
@@ -100,6 +138,7 @@ class RecoveryRepository implements LavRepository {
 
   async cleanup(): Promise<void> {
     this.cleanupCount += 1;
+    if (this.cleanupFailure) throw new Error(this.cleanupFailure);
   }
 }
 

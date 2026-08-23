@@ -113,15 +113,14 @@ export async function runLav(
       selectedCandidateIndex: selectedCandidate.candidateIndex,
     });
 
-    const winnerPatchPath =
-      selectedCandidate.patch.trim() && repository.preserveFrozenPatch
-        ? await repository.preserveFrozenPatch(
-            selectedCandidate.patch,
-            selectedCandidate.patchHash,
-            selectedCandidate.candidateIndex,
-            signal,
-          )
-        : undefined;
+    const winnerPatchPath = selectedCandidate.patch.trim()
+      ? await repository.preserveFrozenPatch(
+          selectedCandidate.patch,
+          selectedCandidate.patchHash,
+          selectedCandidate.candidateIndex,
+          signal,
+        )
+      : undefined;
     let applied = false;
     let applicationError: string | undefined;
     if (config.applyWinner) {
