@@ -58,7 +58,7 @@ function canonicalizeWithExistingAncestor(path: string): string {
 function readDanglingSymlinkTarget(path: string): string | undefined {
   try {
     if (!lstatSync(path).isSymbolicLink()) return undefined;
-    return resolve(dirname(path), readlinkSync(path));
+    return resolve(realpathSync.native(dirname(path)), readlinkSync(path));
   } catch (error) {
     if (isMissingPath(error)) return undefined;
     throw error;

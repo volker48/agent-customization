@@ -1,9 +1,9 @@
-import { execFileSync } from "node:child_process";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
+
+import { createRepository, git } from "./helpers/lav-repository.js";
 
 import { GitLavRepository } from "../pi-extensions/llm-verifier/run/git.js";
 import {
@@ -167,19 +167,4 @@ function config(): LavRunConfig {
 
 function completed(): CandidateExecution {
   return { status: "completed", actions: [], finalMessage: "done" };
-}
-
-async function createRepository(): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "lav-review-followups-"));
-  git(directory, "init", "--quiet");
-  git(directory, "config", "user.email", "lav@example.test");
-  git(directory, "config", "user.name", "LAV Test");
-  await writeFile(join(directory, "tracked.txt"), "base\n");
-  git(directory, "add", "tracked.txt");
-  git(directory, "commit", "--quiet", "-m", "initial");
-  return directory;
-}
-
-function git(cwd: string, ...args: string[]): string {
-  return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
 }

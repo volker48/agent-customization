@@ -1,6 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { constants } from "node:fs";
+import {
+  type FileHandle,
+  lstat,
+  mkdir,
+  open,
+  rename,
+  rm,
+  stat,
+} from "node:fs/promises";
+import { basename, dirname, join, parse, relative, resolve, sep } from "node:path";
 
 import type { Criterion, DirectedPairReward } from "./types.js";
 
@@ -69,6 +78,21 @@ interface CacheFile {
   runs: CacheRunIndex;
 }
 
+interface CacheDirectory {
+  readonly cachePath: string;
+  readonly fileName: string;
+  resolve(name: string): string;
+  close(): Promise<void>;
+}
+
+interface PinnedDirectory {
+  readonly handle: FileHandle;
+  readonly descriptorPath: string;
+}
+
+const NO_FOLLOW_FLAG = constants.O_NOFOLLOW ?? 0;
+const DIRECTORY_FLAG = constants.O_DIRECTORY ?? 0;
+
 export function canonicalText(value: string): string {
   return value
     .replace(/\r\n?/g, "\n")
@@ -132,21 +156,26 @@ export class JsonPairScoreCache implements PairScoreCache {
 
   async set(entryKey: string, reward: DirectedPairReward): Promise<void> {
     const write = this.writeTail.then(async () => {
-      const release = await acquireFileLock(`${this.path}.lock`, this.pathGuard);
+      const directory = await openCacheDirectory(this.path, this.pathGuard, true);
       try {
-        const cache = await readCacheFile(this.path, this.pathGuard);
-        const run = (cache.runs[this.runHash] ??= {
-          createdAt: new Date().toISOString(),
-          entries: {},
-        });
-        run.entries[entryKey] = {
-          ...reward,
-          createdAt: new Date().toISOString(),
-        };
-        await atomicWriteJson(this.path, cache, this.pathGuard);
-        this.cacheFile = Promise.resolve(cache);
+        const release = await acquireFileLock(directory);
+        try {
+          const cache = await readCacheFile(directory);
+          const run = (cache.runs[this.runHash] ??= {
+            createdAt: new Date().toISOString(),
+            entries: {},
+          });
+          run.entries[entryKey] = {
+            ...reward,
+            createdAt: new Date().toISOString(),
+          };
+          await atomicWriteJson(directory, cache);
+          this.cacheFile = Promise.resolve(cache);
+        } finally {
+          await release();
+        }
       } finally {
-        await release();
+        await directory.close();
       }
     });
     this.writeTail = write.catch(() => undefined);
@@ -154,8 +183,21 @@ export class JsonPairScoreCache implements PairScoreCache {
   }
 
   private load(): Promise<CacheFile> {
-    this.cacheFile ??= readCacheFile(this.path, this.pathGuard);
+    this.cacheFile ??= this.read();
     return this.cacheFile;
+  }
+
+  private async read(): Promise<CacheFile> {
+    let directory: CacheDirectory | undefined;
+    try {
+      directory = await openCacheDirectory(this.path, this.pathGuard, false);
+      return await readCacheFile(directory);
+    } catch (error) {
+      if (isMissingFile(error)) return emptyCacheFile();
+      throw error;
+    } finally {
+      await directory?.close();
+    }
   }
 }
 
@@ -181,75 +223,164 @@ function canonicalize(value: unknown): unknown {
   return output;
 }
 
-async function readCacheFile(path: string, pathGuard?: CachePathGuard): Promise<CacheFile> {
+async function openCacheDirectory(
+  path: string,
+  pathGuard: CachePathGuard | undefined,
+  create: boolean,
+): Promise<CacheDirectory> {
+  const guardedPath = guardPath(path, pathGuard);
+  const parentPath = dirname(guardedPath);
+  const fileName = basename(guardedPath);
+  if (!fileName) throw new Error(`Verifier cache path must name a file: ${guardedPath}`);
+  if (!pathGuard) {
+    if (create) await mkdir(parentPath, { recursive: true });
+    return {
+      cachePath: guardedPath,
+      fileName,
+      resolve: (name) => join(parentPath, name),
+      close: () => Promise.resolve(),
+    };
+  }
+
+  const pinned = await openPinnedDirectory(parentPath, create);
   try {
-    const guardedPath = guardPath(path, pathGuard);
-    const parsed = JSON.parse(await readFile(guardedPath, "utf8")) as Partial<CacheFile>;
-    if (parsed.schemaVersion !== 1 || !parsed.runs || typeof parsed.runs !== "object") {
-      throw new Error(`Unsupported verifier cache schema in ${guardedPath}`);
-    }
-    return parsed as CacheFile;
+    // Recheck the descriptor-anchored destination itself. This catches an ancestor
+    // swap before the directory was opened while keeping later writes pinned to
+    // the verified directory if its pathname is replaced afterward.
+    guardPath(join(pinned.descriptorPath, fileName), pathGuard);
+    return {
+      cachePath: guardedPath,
+      fileName,
+      resolve: (name) => join(pinned.descriptorPath, name),
+      close: () => pinned.handle.close(),
+    };
   } catch (error) {
-    if (isMissingFile(error)) return { schemaVersion: 1, runs: {} };
+    await pinned.handle.close();
     throw error;
   }
 }
 
-async function atomicWriteJson(
-  path: string,
-  value: CacheFile,
-  pathGuard?: CachePathGuard,
-): Promise<void> {
-  let guardedPath = guardPath(path, pathGuard);
-  await mkdir(dirname(guardedPath), { recursive: true });
-  guardedPath = guardPath(path, pathGuard);
-  const temporaryPath = guardPath(
-    `${guardedPath}.${process.pid}.${randomUUID()}.tmp`,
-    pathGuard,
-  );
+async function openPinnedDirectory(path: string, create: boolean): Promise<PinnedDirectory> {
+  if (process.platform === "win32" || NO_FOLLOW_FLAG === 0 || DIRECTORY_FLAG === 0) {
+    throw new Error(
+      "Guarded verifier caches require descriptor-anchored directory access on this platform",
+    );
+  }
+
+  const absolutePath = resolve(path);
+  const root = parse(absolutePath).root;
+  const segments = relative(root, absolutePath).split(sep).filter(Boolean);
+  if (segments.some((segment) => segment === "." || segment === "..")) {
+    throw new Error(`Cannot securely open verifier cache directory ${absolutePath}`);
+  }
+
+  let handle = await open(root, constants.O_RDONLY | DIRECTORY_FLAG | NO_FOLLOW_FLAG);
   try {
-    await writeFile(temporaryPath, `${JSON.stringify(value)}\n`, { flag: "wx", mode: 0o600 });
-    const sourcePath = guardPath(temporaryPath, pathGuard);
-    const destinationPath = guardPath(path, pathGuard);
-    if (dirname(destinationPath) !== dirname(sourcePath)) {
-      throw new Error("Verifier cache path changed during an atomic write");
+    let descriptorPath = await descriptorPathFor(handle);
+    for (const segment of segments) {
+      const childPath = join(descriptorPath, segment);
+      if (create) {
+        try {
+          await mkdir(childPath, { mode: 0o700 });
+        } catch (error) {
+          if (!isAlreadyExists(error)) throw error;
+        }
+      }
+      const child = await open(
+        childPath,
+        constants.O_RDONLY | DIRECTORY_FLAG | NO_FOLLOW_FLAG,
+      );
+      await handle.close();
+      handle = child;
+      descriptorPath = await descriptorPathFor(handle);
     }
-    await rename(sourcePath, destinationPath);
-    guardPath(path, pathGuard);
-  } finally {
-    await rm(guardPath(temporaryPath, pathGuard), { force: true });
+    return { handle, descriptorPath };
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
   }
 }
 
-async function acquireFileLock(
-  lockPath: string,
-  pathGuard?: CachePathGuard,
-): Promise<() => Promise<void>> {
-  let guardedLockPath = guardPath(lockPath, pathGuard);
-  await mkdir(dirname(guardedLockPath), { recursive: true });
+async function descriptorPathFor(handle: FileHandle): Promise<string> {
+  const expected = await handle.stat({ bigint: true });
+  for (const root of ["/proc/self/fd", "/dev/fd"]) {
+    const candidate = join(root, String(handle.fd));
+    try {
+      const actual = await stat(candidate, { bigint: true });
+      if (actual.dev === expected.dev && actual.ino === expected.ino) return candidate;
+    } catch {
+      // Try the next descriptor filesystem.
+    }
+  }
+  throw new Error(
+    "Guarded verifier caches require descriptor-anchored directory access on this platform",
+  );
+}
+
+async function readCacheFile(directory: CacheDirectory): Promise<CacheFile> {
+  const path = directory.resolve(directory.fileName);
+  let file: FileHandle | undefined;
+  try {
+    file = await open(path, constants.O_RDONLY | NO_FOLLOW_FLAG);
+    const parsed = JSON.parse(await file.readFile({ encoding: "utf8" })) as Partial<CacheFile>;
+    if (parsed.schemaVersion !== 1 || !parsed.runs || typeof parsed.runs !== "object") {
+      throw new Error(`Unsupported verifier cache schema in ${directory.cachePath}`);
+    }
+    return parsed as CacheFile;
+  } catch (error) {
+    if (isMissingFile(error)) return emptyCacheFile();
+    throw error;
+  } finally {
+    await file?.close();
+  }
+}
+
+async function atomicWriteJson(directory: CacheDirectory, value: CacheFile): Promise<void> {
+  const temporaryName = `${directory.fileName}.${process.pid}.${randomUUID()}.tmp`;
+  const temporaryPath = directory.resolve(temporaryName);
+  let temporaryFile: FileHandle | undefined;
+  try {
+    temporaryFile = await open(
+      temporaryPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW_FLAG,
+      0o600,
+    );
+    await temporaryFile.writeFile(`${JSON.stringify(value)}\n`, { encoding: "utf8" });
+    await temporaryFile.sync();
+    await temporaryFile.close();
+    temporaryFile = undefined;
+    await rename(temporaryPath, directory.resolve(directory.fileName));
+  } finally {
+    await temporaryFile?.close().catch(() => undefined);
+    await rm(temporaryPath, { force: true });
+  }
+}
+
+async function acquireFileLock(directory: CacheDirectory): Promise<() => Promise<void>> {
+  const lockPath = directory.resolve(`${directory.fileName}.lock`);
+  const displayLockPath = `${directory.cachePath}.lock`;
   const deadline = Date.now() + 10_000;
   while (true) {
-    guardedLockPath = guardPath(lockPath, pathGuard);
     try {
-      await mkdir(guardedLockPath);
-      return async () => rm(guardPath(lockPath, pathGuard), { recursive: true, force: true });
+      await mkdir(lockPath);
+      return async () => rm(lockPath, { recursive: true, force: true });
     } catch (error) {
       if (!isAlreadyExists(error)) throw error;
-      if (await isStaleLock(lockPath, pathGuard)) {
-        await rm(guardPath(lockPath, pathGuard), { recursive: true, force: true });
+      if (await isStaleLock(lockPath)) {
+        await rm(lockPath, { recursive: true, force: true });
         continue;
       }
       if (Date.now() >= deadline) {
-        throw new Error(`Timed out waiting for verifier cache lock ${guardedLockPath}`);
+        throw new Error(`Timed out waiting for verifier cache lock ${displayLockPath}`);
       }
       await delay(25);
     }
   }
 }
 
-async function isStaleLock(lockPath: string, pathGuard?: CachePathGuard): Promise<boolean> {
+async function isStaleLock(lockPath: string): Promise<boolean> {
   try {
-    const metadata = await stat(guardPath(lockPath, pathGuard));
+    const metadata = await lstat(lockPath);
     return Date.now() - metadata.mtimeMs > 60_000;
   } catch (error) {
     if (isMissingFile(error)) return false;
@@ -257,12 +388,16 @@ async function isStaleLock(lockPath: string, pathGuard?: CachePathGuard): Promis
   }
 }
 
+function emptyCacheFile(): CacheFile {
+  return { schemaVersion: 1, runs: {} };
+}
+
 function guardPath(path: string, pathGuard?: CachePathGuard): string {
   return pathGuard?.(path) ?? path;
 }
 
 function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
 }
 
 function isMissingFile(error: unknown): boolean {

@@ -1,9 +1,9 @@
-import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
+
+import { createRepository, git } from "./helpers/lav-repository.js";
 
 import { parseLavRunArgs } from "../pi-extensions/llm-verifier/run/args.js";
 import {
@@ -114,24 +114,55 @@ describe("candidate evidence", () => {
     expect(first).not.toContain("secret-value");
   });
 
-  it("redacts common secret forms", () => {
+  it("redacts clearly secret-looking assignments without rewriting code references", () => {
     const result = redactEvidenceText(
-      "api_key=abcdef token=second Bearer top-secret " +
+      "api_key=abcdef token=response.token password=options.password " +
+        "token=super-secret-value Bearer top-secret " +
         "ghp_abcdefghijklmnopqrstuvwxyz012345 " +
-        "OPENAI_API_KEY=openai-secret AWS_SECRET_ACCESS_KEY=aws-secret",
+        "OPENAI_API_KEY=openai-secret-value " +
+        "AWS_SECRET_ACCESS_KEY=Abcd1234Efgh5678Ijkl9012",
     );
-    expect(result.value).toContain("api_key=[REDACTED]");
+    expect(result.value).toContain("api_key=abcdef");
+    expect(result.value).toContain("token=response.token");
+    expect(result.value).toContain("password=options.password");
     expect(result.value).toContain("token=[REDACTED]");
     expect(result.value).toContain("Bearer [REDACTED]");
     expect(result.value).toContain("[REDACTED SECRET]");
     expect(result.value).toContain("OPENAI_API_KEY=[REDACTED]");
     expect(result.value).toContain("AWS_SECRET_ACCESS_KEY=[REDACTED]");
-    expect(result.redactionCount).toBe(6);
+    expect(result.redactionCount).toBe(5);
+  });
+
+  it("preserves benign secret-named assignments in the frozen patch", () => {
+    const result = buildCandidateEvidence({
+      task: "Keep the patch exact",
+      candidateIndex: 0,
+      status: "completed",
+      baseCommit: "abc",
+      patch:
+        "diff --git a/auth.ts b/auth.ts\n" +
+        "+const token = response.token;\n" +
+        "+const password = options.password;\n",
+      patchHash: "hash",
+      repositoryStatus: " M auth.ts",
+      actions: [],
+      finalMessage: "done",
+      error: "",
+      repoRoot: "/repo",
+      worktreePath: "/tmp/candidate",
+    });
+    const packet = JSON.parse(result.evidence) as {
+      frozenPatch: { text: string };
+    };
+
+    expect(packet.frozenPatch.text).toContain("+const token = response.token;");
+    expect(packet.frozenPatch.text).toContain("+const password = options.password;");
+    expect(result.redactionCount).toBe(0);
   });
 
   it("redacts and bounds task text before publishing evidence", () => {
     const result = buildCandidateEvidence({
-      task: `OPENAI_API_KEY=task-secret ${"x".repeat(20_000)}`,
+      task: `OPENAI_API_KEY=task-secret-value ${"x".repeat(20_000)}`,
       candidateIndex: 0,
       status: "completed",
       baseCommit: "abc",
@@ -147,7 +178,7 @@ describe("candidate evidence", () => {
     const packet = JSON.parse(result.evidence) as { task: string };
 
     expect(packet.task).toContain("OPENAI_API_KEY=[REDACTED]");
-    expect(packet.task).not.toContain("task-secret");
+    expect(packet.task).not.toContain("task-secret-value");
     expect(packet.task).toContain("[TRUNCATED ");
     expect(packet.task.length).toBeLessThanOrEqual(12_000);
   });
@@ -560,21 +591,6 @@ function selection(
     nComparisons: 0,
     runHash,
   };
-}
-
-async function createRepository(): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "lav-run-test-"));
-  git(directory, "init", "--quiet");
-  git(directory, "config", "user.email", "lav@example.test");
-  git(directory, "config", "user.name", "LAV Test");
-  await writeFile(join(directory, "tracked.txt"), "base\n");
-  git(directory, "add", "tracked.txt");
-  git(directory, "commit", "--quiet", "-m", "initial");
-  return directory;
-}
-
-function git(cwd: string, ...args: string[]): string {
-  return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
 }
 
 function delay(milliseconds: number): Promise<void> {

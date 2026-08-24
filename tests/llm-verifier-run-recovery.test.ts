@@ -1,9 +1,11 @@
-import { execFileSync } from "node:child_process";
+import { renameSync, symlinkSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
+
+import { createRepository, git } from "./helpers/lav-repository.js";
 
 import { JsonPairScoreCache } from "../pi-extensions/llm-verifier/core/cache.js";
 import {
@@ -69,6 +71,30 @@ describe("LAV cache and recovery policy", () => {
     }
   });
 
+  it("resolves a relative dangling symlink from its real parent", async () => {
+    if (process.platform === "win32") return;
+
+    const root = await mkdtemp(join(tmpdir(), "lav-cache-relative-symlink-test-"));
+    const repo = join(root, "repo");
+    const realParent = join(root, "external", "real", "deep");
+    const parentAlias = join(root, "external", "alias");
+    try {
+      await mkdir(repo);
+      await mkdir(realParent, { recursive: true });
+      await symlink(realParent, parentAlias, "dir");
+      await symlink("../../../repo/future-cache", join(realParent, "repository-link"), "dir");
+
+      expect(() =>
+        assertCachePathOutsideRepository(
+          repo,
+          join(parentAlias, "repository-link", "scores.json"),
+        ),
+      ).toThrow("outside the guarded repository");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("revalidates the cache path before writing after an ancestor swap", async () => {
     const repo = await createRepository();
     const external = await mkdtemp(join(tmpdir(), "lav-cache-swap-test-"));
@@ -91,6 +117,42 @@ describe("LAV cache and recovery policy", () => {
         "outside the guarded repository",
       );
       expect(git(repo, "status", "--porcelain=v1", "--untracked-files=all")).toBe("");
+    } finally {
+      await rm(external, { recursive: true, force: true });
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps cache writes pinned after a post-validation ancestor swap", async () => {
+    if (process.platform === "win32") return;
+
+    const repo = await createRepository();
+    const external = await mkdtemp(join(tmpdir(), "lav-cache-pinned-swap-test-"));
+    try {
+      const cacheDirectory = join(external, "cache");
+      const displacedDirectory = join(external, "cache-displaced");
+      const configuredPath = join(cacheDirectory, "scores.json");
+      await mkdir(cacheDirectory);
+      let guardCalls = 0;
+      const cache = new JsonPairScoreCache(configuredPath, "run-hash", (path) => {
+        guardCalls += 1;
+        const guardedPath = assertCachePathOutsideRepository(repo, path);
+        if (!guardedPath) throw new Error("Expected a guarded cache path");
+        if (guardCalls === 3) {
+          renameSync(cacheDirectory, displacedDirectory);
+          symlinkSync(repo, cacheDirectory, "dir");
+        }
+        return guardedPath;
+      });
+
+      await cache.set("entry", { candidateA: 1, candidateB: 0 });
+
+      expect(git(repo, "status", "--porcelain=v1", "--untracked-files=all")).toBe("");
+      const stored = JSON.parse(await readFile(join(displacedDirectory, "scores.json"), "utf8"));
+      expect(stored.runs["run-hash"].entries.entry).toMatchObject({
+        candidateA: 1,
+        candidateB: 0,
+      });
     } finally {
       await rm(external, { recursive: true, force: true });
       await rm(repo, { recursive: true, force: true });
@@ -224,19 +286,4 @@ function singletonSelection(): CandidateSelectionResult {
     pivotPairs: [],
     nComparisons: 0,
   };
-}
-
-async function createRepository(): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "lav-recovery-test-"));
-  git(directory, "init", "--quiet");
-  git(directory, "config", "user.email", "lav@example.test");
-  git(directory, "config", "user.name", "LAV Test");
-  await writeFile(join(directory, "tracked.txt"), "base\n");
-  git(directory, "add", "tracked.txt");
-  git(directory, "commit", "--quiet", "-m", "initial");
-  return directory;
-}
-
-function git(cwd: string, ...args: string[]): string {
-  return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
 }

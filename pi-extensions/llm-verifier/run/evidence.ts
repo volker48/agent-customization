@@ -133,15 +133,81 @@ export function redactEvidenceText(value: string): {
     "(?:api[_-]?key|access[_-]?(?:key|token)|refresh[_-]?token|token|password|" +
     "passwd|secret|credential|client[_-]?secret)";
   const secretAssignment = new RegExp(
-    String.raw`((?:\b|[_-])${secretKeyName}\b\s*(?:=|:)\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)`,
+    String.raw`((?:\b|[_-])(${secretKeyName})\b\s*(?:=|:)\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)`,
     "gi",
   );
-  output = output.replace(secretAssignment, (_match, prefix: string) => {
-    redactionCount += 1;
-    return `${prefix}[REDACTED]`;
-  });
+  output = output.replace(
+    secretAssignment,
+    (match, prefix: string, keyName: string, rawValue: string) => {
+      if (!isLikelySecretAssignment(keyName, rawValue)) return match;
+      redactionCount += 1;
+      return `${prefix}[REDACTED]`;
+    },
+  );
 
   return { value: output, redactionCount };
+}
+
+function isLikelySecretAssignment(keyName: string, rawValue: string): boolean {
+  const value = unquote(rawValue).trim();
+  if (!value || looksLikeCodeReference(value) || looksLikePlaceholder(value)) return false;
+
+  const characterClasses = [
+    /[a-z]/.test(value),
+    /[A-Z]/.test(value),
+    /\d/.test(value),
+    /[^A-Za-z\d]/.test(value),
+  ].filter(Boolean).length;
+  const normalizedKey = keyName.replace(/[-_]/g, "").toLowerCase();
+  if ((normalizedKey === "password" || normalizedKey === "passwd") && value.length >= 8) {
+    return characterClasses >= 2 || /\s/.test(value);
+  }
+  return value.length >= 12 && characterClasses >= 2 && shannonEntropy(value) >= 3;
+}
+
+function unquote(value: string): string {
+  const first = value[0];
+  const last = value.at(-1);
+  return (first === '"' && last === '"') || (first === "'" && last === "'")
+    ? value.slice(1, -1)
+    : value;
+}
+
+function looksLikeCodeReference(value: string): boolean {
+  if (/^(?:\$\{[^}]+\}|\$[A-Za-z_][A-Za-z\d_]*|%[A-Za-z_][A-Za-z\d_]*%)$/.test(value)) {
+    return true;
+  }
+  if (/^[A-Za-z_$][\w$]*$/.test(value)) return !/\d/.test(value);
+  if (/^(?:await\s+)?[A-Za-z_$][\w$]*\([^\r\n)]*\)$/.test(value)) return true;
+  return /^(?:await\s+)?[A-Za-z_$][\w$]*(?:(?:\?|!)?\.[A-Za-z_$][\w$]*|\??\[[^\]\r\n]+\])+(?:\([^\r\n)]*\))?$/.test(
+    value,
+  );
+}
+
+function looksLikePlaceholder(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return (
+    /^(?:true|false|null|undefined|nil|none|example|sample|placeholder|dummy|test|testing|changeme|change-me|replace-me|redacted|not-a-secret|secret|token|password)$/.test(
+      normalized,
+    ) ||
+    /^(?:your|my)[-_ ]?(?:api[-_ ]?key|token|password|secret)$/.test(normalized) ||
+    /^<[^>]+>$/.test(value) ||
+    /^\[[^\]]+\]$/.test(value) ||
+    /^[-*xX]+$/.test(value)
+  );
+}
+
+function shannonEntropy(value: string): number {
+  const frequencies = new Map<string, number>();
+  for (const character of value) {
+    frequencies.set(character, (frequencies.get(character) ?? 0) + 1);
+  }
+  let entropy = 0;
+  for (const count of frequencies.values()) {
+    const probability = count / value.length;
+    entropy -= probability * Math.log2(probability);
+  }
+  return entropy;
 }
 
 function replaceIncidentalPaths(value: string, repoRoot: string, worktreePath: string): string {
