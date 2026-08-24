@@ -48,6 +48,12 @@ jobs:
       - name: Lint (including custom type restrictions)
         run: pnpm lint
 
+      - name: Capture exact cache formatting diff
+        run: |
+          cp pi-extensions/llm-verifier/core/cache.ts /tmp/cache.ts.before
+          pnpm exec oxfmt pi-extensions/llm-verifier/core/cache.ts
+          diff -u /tmp/cache.ts.before pi-extensions/llm-verifier/core/cache.ts || true
+
       - name: Check formatting
         run: pnpm format:check
 
