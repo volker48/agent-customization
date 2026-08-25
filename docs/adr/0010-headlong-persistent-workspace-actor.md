@@ -41,6 +41,8 @@ component that wakes after the original Pi process exits. It resumes the stored 
 pinned RPC CLI, explicitly loads Headlong and PRO-LONG, and waits for the matching durable control
 transition and a clean zero-status child exit. It never launches while another owner is live and
 revalidates due status only after acquiring the lease.
+Because descendant containment relies on POSIX process groups, the wake-after-exit supervisor fails
+closed before spawning an RPC child on Windows.
 Reopening the canonical live Pi session with a persisted active wake performs the same bounded
 interrupted-wake recovery before scheduling new work.
 

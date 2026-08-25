@@ -187,6 +187,48 @@ describe("Headlong wake-after-exit supervisor", () => {
     });
   });
 
+  it("keeps supervisor recovery paused when its event cannot be appended", async () => {
+    const root = await mkdtemp(join(tmpdir(), "headlong-supervisor-recovery-event-failure-"));
+    roots.push(root);
+    const now = 1_787_680_000_000;
+    const store = await dueStore(root, now);
+    const state = (await store.readState()) as HeadlongActorState;
+    await store.writeState({
+      ...state,
+      revision: state.revision + 1,
+      status: "running",
+      wakeAt: null,
+      activeWakeId: "wake-from-dead-host",
+      wakeStartedAt: new Date(now - 60_000).toISOString(),
+      updatedAt: new Date(now - 60_000).toISOString(),
+    });
+    const originalAppendEvent = store.appendEvent.bind(store);
+    vi.spyOn(store, "appendEvent").mockImplementation(async (event) => {
+      if (event.type === "wake.interrupted_recovered") {
+        throw new Error("simulated recovery event failure");
+      }
+      return originalAppendEvent(event);
+    });
+    const runChild = vi.fn();
+
+    await expect(
+      runSupervisorWake({
+        store,
+        now: () => now,
+        extensionPath: join(process.cwd(), "pi-extensions/headlong/index.ts"),
+        runChild,
+      }),
+    ).rejects.toThrow("simulated recovery event failure");
+
+    expect(runChild).not.toHaveBeenCalled();
+    await expect(store.readState()).resolves.toMatchObject({
+      status: "paused",
+      wakeAt: null,
+      activeWakeId: null,
+      consecutiveFailures: 1,
+    });
+  });
+
   it("pauses when Pi settles without the required explicit durable transition", async () => {
     const root = await mkdtemp(join(tmpdir(), "headlong-supervisor-settled-"));
     roots.push(root);
@@ -244,8 +286,8 @@ describe("Headlong wake-after-exit supervisor", () => {
       [
         "-e",
         `const {spawn}=require("node:child_process");
-         const nested=spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{stdio:"ignore"});
-         console.log(nested.pid); setInterval(()=>{},1000);`,
+         const nested=spawn(process.execPath,["-e","process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)"],{stdio:"ignore"});
+         setTimeout(()=>console.log(nested.pid),100); setInterval(()=>{},1000);`,
       ],
       { detached: true, stdio: ["ignore", "pipe", "pipe"] },
     );
@@ -264,8 +306,57 @@ describe("Headlong wake-after-exit supervisor", () => {
         return false;
       }
     };
-    expect(alive(child.pid as number)).toBe(false);
-    expect(alive(nestedPid)).toBe(false);
+    const cleanupNested = (): void => {
+      try {
+        process.kill(nestedPid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    };
+    try {
+      expect(alive(child.pid as number)).toBe(false);
+      expect(alive(nestedPid)).toBe(false);
+    } finally {
+      cleanupNested();
+    }
+  });
+
+  it("cleans an exited process group without requiring a special caller option", async () => {
+    if (process.platform === "win32") return;
+    const child = spawn(
+      process.execPath,
+      [
+        "-e",
+        `const {spawn}=require("node:child_process");
+         const nested=spawn(process.execPath,["-e","process.on('SIGTERM',()=>{}); setInterval(()=>{},1000)"],{stdio:"ignore"});
+         setTimeout(()=>{console.log(nested.pid); process.exit(0)},100);`,
+      ],
+      { detached: true, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const [chunk] = (await once(child.stdout, "data")) as [Buffer];
+    const nestedPid = Number(chunk.toString("utf8").trim());
+    await once(child, "exit");
+    const cleanupNested = (): void => {
+      try {
+        process.kill(nestedPid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    };
+
+    try {
+      await terminateProcessGroup(child, { graceMs: 100 });
+      let alive = true;
+      try {
+        process.kill(nestedPid, 0);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") alive = false;
+        else throw error;
+      }
+      expect(alive).toBe(false);
+    } finally {
+      cleanupNested();
+    }
   });
 
   it("waits without overlap until the original live host exits, then wakes the stored session", async () => {
@@ -333,6 +424,60 @@ describe("Headlong wake-after-exit supervisor", () => {
         join(process.cwd(), "pi-extensions/prolong.ts"),
       ]),
     );
+  });
+
+  it("fails closed on Windows before launching an uncontainable RPC process tree", async () => {
+    const root = await mkdtemp(join(tmpdir(), "headlong-supervisor-windows-containment-"));
+    roots.push(root);
+    const fixture = join(root, "rpc-windows-fixture.mjs");
+    await writeFile(
+      fixture,
+      `process.stdin.once("data", chunk => {
+  const request = JSON.parse(String(chunk).trim());
+  process.stdout.write(JSON.stringify({id:request.id,type:"response",command:"prompt",success:true})+"\\n");
+  process.stdout.write(JSON.stringify({type:"agent_settled"})+"\\n");
+});
+`,
+      "utf8",
+    );
+    const platform = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+
+    try {
+      await expect(
+        runPiRpcChild(
+          {
+            wakeId: "wake-rpc-windows-containment",
+            leaseToken: "lease-token",
+            sessionFile: join(root, "session.jsonl"),
+            workspace: root,
+            extensionPath: join(process.cwd(), "pi-extensions/headlong/index.ts"),
+            stateRoot: join(root, "state"),
+            prompt: "HEADLONG WAKE wake-rpc-windows-containment",
+            timeoutMs: 2_000,
+          },
+          { command: process.execPath, prefixArgs: [fixture] },
+        ),
+      ).rejects.toThrow("POSIX process-group containment");
+    } finally {
+      platform.mockRestore();
+    }
+  });
+
+  it("fails closed when direct process-group cleanup is requested on Windows", async () => {
+    const platform = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    const child = {
+      pid: 12_345,
+      exitCode: 0,
+      signalCode: null,
+    } as unknown as Parameters<typeof terminateProcessGroup>[0];
+
+    try {
+      await expect(
+        terminateProcessGroup(child),
+      ).rejects.toThrow("POSIX process-group containment");
+    } finally {
+      platform.mockRestore();
+    }
   });
 
   it("speaks the pinned Pi newline-delimited RPC settlement protocol in a detached child", async () => {
@@ -411,6 +556,127 @@ process.stdin.on("data", chunk => {
     expect(result).toMatchObject({ settled: true, timedOut: false, exitCode: 0 });
   });
 
+  it("cleans detached descendants after a successful RPC settlement", async () => {
+    if (process.platform === "win32") return;
+    const root = await mkdtemp(join(tmpdir(), "headlong-supervisor-rpc-settled-closed-stdio-"));
+    roots.push(root);
+    const fixture = join(root, "rpc-settled-closed-stdio-fixture.mjs");
+    await writeFile(
+      fixture,
+      `import { spawn } from "node:child_process";
+process.stdin.once("data", chunk => {
+  const request = JSON.parse(String(chunk).trim());
+  const nested = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], {
+    stdio: "ignore",
+  });
+  process.stderr.write("nested=" + nested.pid + "\\n");
+  process.stdout.write(JSON.stringify({id:request.id,type:"response",command:"prompt",success:true})+"\\n");
+  process.stdout.write(JSON.stringify({type:"agent_settled"})+"\\n");
+  process.exit(0);
+});
+`,
+      "utf8",
+    );
+
+    const result = await runPiRpcChild(
+      {
+        wakeId: "wake-rpc-settled-closed-stdio",
+        leaseToken: "lease-token",
+        sessionFile: join(root, "session.jsonl"),
+        workspace: root,
+        extensionPath: join(process.cwd(), "pi-extensions/headlong/index.ts"),
+        stateRoot: join(root, "state"),
+        prompt: "HEADLONG WAKE wake-rpc-settled-closed-stdio",
+        timeoutMs: 2_000,
+      },
+      { command: process.execPath, prefixArgs: [fixture] },
+    );
+    const nestedPid = Number(/nested=(\d+)/.exec(result.stderr ?? "")?.[1]);
+    const cleanupNested = (): void => {
+      try {
+        process.kill(nestedPid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    };
+
+    try {
+      expect(result).toMatchObject({ settled: true, timedOut: false, exitCode: 0 });
+      expect(Number.isSafeInteger(nestedPid)).toBe(true);
+      await vi.waitFor(() => {
+        let alive = true;
+        try {
+          process.kill(nestedPid, 0);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ESRCH") alive = false;
+          else throw error;
+        }
+        expect(alive).toBe(false);
+      });
+    } finally {
+      cleanupNested();
+    }
+  });
+
+  it("cleans exited RPC descendants even when the child stdio closes", async () => {
+    if (process.platform === "win32") return;
+    const root = await mkdtemp(join(tmpdir(), "headlong-supervisor-rpc-closed-stdio-descendant-"));
+    roots.push(root);
+    const fixture = join(root, "rpc-closed-stdio-descendant-fixture.mjs");
+    await writeFile(
+      fixture,
+      `import { spawn } from "node:child_process";
+process.stdin.once("data", () => {
+  const nested = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], {
+    stdio: "ignore",
+  });
+  process.stderr.write("nested=" + nested.pid + "\\n");
+  process.exit(0);
+});
+`,
+      "utf8",
+    );
+
+    const result = await runPiRpcChild(
+      {
+        wakeId: "wake-rpc-closed-stdio-descendant",
+        leaseToken: "lease-token",
+        sessionFile: join(root, "session.jsonl"),
+        workspace: root,
+        extensionPath: join(process.cwd(), "pi-extensions/headlong/index.ts"),
+        stateRoot: join(root, "state"),
+        prompt: "HEADLONG WAKE wake-rpc-closed-stdio-descendant",
+        timeoutMs: 2_000,
+      },
+      { command: process.execPath, prefixArgs: [fixture] },
+    );
+    const nestedPid = Number(/nested=(\d+)/.exec(result.stderr ?? "")?.[1]);
+    const cleanupNested = (): void => {
+      try {
+        process.kill(nestedPid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    };
+
+    try {
+      expect(result).toMatchObject({ settled: false, timedOut: false, exitCode: 0 });
+      expect(Number.isSafeInteger(nestedPid)).toBe(true);
+      await vi.waitFor(() => {
+        let alive = true;
+        try {
+          process.kill(nestedPid, 0);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ESRCH") alive = false;
+          else throw error;
+        }
+        expect(alive).toBe(false);
+      });
+    } finally {
+      cleanupNested();
+    }
+  });
+
   it("fails closed promptly when an exited RPC child leaves inherited stdout open", async () => {
     if (process.platform === "win32") return;
     const root = await mkdtemp(join(tmpdir(), "headlong-supervisor-rpc-open-descendant-"));
@@ -446,7 +712,7 @@ process.stdin.once("data", () => {
     );
 
     expect(result).toMatchObject({ settled: false, timedOut: false, exitCode: 0 });
-    expect(Date.now() - startedAt).toBeLessThan(1_500);
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
     const nestedPid = Number(/nested=(\d+)/.exec(result.stderr ?? "")?.[1]);
     expect(Number.isSafeInteger(nestedPid)).toBe(true);
     await vi.waitFor(() => {

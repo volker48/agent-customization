@@ -684,45 +684,31 @@ export function registerHeadlongExtension(
         const maxFailures = 3;
         const paused = failures >= maxFailures;
         const retryDelayMs = Math.min(300_000, 5_000 * 2 ** (failures - 1));
-        const next: HeadlongActorState = {
+        const safe: HeadlongActorState = {
           ...current,
           revision: current.revision + 1,
-          status: paused ? "paused" : "sleeping",
-          wakeAt: paused ? null : new Date(recoveredMs + retryDelayMs).toISOString(),
+          status: "paused",
+          wakeAt: null,
           activeWakeId: null,
           wakeStartedAt: null,
           consecutiveFailures: failures,
           updatedAt: recoveredAt,
         };
+        const next: HeadlongActorState = {
+          ...safe,
+          revision: safe.revision + 1,
+          status: paused ? "paused" : "sleeping",
+          wakeAt: paused ? null : new Date(recoveredMs + retryDelayMs).toISOString(),
+        };
+        await store.writeState(safe);
+        await store.appendEvent({
+          at: recoveredAt,
+          type: "wake.interrupted_recovered",
+          wakeId: current.activeWakeId,
+          detail: { failures, maxFailures, retryDelayMs: paused ? null : retryDelayMs },
+        });
+        if (paused) return safe;
         await store.writeState(next);
-        try {
-          await store.appendEvent({
-            at: recoveredAt,
-            type: "wake.interrupted_recovered",
-            wakeId: current.activeWakeId,
-            detail: { failures, maxFailures, retryDelayMs: paused ? null : retryDelayMs },
-          });
-        } catch (error) {
-          try {
-            await lease.assertOwned();
-            if (
-              generation === runtime.generation &&
-              runtime.store === store &&
-              runtime.lease === lease
-            ) {
-              await store.writeState({
-                ...next,
-                revision: next.revision + 1,
-                status: "paused",
-                wakeAt: null,
-                updatedAt: new Date(now()).toISOString(),
-              });
-            }
-          } catch {
-            // Ownership loss forbids a compensating write by this extension.
-          }
-          throw error;
-        }
         return next;
       });
       if (generation !== runtime.generation || !recovered) return;

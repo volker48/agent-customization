@@ -67,27 +67,37 @@ export async function runSupervisorWake(
       return { kind: "not-due", status: current.status };
     }
     if (current.activeWakeId) {
-      const failedAt = new Date(now()).toISOString();
+      const recoveredMs = now();
+      const failedAt = new Date(recoveredMs).toISOString();
       const failures = current.consecutiveFailures + 1;
       const maxFailures = options.maxConsecutiveFailures ?? 3;
       const paused = failures >= maxFailures;
       const retryDelayMs = Math.min(300_000, 5_000 * 2 ** (failures - 1));
-      await options.store.writeState({
+      const safe = {
         ...current,
         revision: current.revision + 1,
-        status: paused ? "paused" : "sleeping",
-        wakeAt: paused ? null : new Date(now() + retryDelayMs).toISOString(),
+        status: "paused" as const,
+        wakeAt: null,
         activeWakeId: null,
         wakeStartedAt: null,
         consecutiveFailures: failures,
         updatedAt: failedAt,
-      });
+      };
+      await options.store.writeState(safe);
       await options.store.appendEvent({
         at: failedAt,
         type: "wake.interrupted_recovered",
         wakeId: current.activeWakeId,
         detail: { failures, maxFailures, retryDelayMs: paused ? null : retryDelayMs },
       });
+      if (!paused) {
+        await options.store.writeState({
+          ...safe,
+          revision: safe.revision + 1,
+          status: "sleeping",
+          wakeAt: new Date(recoveredMs + retryDelayMs).toISOString(),
+        });
+      }
       return {
         kind: "failed-closed",
         reason: paused
@@ -255,10 +265,19 @@ export function buildPiRpcArguments(
   ];
 }
 
+function requirePosixProcessGroupContainment(): void {
+  if (process.platform === "win32") {
+    throw new Error(
+      "Headlong supervisor RPC requires POSIX process-group containment; Windows is unsupported",
+    );
+  }
+}
+
 export async function runPiRpcChild(
   request: SupervisorChildRequest,
   options: { command?: string; prefixArgs?: string[] } = {},
 ): Promise<SupervisorChildResult> {
+  requirePosixProcessGroupContainment();
   if (request.signal?.aborted) return { settled: false, timedOut: false, aborted: true };
   const child = spawn(
     options.command ?? process.execPath,
@@ -271,7 +290,7 @@ export async function runPiRpcChild(
         PI_HEADLONG_LEASE_TOKEN: request.leaseToken,
         PI_HEADLONG_SUPERVISOR_WAKE_ID: request.wakeId,
       },
-      detached: process.platform !== "win32",
+      detached: true,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     },
@@ -284,7 +303,6 @@ export async function runPiRpcChild(
 
   let protocolFailure: Error | undefined;
   let rpcBuffer = "";
-  let childClosed = false;
   let exitGraceTimer: NodeJS.Timeout | undefined;
   const settledOrExit = new Promise<"settled" | "exit">((resolve, reject) => {
     const fail = (error: Error): void => {
@@ -301,10 +319,7 @@ export async function runPiRpcChild(
       exitGraceTimer = setTimeout(() => resolve("exit"), 250);
       exitGraceTimer.unref();
     });
-    child.once("close", () => {
-      childClosed = true;
-      resolve("exit");
-    });
+    child.once("close", () => resolve("exit"));
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       rpcBuffer += chunk;
@@ -427,17 +442,13 @@ export async function runPiRpcChild(
     return { settled: false, timedOut: true, exitCode: child.exitCode, stderr };
   }
   if (outcome === "exit") {
-    if (!childClosed) {
-      await terminateProcessGroup(child, { signalExitedGroup: true, graceMs: 250 });
-    }
+    await terminateProcessGroup(child, { graceMs: 250 });
     return { settled: false, timedOut: false, exitCode: child.exitCode, stderr };
   }
 
   child.stdin.end();
   const closed = await waitForClose(child, 1_000);
-  if (!closed) {
-    await terminateProcessGroup(child, { signalExitedGroup: true, graceMs: 250 });
-  }
+  await terminateProcessGroup(child, { graceMs: 250 });
   if (rpcBuffer.length > 0) throw new Error("Pi RPC ended with a truncated unterminated frame");
   if (protocolFailure) throw protocolFailure;
   return {
@@ -465,17 +476,6 @@ function waitForClose(child: ChildProcessWithoutNullStreams, timeoutMs: number):
   });
 }
 
-function waitForExit(child: ManagedChild, timeoutMs: number): Promise<boolean> {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(false), timeoutMs);
-    child.once("exit", () => {
-      clearTimeout(timer);
-      resolve(true);
-    });
-  });
-}
-
 async function waitForProcessGroupExit(pid: number, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -490,31 +490,13 @@ async function waitForProcessGroupExit(pid: number, timeoutMs: number): Promise<
   }
 }
 
-async function runTaskkill(pid: number): Promise<void> {
-  const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
-    stdio: "ignore",
-    windowsHide: true,
-  });
-  const [code] = (await new Promise<[number | null]>((resolve, reject) => {
-    killer.once("error", reject);
-    killer.once("exit", (exitCode) => resolve([exitCode]));
-  })) as [number | null];
-  if (code !== 0 && code !== 128) throw new Error(`taskkill failed with exit code ${String(code)}`);
-}
-
 export async function terminateProcessGroup(
   child: ManagedChild,
-  options: { graceMs?: number; signalExitedGroup?: boolean } = {},
+  options: { graceMs?: number } = {},
 ): Promise<void> {
+  requirePosixProcessGroupContainment();
   const pid = child.pid;
-  const childExited = child.exitCode !== null || child.signalCode !== null;
-  if (!pid || (childExited && !options.signalExitedGroup)) return;
-  if (process.platform === "win32") {
-    if (childExited) return;
-    await runTaskkill(pid);
-    await waitForExit(child, options.graceMs ?? 2_000);
-    return;
-  }
+  if (!pid) return;
 
   const signalGroup = (signal: NodeJS.Signals): void => {
     try {
@@ -523,19 +505,10 @@ export async function terminateProcessGroup(
       if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
     }
   };
-  if (childExited) {
-    signalGroup("SIGTERM");
-    if (await waitForProcessGroupExit(pid, options.graceMs ?? 2_000)) return;
-    signalGroup("SIGKILL");
-    if (!(await waitForProcessGroupExit(pid, options.graceMs ?? 2_000))) {
-      throw new Error(`Process group ${pid} did not exit after SIGKILL`);
-    }
-    return;
-  }
   signalGroup("SIGTERM");
-  if (await waitForExit(child, options.graceMs ?? 2_000)) return;
+  if (await waitForProcessGroupExit(pid, options.graceMs ?? 2_000)) return;
   signalGroup("SIGKILL");
-  if (!(await waitForExit(child, options.graceMs ?? 2_000))) {
+  if (!(await waitForProcessGroupExit(pid, options.graceMs ?? 2_000))) {
     throw new Error(`Process group ${pid} did not exit after SIGKILL`);
   }
 }

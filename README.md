@@ -292,6 +292,8 @@ Use `--once` for one due-wake attempt, `--poll-seconds N` for loop polling, and
 before manual recovery. It resumes the exact stored Pi session, explicitly loads Headlong and
 PRO-LONG, preserves repository context files while excluding arbitrary project extensions, and
 accepts a transition only after the RPC child settles and exits cleanly with status zero.
+Wake-after-exit supervision currently requires POSIX process-group containment and therefore fails
+closed before spawning an RPC child on Windows.
 
 Unattended active tools are restricted to a safe built-in allowlist:
 `read,grep,find,ls,edit,write`, plus the four control tools. `PI_HEADLONG_TOOLS` may select a subset of
