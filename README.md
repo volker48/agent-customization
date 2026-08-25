@@ -18,6 +18,7 @@ pi-extensions/         # Pi agent extensions (TypeScript)
   webfetch.ts          # Generic web fetch tool
   rtk.ts               # RTK bash rewrite hook
   prolong.ts           # PRO-LONG active-branch programmatic memory
+  headlong/            # Persistent workspace actor and wake-after-exit supervisor
   fusion/              # Multi-model Fusion panel and judge command
 
 pi-subagents/          # Package-owned prompt overrides for selected pi-subagents roles
@@ -240,6 +241,73 @@ nonce recovery, and cleanup:
 pnpm verify:prolong -- --model provider/model --keep-session
 ```
 
+### Pi: Headlong persistent workspace actor (`pi-extensions/headlong/`)
+
+Headlong keeps one persistent actor per filesystem-canonical workspace (symlink aliases converge) while leaving Pi's session tree/JSONL as
+the canonical conversation trajectory. It stores only versioned operational state and a small event
+log under `$PI_HEADLONG_STATE_ROOT/<actor-id>/` (default:
+`$XDG_STATE_HOME/pi-headlong/<actor-id>/`, with `~/.local/state/pi-headlong` as the fallback).
+Directories are owner-private, state transitions are atomic, and a process-identity-aware lease
+prevents overlapping hosts.
+
+Control the actor inside Pi:
+
+```text
+/headlong start    Create the actor and wake immediately
+/headlong resume   Resume a paused or blocked actor
+/headlong pause    Reversible kill switch
+/headlong status   Show status, wake time, failures, and exact state path
+/headlong stop     Terminal kill switch
+```
+
+Each unattended wake must call exactly one of `headlong_checkpoint`, `headlong_sleep`,
+`headlong_complete`, or `headlong_blocked`. Settling without a transition, exceeding a turn budget,
+tripping the independent wall-clock watchdog, or losing the lease fails closed to a paused state.
+Meaningful interactive input becomes one serialized immediate wake and resets idle backoff. A
+`stopped` or `completed` actor is terminal; move its preserved actor directory aside before creating a
+fresh actor rather than resuming it.
+
+After an explicit transition, all tools remain disabled until that turn settles; the next wake is not
+armed before settlement. Pause/stop and budget watchdogs abort the turn and likewise keep unattended
+restrictions in place until settlement cleanup.
+
+The extension can self-wake **only while its Pi host remains alive**. For wake-after-exit, run the
+external supervisor from an installed package:
+
+```bash
+pi-headlong --workspace /absolute/path/to/workspace
+```
+
+From this checkout, the equivalent is:
+
+```bash
+pnpm exec tsx pi-extensions/headlong/cli.ts --workspace /absolute/path/to/workspace
+```
+
+Use `--once` for one due-wake attempt, `--poll-seconds N` for loop polling, and
+`--timeout-seconds N` for the per-wake host budget. Stop the supervisor with `SIGINT`/`SIGTERM`
+before manual recovery. It resumes the exact stored Pi session, explicitly loads Headlong and
+PRO-LONG, preserves repository context files while excluding arbitrary project extensions, and
+accepts a transition only after the RPC child settles and exits cleanly with status zero.
+
+Unattended active tools are restricted to a safe built-in allowlist:
+`read,grep,find,ls,edit,write`, plus the four control tools. `PI_HEADLONG_TOOLS` may select a subset of
+that allowlist; it cannot add `bash` or arbitrary extension tools. This prevents unattended network,
+shell, publishing, release, merge, deployment, or messaging tools from being enabled. `edit` and
+`write` still permit local workspace changes, so Headlong is not a filesystem sandbox.
+
+If state is corrupt or an ownership/symlink boundary is unsafe, Headlong refuses to guess. Stop the
+supervisor, preserve or move aside the actor directory reported by `/headlong status`, restart Pi,
+and use `/headlong start` for fresh state against the current canonical session. See
+[`ADR-0010`](docs/adr/0010-headlong-persistent-workspace-actor.md) for invariants and trust boundaries.
+
+Verification:
+
+```bash
+pnpm test:headlong
+pnpm verify:headlong
+```
+
 ### Pi: RTK (`pi-extensions/rtk.ts`)
 
 Intercepts `bash` tool calls and delegates command rewriting to `rtk rewrite <command>`. Only rewrites when RTK returns a different non-empty command. Supports `PI_RTK_BIN` or Pi's `--rtk-bin` flag for binary overrides.
@@ -281,6 +349,8 @@ pnpm format        # Format with oxfmt
 pnpm test          # Run tests with vitest
 pnpm test:prolong  # Focused PRO-LONG storage and extension tests
 pnpm verify:prolong -- --benchmark-only # Model-free active-branch benchmark
+pnpm test:headlong # Focused Headlong state, lease, extension, and supervisor tests
+pnpm verify:headlong # Real pinned-Pi 0.84.2 model-free integration proof
 pnpm test:rtk      # Fast RTK extension regression tests
 pnpm test:rtk:e2e  # Opt-in real RTK integration tests
 pnpm verify:rtk    # Standalone Pi CLI verification using --session and --extension

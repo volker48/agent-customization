@@ -5,6 +5,7 @@
     "pi-package"
   ],
   "bin": {
+    "pi-headlong": "./pi-extensions/headlong/cli.ts",
     "pi-remote": "./pi-extensions/remote/cli.ts"
   },
   "type": "module",
@@ -24,6 +25,7 @@
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.mjs",
     "test:prolong": "vitest run tests/prolong-memory.test.ts tests/prolong-extension.test.ts tests/prolong-regressions.test.ts tests/prolong-verification.test.mjs",
+    "test:headlong": "vitest run tests/headlong-*.test.ts",
     "baseline:webfetch": "WEBFETCH_BASELINE=1 vitest run tests/webfetch.baseline.test.ts --reporter=verbose",
     "test:rtk": "vitest run tests/rtk.test.ts",
     "test:rtk:e2e": "RTK_E2E=1 vitest run tests/rtk.e2e.test.ts",
@@ -32,7 +34,8 @@
     "test:fusion:e2e": "FUSION_E2E=1 vitest run tests/fusion.e2e.test.ts",
     "verify:rtk": "node scripts/verify-rtk-extension.mjs",
     "validate:rtk": "node scripts/verify-rtk-extension.mjs",
-    "verify:prolong": "node --import tsx scripts/verify-prolong-extension.mjs"
+    "verify:prolong": "node --import tsx scripts/verify-prolong-extension.mjs",
+    "verify:headlong": "node --import tsx scripts/verify-headlong-extension.mjs"
   },
   "dependencies": {
     "@mozilla/readability": "0.6.0",
