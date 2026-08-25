@@ -13,6 +13,7 @@ import {
 const roots: string[] = [];
 
 afterEach(async () => {
+  vi.useRealTimers();
   vi.unstubAllEnvs();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
@@ -33,7 +34,22 @@ function createPi() {
     sendUserMessage: vi.fn(),
     appendEntry: vi.fn(),
     getActiveTools: vi.fn(() => ["read", "bash"]),
-    getAllTools: vi.fn(() => []),
+    getAllTools: vi.fn(() =>
+      [
+        "read",
+        "grep",
+        "find",
+        "ls",
+        "edit",
+        "write",
+        "bash",
+        "external_message",
+        "headlong_checkpoint",
+        "headlong_sleep",
+        "headlong_complete",
+        "headlong_blocked",
+      ].map((name) => ({ name })),
+    ),
     setActiveTools: vi.fn(),
   };
   return { pi, handlers, commands, tools };
@@ -114,6 +130,7 @@ describe("Headlong Pi extension", () => {
         { deliverAs: "followUp" },
       ),
     );
+    await runtime.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, context);
   });
 
   it("persists an explicit sleep transition for the active wake and arms durable wake_at", async () => {
@@ -232,6 +249,7 @@ describe("Headlong Pi extension", () => {
       wakeSequence: 2,
       activeWakeId: expect.stringMatching(/^wake-2-/),
     });
+    await runtime.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, context);
   });
 
   it("turns meaningful interactive input into an immediate wake and resets idle backoff", async () => {
@@ -366,7 +384,10 @@ describe("Headlong Pi extension", () => {
       wakeAt: null,
     });
     expect(runtime.pi.setActiveTools).toHaveBeenLastCalledWith(
-      expect.not.arrayContaining(["bash"]),
+      expect.arrayContaining(["read", "headlong_sleep"]),
+    );
+    expect(runtime.pi.setActiveTools).toHaveBeenLastCalledWith(
+      expect.not.arrayContaining(["bash", "external_message"]),
     );
     await runtime.handlers
       .get("agent_settled")
@@ -402,6 +423,37 @@ describe("Headlong Pi extension", () => {
     });
   });
 
+  it("does not write dispatch recovery after losing lease ownership", async () => {
+    const root = await mkdtemp(join(tmpdir(), "headlong-extension-dispatch-lost-lease-"));
+    roots.push(root);
+    const stateRoot = join(root, "state");
+    const callbacks: Array<() => Promise<void> | void> = [];
+    const runtime = createPi();
+    const context = createContext(root);
+    registerHeadlongExtension(runtime.pi as never, {
+      stateRoot,
+      setTimer: (callback: () => Promise<void> | void) => {
+        callbacks.push(callback);
+        return callbacks.length;
+      },
+      clearTimer: vi.fn(),
+    });
+    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+    await runtime.commands.get("headlong")?.handler("start", context);
+    expect(callbacks).toHaveLength(1);
+    const store = new HeadlongStore({ stateRoot, workspace: context.cwd });
+    const before = await store.readState();
+    const ownerPath = join(store.leasePath, "owner.v1.json");
+    const owner = JSON.parse(await readFile(ownerPath, "utf8"));
+    await writeFile(ownerPath, `${JSON.stringify({ ...owner, token: "replacement-owner" })}\n`);
+
+    await callbacks[0]?.();
+
+    await expect(store.readState()).resolves.toEqual(before);
+    const events = readOperationalEvents(await readFile(store.eventsPath, "utf8"));
+    expect(events.some((event) => event.type === "wake.dispatch_failed")).toBe(false);
+  });
+
   it("invalidates a queued wake across shutdown so a stale lifecycle callback cannot inject", async () => {
     vi.useFakeTimers();
     const root = await mkdtemp(join(tmpdir(), "headlong-extension-race-"));
@@ -427,7 +479,6 @@ describe("Headlong Pi extension", () => {
     await callbacks[0]?.();
 
     expect(runtime.pi.sendUserMessage).not.toHaveBeenCalled();
-    vi.useRealTimers();
   });
 
   it("does not resurrect a stale extension when shutdown overtakes lease acquisition", async () => {
@@ -626,7 +677,10 @@ describe("Headlong Pi extension", () => {
     const events = readOperationalEvents(await readFile(store.eventsPath, "utf8"));
     expect(events.at(-1)).toMatchObject({ type: "wake.budget_exceeded" });
     expect(runtime.pi.setActiveTools).toHaveBeenLastCalledWith(
-      expect.not.arrayContaining(["bash"]),
+      expect.arrayContaining(["read", "headlong_sleep"]),
+    );
+    expect(runtime.pi.setActiveTools).toHaveBeenLastCalledWith(
+      expect.not.arrayContaining(["bash", "external_message"]),
     );
     await runtime.handlers
       .get("agent_settled")
@@ -701,6 +755,63 @@ describe("Headlong Pi extension", () => {
     const observer = await ActorLease.acquire({ store, role: "observer" });
     expect(observer).toBeDefined();
     await observer?.release();
+  });
+
+  it("recovers a persisted active wake when the canonical live session restarts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "headlong-extension-restart-recovery-"));
+    roots.push(root);
+    const stateRoot = join(root, "state");
+    const context = createContext(root);
+    const store = new HeadlongStore({ stateRoot, workspace: context.cwd });
+    const startedAt = 1_787_680_000_000;
+    const recoveredAt = startedAt + 1_000;
+    const initial = createInitialActorState({
+      workspace: context.cwd,
+      sessionFile: context.sessionManager.getSessionFile(),
+      sessionId: context.sessionManager.getSessionId(),
+      now: startedAt,
+    });
+    await store.writeState({
+      ...initial,
+      status: "running",
+      activeWakeId: "wake-interrupted-live",
+      wakeStartedAt: initial.updatedAt,
+      wakeSequence: 1,
+    });
+    const callbacks: Array<() => void | Promise<void>> = [];
+    const runtime = createPi();
+    registerHeadlongExtension(runtime.pi as never, {
+      stateRoot,
+      now: () => recoveredAt,
+      setTimer: (callback: () => void | Promise<void>) => {
+        callbacks.push(callback);
+        return callbacks.length;
+      },
+      clearTimer: vi.fn(),
+    });
+
+    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+
+    await expect(store.readState()).resolves.toMatchObject({
+      status: "sleeping",
+      activeWakeId: null,
+      wakeStartedAt: null,
+      consecutiveFailures: 1,
+      wakeAt: new Date(recoveredAt + 5_000).toISOString(),
+    });
+    await expect(readFile(store.eventsPath, "utf8").then(readOperationalEvents)).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "wake.interrupted_recovered",
+          wakeId: "wake-interrupted-live",
+          detail: expect.objectContaining({ failures: 1, retryDelayMs: 5_000 }),
+        }),
+      ]),
+    );
+    expect(callbacks).toHaveLength(1);
+    expect(runtime.pi.sendUserMessage).not.toHaveBeenCalled();
+
+    await runtime.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, context);
   });
 
   it("adopts a supervisor wake token without self-scheduling another overlapping wake", async () => {

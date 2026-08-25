@@ -18,7 +18,7 @@ import {
 import { HeadlongStore } from "../pi-extensions/headlong/store.ts";
 import { runPiRpcChild, runSupervisorWake } from "../pi-extensions/headlong/supervisor.ts";
 
-const repositoryRoot = resolve(dirname(new URL(import.meta.url).pathname), "..");
+const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const extensionPath = join(repositoryRoot, "pi-extensions", "headlong", "index.ts");
 
 function assert(condition, message) {

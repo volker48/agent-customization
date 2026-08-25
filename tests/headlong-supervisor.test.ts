@@ -82,6 +82,42 @@ describe("Headlong wake-after-exit supervisor", () => {
     );
   });
 
+  it.each(["stopped", "completed"] as const)(
+    "preserves a durable terminal %s transition when the Pi child later fails",
+    async (terminalStatus) => {
+      const root = await mkdtemp(join(tmpdir(), `headlong-supervisor-terminal-${terminalStatus}-`));
+      roots.push(root);
+      const now = 1_787_680_000_000;
+      const store = await dueStore(root, now);
+
+      const result = await runSupervisorWake({
+        store,
+        now: () => now,
+        extensionPath: join(process.cwd(), "pi-extensions/headlong/index.ts"),
+        runChild: async (request) => {
+          const active = (await store.readState()) as HeadlongActorState;
+          await store.writeState({
+            ...active,
+            revision: active.revision + 1,
+            status: terminalStatus,
+            wakeAt: null,
+            activeWakeId: null,
+            wakeStartedAt: null,
+            lastTransitionWakeId: request.wakeId,
+            updatedAt: new Date(now + 1).toISOString(),
+          });
+          return { settled: true, timedOut: false, exitCode: 1 };
+        },
+      });
+
+      expect(result).toMatchObject({ kind: "failed-closed" });
+      await expect(store.readState()).resolves.toMatchObject({
+        status: terminalStatus,
+        activeWakeId: null,
+      });
+    },
+  );
+
   it("revalidates due status after lease acquisition before dispatching", async () => {
     const root = await mkdtemp(join(tmpdir(), "headlong-supervisor-revalidate-"));
     roots.push(root);
@@ -334,6 +370,76 @@ describe("Headlong wake-after-exit supervisor", () => {
     );
 
     expect(result).toMatchObject({ settled: true, timedOut: false, exitCode: 0 });
+  });
+
+  it("waits for child close so inherited stdout can deliver settlement after process exit", async () => {
+    const root = await mkdtemp(join(tmpdir(), "headlong-supervisor-rpc-close-order-"));
+    roots.push(root);
+    const fixture = join(root, "rpc-close-order-fixture.mjs");
+    await writeFile(
+      fixture,
+      `import { spawn } from "node:child_process";
+let data="";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => {
+  data += chunk;
+  const newline = data.indexOf("\\n");
+  if (newline < 0) return;
+  const request = JSON.parse(data.slice(0, newline));
+  const script = "setTimeout(() => { process.stdout.write(JSON.stringify({id:" + JSON.stringify(request.id) + ",type:'response',command:'prompt',success:true}) + '\\\\n'); process.stdout.write(JSON.stringify({type:'agent_settled'}) + '\\\\n'); }, 30);";
+  spawn(process.execPath, ["-e", script], { stdio: ["ignore", process.stdout, "ignore"] });
+  setTimeout(() => process.exit(0), 5);
+});
+`,
+      "utf8",
+    );
+
+    const result = await runPiRpcChild(
+      {
+        wakeId: "wake-rpc-close-order",
+        leaseToken: "lease-token",
+        sessionFile: join(root, "session.jsonl"),
+        workspace: root,
+        extensionPath: join(process.cwd(), "pi-extensions/headlong/index.ts"),
+        stateRoot: join(root, "state"),
+        prompt: "HEADLONG WAKE wake-rpc-close-order",
+        timeoutMs: 2_000,
+      },
+      { command: process.execPath, prefixArgs: [fixture] },
+    );
+
+    expect(result).toMatchObject({ settled: true, timedOut: false, exitCode: 0 });
+  });
+
+  it("contains stdin EPIPE when the RPC child exits before accepting the prompt", async () => {
+    if (process.platform === "win32") return;
+    const root = await mkdtemp(join(tmpdir(), "headlong-supervisor-rpc-stdin-epipe-"));
+    roots.push(root);
+    const probe = join(root, "stdin-epipe-probe.mjs");
+    const supervisorPath = join(process.cwd(), "pi-extensions/headlong/supervisor.ts");
+    await writeFile(
+      probe,
+      `const { runPiRpcChild } = await import(${JSON.stringify(supervisorPath)});
+await runPiRpcChild({
+  wakeId: "probe",
+  leaseToken: "placeholder",
+  sessionFile: "/tmp/nonexistent.jsonl",
+  workspace: process.cwd(),
+  extensionPath: "/tmp/nonexistent.ts",
+  stateRoot: "/tmp/headlong-epipe-probe",
+  prompt: "probe",
+  timeoutMs: 1000,
+}, { command: "/bin/true", prefixArgs: [] });
+`,
+      "utf8",
+    );
+    const child = spawn(process.execPath, ["--import", "tsx", probe], {
+      cwd: process.cwd(),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const [exitCode] = (await once(child, "close")) as [number | null];
+
+    expect(exitCode).toBe(0);
   });
 
   it("rejects a same-id RPC response for a different command", async () => {

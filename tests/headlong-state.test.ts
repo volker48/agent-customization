@@ -9,7 +9,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   HeadlongStore,
@@ -118,6 +118,25 @@ describe("Headlong durable actor store", () => {
     await expect(readFile(join(outside, "sentinel"), "utf8")).resolves.toBe("keep");
   });
 
+  it("refuses to read through a precreated symlinked actor directory", async () => {
+    const root = await temporaryRoot();
+    const workspace = join(root, "workspace");
+    const stateRoot = join(root, "state");
+    const outside = join(root, "outside");
+    const store = new HeadlongStore({ stateRoot, workspace });
+    await mkdir(stateRoot, { recursive: true });
+    await mkdir(outside);
+    await writeFile(
+      join(outside, basename(store.statePath)),
+      JSON.stringify(
+        createInitialActorState({ workspace, sessionFile: join(root, "session.jsonl"), sessionId: "s" }),
+      ),
+    );
+    await symlink(outside, store.directoryPath, "dir");
+
+    await expect(store.readState()).rejects.toThrow(/unsafe Headlong directory/);
+  });
+
   it("rejects unknown statuses, negative counters, and invalid timestamps as corrupt state", () => {
     const valid = createInitialActorState({
       workspace: "/tmp/workspace",
@@ -136,6 +155,12 @@ describe("Headlong durable actor store", () => {
       { ...valid, sessionFile: "relative-session.jsonl" },
       { ...valid, sessionId: "" },
       { ...valid, activeWakeId: "wake-1", wakeStartedAt: null },
+      {
+        ...valid,
+        status: "completed",
+        activeWakeId: "wake-terminal",
+        wakeStartedAt: valid.updatedAt,
+      },
       { ...valid, activeWakeId: null, wakeStartedAt: valid.updatedAt },
       { ...valid, unexpected: true },
     ]) {

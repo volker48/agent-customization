@@ -151,7 +151,7 @@ export async function runSupervisorWake(
     await options.store.writeState({
       ...latest,
       revision: latest.revision + 1,
-      status: "paused",
+      status: ["stopped", "completed"].includes(latest.status) ? latest.status : "paused",
       wakeAt: null,
       activeWakeId: null,
       wakeStartedAt: null,
@@ -291,7 +291,11 @@ export async function runPiRpcChild(
     };
     let promptAccepted = false;
     child.once("error", (error) => fail(error));
-    child.once("exit", () => resolve("exit"));
+    child.stdin.on("error", (error) => {
+      if ((error as NodeJS.ErrnoException).code === "EPIPE") return;
+      fail(error);
+    });
+    child.once("close", () => resolve("exit"));
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       rpcBuffer += chunk;

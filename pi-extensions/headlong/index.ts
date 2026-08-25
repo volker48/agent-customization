@@ -265,10 +265,24 @@ export function registerHeadlongExtension(
         await serializeWakeMutation(() => dispatchWake(generation));
       } catch (error) {
         restoreTools();
-        if (!runtime.store || generation !== runtime.generation) return;
-        const current = await runtime.store.readState();
+        const store = runtime.store;
+        const lease = runtime.lease;
+        if (!store || !lease || generation !== runtime.generation) return;
+        try {
+          await lease.assertOwned();
+        } catch {
+          return;
+        }
+        if (
+          generation !== runtime.generation ||
+          runtime.store !== store ||
+          runtime.lease !== lease
+        ) {
+          return;
+        }
+        const current = await store.readState();
         if (!current) return;
-        await runtime.store.writeState({
+        await store.writeState({
           ...nextRevision(current, now()),
           status: "paused",
           wakeAt: null,
@@ -276,7 +290,7 @@ export function registerHeadlongExtension(
           wakeStartedAt: null,
           consecutiveFailures: current.consecutiveFailures + 1,
         });
-        await runtime.store.appendEvent({
+        await store.appendEvent({
           at: new Date(now()).toISOString(),
           type: "wake.dispatch_failed",
           detail: { message: error instanceof Error ? error.message : String(error) },
@@ -645,7 +659,55 @@ export function registerHeadlongExtension(
       armWakeDeadline(generation, supervisorWakeId);
       return;
     }
-    if (state && ["running", "sleeping"].includes(state.status) && !state.activeWakeId) {
+    if (state?.activeWakeId) {
+      const recovered = await serializeWakeMutation(async () => {
+        if (
+          generation !== runtime.generation ||
+          runtime.store !== store ||
+          runtime.lease !== lease
+        ) {
+          return undefined;
+        }
+        await lease.assertOwned();
+        const current = await store.readState();
+        if (
+          generation !== runtime.generation ||
+          !current?.activeWakeId ||
+          runtime.store !== store ||
+          runtime.lease !== lease
+        ) {
+          return undefined;
+        }
+        const recoveredMs = now();
+        const recoveredAt = new Date(recoveredMs).toISOString();
+        const failures = current.consecutiveFailures + 1;
+        const maxFailures = 3;
+        const paused = failures >= maxFailures;
+        const retryDelayMs = Math.min(300_000, 5_000 * 2 ** (failures - 1));
+        const next: HeadlongActorState = {
+          ...current,
+          revision: current.revision + 1,
+          status: paused ? "paused" : "sleeping",
+          wakeAt: paused ? null : new Date(recoveredMs + retryDelayMs).toISOString(),
+          activeWakeId: null,
+          wakeStartedAt: null,
+          consecutiveFailures: failures,
+          updatedAt: recoveredAt,
+        };
+        await store.writeState(next);
+        await store.appendEvent({
+          at: recoveredAt,
+          type: "wake.interrupted_recovered",
+          wakeId: current.activeWakeId,
+          detail: { failures, maxFailures, retryDelayMs: paused ? null : retryDelayMs },
+        });
+        return next;
+      });
+      if (generation !== runtime.generation || !recovered) return;
+      if (recovered.status === "sleeping") scheduleWake(recovered, generation);
+      return;
+    }
+    if (state && ["running", "sleeping"].includes(state.status)) {
       scheduleWake(state, generation);
     }
   });

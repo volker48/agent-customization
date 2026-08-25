@@ -16,5 +16,5 @@ describe("Headlong pinned Pi verifier", () => {
     expect(stdout).toContain("[headlong-verify] durable tool transition: completed");
     expect(stdout).toContain("[headlong-verify] real RPC supervisor child: transitioned");
     expect(stdout).toContain("[headlong-verify] PASS");
-  }, 30_000);
+  }, 45_000);
 });

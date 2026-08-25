@@ -208,6 +208,7 @@ export class HeadlongStore {
   }
 
   async readState(): Promise<HeadlongActorState | undefined> {
+    await this.ensureDirectory();
     let handle: Awaited<ReturnType<typeof open>>;
     try {
       const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
@@ -366,6 +367,7 @@ export function parseActorState(raw: string, expectedWorkspace?: string): Headlo
     ) ||
     !(state.wakeStartedAt === null || isValidTimestamp(state.wakeStartedAt)) ||
     (state.activeWakeId === null) !== (state.wakeStartedAt === null) ||
+    (state.activeWakeId !== null && state.status !== "running") ||
     !Number.isSafeInteger(state.backoffLevel) ||
     (state.backoffLevel ?? -1) < 0 ||
     !Number.isSafeInteger(state.ticksAtLevel) ||
