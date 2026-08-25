@@ -284,6 +284,8 @@ export async function runPiRpcChild(
 
   let protocolFailure: Error | undefined;
   let rpcBuffer = "";
+  let childClosed = false;
+  let exitGraceTimer: NodeJS.Timeout | undefined;
   const settledOrExit = new Promise<"settled" | "exit">((resolve, reject) => {
     const fail = (error: Error): void => {
       protocolFailure ??= error;
@@ -295,7 +297,14 @@ export async function runPiRpcChild(
       if ((error as NodeJS.ErrnoException).code === "EPIPE") return;
       fail(error);
     });
-    child.once("close", () => resolve("exit"));
+    child.once("exit", () => {
+      exitGraceTimer = setTimeout(() => resolve("exit"), 250);
+      exitGraceTimer.unref();
+    });
+    child.once("close", () => {
+      childClosed = true;
+      resolve("exit");
+    });
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       rpcBuffer += chunk;
@@ -399,6 +408,7 @@ export async function runPiRpcChild(
     throw error;
   } finally {
     if (timeout) clearTimeout(timeout);
+    if (exitGraceTimer) clearTimeout(exitGraceTimer);
     if (abortListener) request.signal?.removeEventListener("abort", abortListener);
   }
 
@@ -417,12 +427,17 @@ export async function runPiRpcChild(
     return { settled: false, timedOut: true, exitCode: child.exitCode, stderr };
   }
   if (outcome === "exit") {
+    if (!childClosed) {
+      await terminateProcessGroup(child, { signalExitedGroup: true, graceMs: 250 });
+    }
     return { settled: false, timedOut: false, exitCode: child.exitCode, stderr };
   }
 
   child.stdin.end();
   const closed = await waitForClose(child, 1_000);
-  if (!closed) await terminateProcessGroup(child);
+  if (!closed) {
+    await terminateProcessGroup(child, { signalExitedGroup: true, graceMs: 250 });
+  }
   if (rpcBuffer.length > 0) throw new Error("Pi RPC ended with a truncated unterminated frame");
   if (protocolFailure) throw protocolFailure;
   return {
@@ -461,6 +476,20 @@ function waitForExit(child: ManagedChild, timeoutMs: number): Promise<boolean> {
   });
 }
 
+async function waitForProcessGroupExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      process.kill(-pid, 0);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return true;
+      throw error;
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(25, deadline - Date.now())));
+  }
+}
+
 async function runTaskkill(pid: number): Promise<void> {
   const killer = spawn("taskkill", ["/PID", String(pid), "/T", "/F"], {
     stdio: "ignore",
@@ -475,11 +504,13 @@ async function runTaskkill(pid: number): Promise<void> {
 
 export async function terminateProcessGroup(
   child: ManagedChild,
-  options: { graceMs?: number } = {},
+  options: { graceMs?: number; signalExitedGroup?: boolean } = {},
 ): Promise<void> {
   const pid = child.pid;
-  if (!pid || child.exitCode !== null || child.signalCode !== null) return;
+  const childExited = child.exitCode !== null || child.signalCode !== null;
+  if (!pid || (childExited && !options.signalExitedGroup)) return;
   if (process.platform === "win32") {
+    if (childExited) return;
     await runTaskkill(pid);
     await waitForExit(child, options.graceMs ?? 2_000);
     return;
@@ -492,6 +523,15 @@ export async function terminateProcessGroup(
       if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
     }
   };
+  if (childExited) {
+    signalGroup("SIGTERM");
+    if (await waitForProcessGroupExit(pid, options.graceMs ?? 2_000)) return;
+    signalGroup("SIGKILL");
+    if (!(await waitForProcessGroupExit(pid, options.graceMs ?? 2_000))) {
+      throw new Error(`Process group ${pid} did not exit after SIGKILL`);
+    }
+    return;
+  }
   signalGroup("SIGTERM");
   if (await waitForExit(child, options.graceMs ?? 2_000)) return;
   signalGroup("SIGKILL");

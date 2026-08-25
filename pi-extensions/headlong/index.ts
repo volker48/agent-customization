@@ -695,12 +695,34 @@ export function registerHeadlongExtension(
           updatedAt: recoveredAt,
         };
         await store.writeState(next);
-        await store.appendEvent({
-          at: recoveredAt,
-          type: "wake.interrupted_recovered",
-          wakeId: current.activeWakeId,
-          detail: { failures, maxFailures, retryDelayMs: paused ? null : retryDelayMs },
-        });
+        try {
+          await store.appendEvent({
+            at: recoveredAt,
+            type: "wake.interrupted_recovered",
+            wakeId: current.activeWakeId,
+            detail: { failures, maxFailures, retryDelayMs: paused ? null : retryDelayMs },
+          });
+        } catch (error) {
+          try {
+            await lease.assertOwned();
+            if (
+              generation === runtime.generation &&
+              runtime.store === store &&
+              runtime.lease === lease
+            ) {
+              await store.writeState({
+                ...next,
+                revision: next.revision + 1,
+                status: "paused",
+                wakeAt: null,
+                updatedAt: new Date(now()).toISOString(),
+              });
+            }
+          } catch {
+            // Ownership loss forbids a compensating write by this extension.
+          }
+          throw error;
+        }
         return next;
       });
       if (generation !== runtime.generation || !recovered) return;

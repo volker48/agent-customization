@@ -274,12 +274,12 @@ restrictions in place until settlement cleanup.
 The extension can self-wake **only while its Pi host remains alive**. For wake-after-exit, run the
 external supervisor from an installed package:
 
-Reopening the canonical Pi session with a persisted active wake records an interrupted wake and
-applies bounded failure backoff before scheduling more work, rather than leaving the actor stuck.
-
 ```bash
 pi-headlong --workspace /absolute/path/to/workspace
 ```
+
+Reopening the canonical Pi session with a persisted active wake records an interrupted wake and
+applies bounded failure backoff before scheduling more work, rather than leaving the actor stuck.
 
 From this checkout, the equivalent is:
 

@@ -814,6 +814,56 @@ describe("Headlong Pi extension", () => {
     await runtime.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, context);
   });
 
+  it("pauses recovered work when its operational event cannot be appended", async () => {
+    const root = await mkdtemp(join(tmpdir(), "headlong-extension-recovery-event-failure-"));
+    roots.push(root);
+    const stateRoot = join(root, "state");
+    const context = createContext(root);
+    const store = new HeadlongStore({ stateRoot, workspace: context.cwd });
+    const initial = createInitialActorState({
+      workspace: context.cwd,
+      sessionFile: context.sessionManager.getSessionFile(),
+      sessionId: context.sessionManager.getSessionId(),
+      now: 1_787_680_000_000,
+    });
+    await store.writeState({
+      ...initial,
+      status: "running",
+      activeWakeId: "wake-interrupted-event-failure",
+      wakeStartedAt: initial.updatedAt,
+      wakeSequence: 1,
+    });
+    const appendEvent = HeadlongStore.prototype.appendEvent;
+    const appendSpy = vi
+      .spyOn(HeadlongStore.prototype, "appendEvent")
+      .mockImplementation(async function (event) {
+        if (event.type === "wake.interrupted_recovered") throw new Error("event write failed");
+        return appendEvent.call(this, event);
+      });
+    const runtime = createPi();
+    registerHeadlongExtension(runtime.pi as never, { stateRoot, setTimer: vi.fn(() => 1) });
+
+    try {
+      await expect(
+        runtime.handlers.get("session_start")?.(
+          { type: "session_start", reason: "startup" },
+          context,
+        ),
+      ).rejects.toThrow("event write failed");
+      await expect(store.readState()).resolves.toMatchObject({
+        status: "paused",
+        wakeAt: null,
+        activeWakeId: null,
+        consecutiveFailures: 1,
+      });
+    } finally {
+      appendSpy.mockRestore();
+      await runtime.handlers
+        .get("session_shutdown")
+        ?.({ type: "session_shutdown", reason: "quit" }, context);
+    }
+  });
+
   it("adopts a supervisor wake token without self-scheduling another overlapping wake", async () => {
     const root = await mkdtemp(join(tmpdir(), "headlong-extension-supervisor-"));
     roots.push(root);

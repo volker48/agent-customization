@@ -411,6 +411,117 @@ process.stdin.on("data", chunk => {
     expect(result).toMatchObject({ settled: true, timedOut: false, exitCode: 0 });
   });
 
+  it("fails closed promptly when an exited RPC child leaves inherited stdout open", async () => {
+    if (process.platform === "win32") return;
+    const root = await mkdtemp(join(tmpdir(), "headlong-supervisor-rpc-open-descendant-"));
+    roots.push(root);
+    const fixture = join(root, "rpc-open-descendant-fixture.mjs");
+    await writeFile(
+      fixture,
+      `import { spawn } from "node:child_process";
+process.stdin.once("data", () => {
+  const nested = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], {
+    stdio: ["ignore", process.stdout, "ignore"],
+  });
+  process.stderr.write("nested=" + nested.pid + "\\n");
+  process.exit(0);
+});
+`,
+      "utf8",
+    );
+    const startedAt = Date.now();
+
+    const result = await runPiRpcChild(
+      {
+        wakeId: "wake-rpc-open-descendant",
+        leaseToken: "lease-token",
+        sessionFile: join(root, "session.jsonl"),
+        workspace: root,
+        extensionPath: join(process.cwd(), "pi-extensions/headlong/index.ts"),
+        stateRoot: join(root, "state"),
+        prompt: "HEADLONG WAKE wake-rpc-open-descendant",
+        timeoutMs: 2_000,
+      },
+      { command: process.execPath, prefixArgs: [fixture] },
+    );
+
+    expect(result).toMatchObject({ settled: false, timedOut: false, exitCode: 0 });
+    expect(Date.now() - startedAt).toBeLessThan(1_500);
+    const nestedPid = Number(/nested=(\d+)/.exec(result.stderr ?? "")?.[1]);
+    expect(Number.isSafeInteger(nestedPid)).toBe(true);
+    await vi.waitFor(() => {
+      let alive = true;
+      try {
+        process.kill(nestedPid, 0);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") alive = false;
+        else throw error;
+      }
+      expect(alive).toBe(false);
+    });
+  });
+
+  it("cleans an exited RPC descendant that settles but keeps stdout open", async () => {
+    if (process.platform === "win32") return;
+    const root = await mkdtemp(join(tmpdir(), "headlong-supervisor-rpc-settled-descendant-"));
+    roots.push(root);
+    const fixture = join(root, "rpc-settled-descendant-fixture.mjs");
+    await writeFile(
+      fixture,
+      `import { spawn } from "node:child_process";
+process.stdin.once("data", chunk => {
+  const request = JSON.parse(String(chunk).trim());
+  const script = "process.on('SIGTERM', () => {}); setTimeout(() => { process.stdout.write(JSON.stringify({id:" + JSON.stringify(request.id) + ",type:'response',command:'prompt',success:true}) + '\\\\n'); process.stdout.write(JSON.stringify({type:'agent_settled'}) + '\\\\n'); }, 30); setInterval(() => {}, 1000);";
+  const nested = spawn(process.execPath, ["-e", script], {
+    stdio: ["ignore", process.stdout, "ignore"],
+  });
+  process.stderr.write("nested=" + nested.pid + "\\n");
+  process.exit(0);
+});
+`,
+      "utf8",
+    );
+
+    const result = await runPiRpcChild(
+      {
+        wakeId: "wake-rpc-settled-descendant",
+        leaseToken: "lease-token",
+        sessionFile: join(root, "session.jsonl"),
+        workspace: root,
+        extensionPath: join(process.cwd(), "pi-extensions/headlong/index.ts"),
+        stateRoot: join(root, "state"),
+        prompt: "HEADLONG WAKE wake-rpc-settled-descendant",
+        timeoutMs: 3_000,
+      },
+      { command: process.execPath, prefixArgs: [fixture] },
+    );
+    const nestedPid = Number(/nested=(\d+)/.exec(result.stderr ?? "")?.[1]);
+    const cleanupNested = (): void => {
+      try {
+        process.kill(nestedPid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    };
+
+    try {
+      expect(result).toMatchObject({ settled: false, timedOut: false, exitCode: 0 });
+      expect(Number.isSafeInteger(nestedPid)).toBe(true);
+      await vi.waitFor(() => {
+        let alive = true;
+        try {
+          process.kill(nestedPid, 0);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ESRCH") alive = false;
+          else throw error;
+        }
+        expect(alive).toBe(false);
+      });
+    } finally {
+      cleanupNested();
+    }
+  });
+
   it("contains stdin EPIPE when the RPC child exits before accepting the prompt", async () => {
     if (process.platform === "win32") return;
     const root = await mkdtemp(join(tmpdir(), "headlong-supervisor-rpc-stdin-epipe-"));
