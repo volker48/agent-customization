@@ -121,12 +121,12 @@ describe("Headlong fault-path hardening", () => {
       at: new Date(2).toISOString(),
       type: "writer.two",
     });
-    await expect(readFile(firstStore.eventsPath, "utf8").then(readOperationalEvents)).resolves.toEqual(
-      [
-        expect.objectContaining({ sequence: 1, type: "writer.one" }),
-        expect.objectContaining({ sequence: 2, type: "writer.two" }),
-      ],
-    );
+    await expect(
+      readFile(firstStore.eventsPath, "utf8").then(readOperationalEvents),
+    ).resolves.toEqual([
+      expect.objectContaining({ sequence: 1, type: "writer.one" }),
+      expect.objectContaining({ sequence: 2, type: "writer.two" }),
+    ]);
   });
 
   it("uses a bounded tail read to allocate the next operational event sequence", async () => {

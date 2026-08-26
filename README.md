@@ -243,12 +243,22 @@ pnpm verify:prolong -- --model provider/model --keep-session
 
 ### Pi: Headlong persistent workspace actor (`pi-extensions/headlong/`)
 
-Headlong keeps one persistent actor per filesystem-canonical workspace (symlink aliases converge) while leaving Pi's session tree/JSONL as
-the canonical conversation trajectory. It stores only versioned operational state and a small event
-log under `$PI_HEADLONG_STATE_ROOT/<actor-id>/` (default:
+Headlong keeps one persistent actor per filesystem-canonical workspace while leaving Pi's session
+tree/JSONL as the canonical conversation trajectory. It stores versioned operational state and an
+operational JSONL event log under `$PI_HEADLONG_STATE_ROOT/<actor-id>/` (default:
 `$XDG_STATE_HOME/pi-headlong/<actor-id>/`, with `~/.local/state/pi-headlong` as the fallback).
-Directories are owner-private, state transitions are atomic, and a process-identity-aware lease
-prevents overlapping hosts.
+Directories are owner-private, state transitions use fsync plus atomic rename, and operational event
+append failures are reported as degraded health without undoing an already committed actor state.
+Event sequence allocation reads only a bounded log tail, and its cross-process append lock uses PID
+plus process-start identity rather than elapsed wall time alone.
+
+A process-identity-aware directory lease enforces one writer. The supervisor remains the primary
+owner while its RPC child is recorded as a same-token delegate. The parent must atomically reclaim a
+dead delegate before reading or mutating post-child state. Stale takeover requires an expired grace
+period and negative liveness evidence for both primary and delegate. Missing or malformed owner
+metadata fails closed for operator recovery. Release first moves the owned lease to a unique
+tombstone, revalidates the moved token, and only then deletes it, so an old process cannot remove a
+replacement owner's lease.
 
 Control the actor inside Pi:
 
@@ -262,14 +272,16 @@ Control the actor inside Pi:
 
 Each unattended wake must call exactly one of `headlong_checkpoint`, `headlong_sleep`,
 `headlong_complete`, or `headlong_blocked`. Settling without a transition, exceeding a turn budget,
-tripping the independent wall-clock watchdog, or losing the lease fails closed to a paused state.
-Meaningful interactive input becomes one serialized immediate wake and resets idle backoff. A
-`stopped` or `completed` actor is terminal; move its preserved actor directory aside before creating a
-fresh actor rather than resuming it.
+tripping the independent wall-clock watchdog, or losing the lease fails closed. Meaningful
+interactive input becomes one serialized immediate wake and resets idle backoff. A `stopped` or
+cleanly `completed` actor is terminal. A durable completion followed by an unclean RPC stream or
+nonzero child exit becomes `completed-unverified`, which preserves the finished work but requires
+operator review rather than being reported as ordinary success.
 
-After an explicit transition, all tools remain disabled until that turn settles; the next wake is not
-armed before settlement. Pause/stop and budget watchdogs abort the turn and likewise keep unattended
-restrictions in place until settlement cleanup.
+Once canonical state commits a transition, runtime wake state, timers, and tools are reconciled even
+if the operational event append fails. Tools remain disabled until that turn settles; only then is
+the interactive tool set restored and any next wake scheduled. Pause, stop, and budget watchdogs
+abort the turn and retain unattended restrictions through settlement cleanup.
 
 The extension can self-wake **only while its Pi host remains alive**. For wake-after-exit, run the
 external supervisor from an installed package:
@@ -278,9 +290,6 @@ external supervisor from an installed package:
 pi-headlong --workspace /absolute/path/to/workspace
 ```
 
-Reopening the canonical Pi session with a persisted active wake records an interrupted wake and
-applies bounded failure backoff before scheduling more work, rather than leaving the actor stuck.
-
 From this checkout, the equivalent is:
 
 ```bash
@@ -288,23 +297,33 @@ pnpm exec tsx pi-extensions/headlong/cli.ts --workspace /absolute/path/to/worksp
 ```
 
 Use `--once` for one due-wake attempt, `--poll-seconds N` for loop polling, and
-`--timeout-seconds N` for the per-wake host budget. Stop the supervisor with `SIGINT`/`SIGTERM`
+`--timeout-seconds N` for the per-wake host budget. Stop the supervisor with `SIGINT` or `SIGTERM`
 before manual recovery. It resumes the exact stored Pi session, explicitly loads Headlong and
 PRO-LONG, preserves repository context files while excluding arbitrary project extensions, and
-accepts a transition only after the RPC child settles and exits cleanly with status zero.
-Wake-after-exit supervision currently requires POSIX process-group containment and therefore fails
-closed before spawning an RPC child on Windows.
+accepts a wake only after a matching durable transition, RPC settlement, a complete stream, and a
+clean zero-status exit. One-shot failures, missing state, exhausted loops, and unverified terminal
+outcomes return a nonzero process exit status. Wake-after-exit supervision requires POSIX
+process-group containment and therefore fails closed before spawning an RPC child on Windows.
 
-Unattended active tools are restricted to a safe built-in allowlist:
-`read,grep,find,ls,edit,write`, plus the four control tools. `PI_HEADLONG_TOOLS` may select a subset of
-that allowlist; it cannot add `bash` or arbitrary extension tools. This prevents unattended network,
-shell, publishing, release, merge, deployment, or messaging tools from being enabled. `edit` and
-`write` still permit local workspace changes, so Headlong is not a filesystem sandbox.
+**Headlong does not provide a filesystem sandbox.** The default unattended tool set contains only
+the four Headlong control tools, so absolute-path access, `..` traversal, home expansion, `/proc`
+access, and symlink escapes are unavailable through model-facing filesystem tools. To grant host
+filesystem tools, the operator must pass `--allow-unsandboxed-host-tools` (or set the equivalent
+extension option). The supervisor prints a prominent warning and forwards the opt-in to the child.
+`PI_HEADLONG_TOOLS` can then select only from `read,grep,find,ls,edit,write`; it still cannot add
+`bash`, networking, messaging, release, deployment, or arbitrary extension tools.
 
-If state is corrupt or an ownership/symlink boundary is unsafe, Headlong refuses to guess. Stop the
-supervisor, preserve or move aside the actor directory reported by `/headlong status`, restart Pi,
-and use `/headlong start` for fresh state against the current canonical session. See
-[`ADR-0010`](docs/adr/0010-headlong-persistent-workspace-actor.md) for invariants and trust boundaries.
+Use the unsandboxed flag only when the entire supervisor already runs inside an operator-controlled
+container or equivalent boundary. Mount the workspace read/write, mount only required session and
+PRO-LONG data read-only, keep Headlong's state inaccessible to model-facing tools, and use dedicated
+credentials. Without that external boundary, the allowed filesystem tools can access absolute paths
+and follow filesystem links according to Pi's normal host semantics.
+
+If state, lease metadata, or an ownership/symlink boundary is unsafe, Headlong refuses to guess.
+Stop the supervisor, preserve or move aside the actor directory reported by `/headlong status`,
+restart Pi, and use `/headlong start` for fresh state against the current canonical session. See
+[`ADR-0010`](docs/adr/0010-headlong-persistent-workspace-actor.md) for invariants and trust
+boundaries.
 
 Verification:
 

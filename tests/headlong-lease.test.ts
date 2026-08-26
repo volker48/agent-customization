@@ -15,7 +15,10 @@ describe("Headlong single-flight actor lease", () => {
   it("allows only one winner across racing independent lease instances", async () => {
     const root = await mkdtemp(join(tmpdir(), "headlong-lease-race-"));
     roots.push(root);
-    const store = new HeadlongStore({ stateRoot: join(root, "state"), workspace: join(root, "work") });
+    const store = new HeadlongStore({
+      stateRoot: join(root, "state"),
+      workspace: join(root, "work"),
+    });
     const contenders = Array.from({ length: 20 }, (_, index) =>
       ActorLease.acquire({
         store,
@@ -35,7 +38,10 @@ describe("Headlong single-flight actor lease", () => {
   it("uses a stale grace window before recovering a dead owner with a new token", async () => {
     const root = await mkdtemp(join(tmpdir(), "headlong-lease-stale-"));
     roots.push(root);
-    const store = new HeadlongStore({ stateRoot: join(root, "state"), workspace: join(root, "work") });
+    const store = new HeadlongStore({
+      stateRoot: join(root, "state"),
+      workspace: join(root, "work"),
+    });
     const first = await ActorLease.acquire({
       store,
       role: "host",
@@ -70,7 +76,10 @@ describe("Headlong single-flight actor lease", () => {
   it("fails closed on an incomplete owner record even after the lease directory is stale", async () => {
     const root = await mkdtemp(join(tmpdir(), "headlong-lease-incomplete-"));
     roots.push(root);
-    const store = new HeadlongStore({ stateRoot: join(root, "state"), workspace: join(root, "work") });
+    const store = new HeadlongStore({
+      stateRoot: join(root, "state"),
+      workspace: join(root, "work"),
+    });
     await store.ensureDirectory();
     await mkdir(store.leasePath, { mode: 0o700 });
     await writeFile(join(store.leasePath, "owner.v1.json"), "", { mode: 0o600 });
@@ -90,7 +99,10 @@ describe("Headlong single-flight actor lease", () => {
   it("keeps the supervisor as primary owner while a same-token child acts as its delegate", async () => {
     const root = await mkdtemp(join(tmpdir(), "headlong-lease-adopt-"));
     roots.push(root);
-    const store = new HeadlongStore({ stateRoot: join(root, "state"), workspace: join(root, "work") });
+    const store = new HeadlongStore({
+      stateRoot: join(root, "state"),
+      workspace: join(root, "work"),
+    });
     const supervisor = await ActorLease.acquire({
       store,
       role: "supervisor",
@@ -122,7 +134,10 @@ describe("Headlong single-flight actor lease", () => {
   it("retains the live primary owner's lease after a delegate exits beyond the stale grace", async () => {
     const root = await mkdtemp(join(tmpdir(), "headlong-lease-primary-liveness-"));
     roots.push(root);
-    const store = new HeadlongStore({ stateRoot: join(root, "state"), workspace: join(root, "work") });
+    const store = new HeadlongStore({
+      stateRoot: join(root, "state"),
+      workspace: join(root, "work"),
+    });
     const supervisor = await ActorLease.acquire({
       store,
       role: "supervisor",
@@ -155,7 +170,10 @@ describe("Headlong single-flight actor lease", () => {
   it("atomically reclaims a dead delegate before the primary resumes state work", async () => {
     const root = await mkdtemp(join(tmpdir(), "headlong-lease-reclaim-delegate-"));
     roots.push(root);
-    const store = new HeadlongStore({ stateRoot: join(root, "state"), workspace: join(root, "work") });
+    const store = new HeadlongStore({
+      stateRoot: join(root, "state"),
+      workspace: join(root, "work"),
+    });
     const supervisor = await ActorLease.acquire({
       store,
       role: "supervisor",
@@ -177,7 +195,10 @@ describe("Headlong single-flight actor lease", () => {
   it("never deletes a replacement lease acquired after release moves its owned directory", async () => {
     const root = await mkdtemp(join(tmpdir(), "headlong-lease-release-race-"));
     roots.push(root);
-    const store = new HeadlongStore({ stateRoot: join(root, "state"), workspace: join(root, "work") });
+    const store = new HeadlongStore({
+      stateRoot: join(root, "state"),
+      workspace: join(root, "work"),
+    });
     let replacement: ActorLease | undefined;
     const original = await ActorLease.acquire({
       store,
@@ -201,7 +222,10 @@ describe("Headlong single-flight actor lease", () => {
   it("refuses a malicious precreated symlink at the lease boundary even with a matching token", async () => {
     const root = await mkdtemp(join(tmpdir(), "headlong-lease-symlink-"));
     roots.push(root);
-    const store = new HeadlongStore({ stateRoot: join(root, "state"), workspace: join(root, "work") });
+    const store = new HeadlongStore({
+      stateRoot: join(root, "state"),
+      workspace: join(root, "work"),
+    });
     await store.ensureDirectory();
     const outside = join(root, "outside");
     await mkdir(outside);
@@ -220,9 +244,9 @@ describe("Headlong single-flight actor lease", () => {
     );
     await symlink(outside, store.leasePath);
 
-    await expect(
-      ActorLease.acquire({ store, role: "child", adoptToken: token }),
-    ).rejects.toThrow(/unsafe Headlong lease/i);
+    await expect(ActorLease.acquire({ store, role: "child", adoptToken: token })).rejects.toThrow(
+      /unsafe Headlong lease/i,
+    );
   });
 
   it("does not evict a live child that adopts while stale-owner recovery is checking liveness", async () => {
@@ -278,7 +302,10 @@ describe("Headlong single-flight actor lease", () => {
   it("refuses a symlinked lease owner file even when its target contains a matching token", async () => {
     const root = await mkdtemp(join(tmpdir(), "headlong-lease-owner-symlink-"));
     roots.push(root);
-    const store = new HeadlongStore({ stateRoot: join(root, "state"), workspace: join(root, "work") });
+    const store = new HeadlongStore({
+      stateRoot: join(root, "state"),
+      workspace: join(root, "work"),
+    });
     await store.ensureDirectory();
     await mkdir(store.leasePath);
     const token = "attacker-matching-token";
@@ -297,8 +324,8 @@ describe("Headlong single-flight actor lease", () => {
     );
     await symlink(outsideOwner, join(store.leasePath, "owner.v1.json"));
 
-    await expect(
-      ActorLease.acquire({ store, role: "child", adoptToken: token }),
-    ).rejects.toThrow(/unsafe Headlong lease owner/i);
+    await expect(ActorLease.acquire({ store, role: "child", adoptToken: token })).rejects.toThrow(
+      /unsafe Headlong lease owner/i,
+    );
   });
 });

@@ -43,8 +43,8 @@ function createPi() {
   ];
   const pi = {
     on: vi.fn((event: string, handler: EventHandler) => handlers.set(event, handler)),
-    registerCommand: vi.fn(
-      (_name: string, command: { handler: CommandHandler }) => commands.set("headlong", command.handler),
+    registerCommand: vi.fn((_name: string, command: { handler: CommandHandler }) =>
+      commands.set("headlong", command.handler),
     ),
     registerTool: vi.fn(),
     sendUserMessage: vi.fn(),
@@ -112,6 +112,10 @@ describe("Headlong unattended tool security", () => {
     });
 
     await runtime.handlers.get("session_start")?.({ type: "session_start" }, context);
+    expect(context.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("without built-in sandboxing"),
+      "warning",
+    );
     await runtime.commands.get("headlong")?.("start", context);
     await callbacks[0]?.();
 

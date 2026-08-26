@@ -3,11 +3,7 @@ import { constants, realpathSync } from "node:fs";
 import { chmod, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import {
-  currentProcessIdentity,
-  defaultIsOwnerLive,
-  type ActorLeaseOwner,
-} from "./lease.js";
+import { currentProcessIdentity, defaultIsOwnerLive, type ActorLeaseOwner } from "./lease.js";
 
 export const HEADLONG_STATE_VERSION = 1 as const;
 const HEADLONG_STATUSES = new Set<HeadlongActorStatus>([
@@ -217,7 +213,10 @@ async function readEventLockOwner(path: string): Promise<ActorLeaseOwner | undef
   }
 }
 
-function sameLockOwner(left: ActorLeaseOwner | undefined, right: ActorLeaseOwner | undefined): boolean {
+function sameLockOwner(
+  left: ActorLeaseOwner | undefined,
+  right: ActorLeaseOwner | undefined,
+): boolean {
   return (
     left !== undefined &&
     right !== undefined &&
@@ -295,12 +294,7 @@ async function inspectEventTail(
   const offset = size - requested;
   let bytesRead = 0;
   while (bytesRead < requested) {
-    const result = await handle.read(
-      buffer,
-      bytesRead,
-      requested - bytesRead,
-      offset + bytesRead,
-    );
+    const result = await handle.read(buffer, bytesRead, requested - bytesRead, offset + bytesRead);
     if (result.bytesRead === 0) break;
     bytesRead += result.bytesRead;
   }

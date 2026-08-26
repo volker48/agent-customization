@@ -1,13 +1,4 @@
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  readdir,
-  rm,
-  stat,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -112,7 +103,11 @@ describe("Headlong durable actor store", () => {
 
     await expect(
       store.writeState(
-        createInitialActorState({ workspace, sessionFile: join(root, "session.jsonl"), sessionId: "s" }),
+        createInitialActorState({
+          workspace,
+          sessionFile: join(root, "session.jsonl"),
+          sessionId: "s",
+        }),
       ),
     ).rejects.toThrow(/unsafe Headlong directory/);
     await expect(readFile(join(outside, "sentinel"), "utf8")).resolves.toBe("keep");
@@ -129,7 +124,11 @@ describe("Headlong durable actor store", () => {
     await writeFile(
       join(outside, basename(store.statePath)),
       JSON.stringify(
-        createInitialActorState({ workspace, sessionFile: join(root, "session.jsonl"), sessionId: "s" }),
+        createInitialActorState({
+          workspace,
+          sessionFile: join(root, "session.jsonl"),
+          sessionId: "s",
+        }),
       ),
     );
     await symlink(outside, store.directoryPath, "dir");
@@ -195,11 +194,17 @@ describe("Headlong durable actor store", () => {
 
     await expect(
       store.writeState(
-        createInitialActorState({ workspace, sessionFile: join(root, "session.jsonl"), sessionId: "s" }),
+        createInitialActorState({
+          workspace,
+          sessionFile: join(root, "session.jsonl"),
+          sessionId: "s",
+        }),
       ),
     ).rejects.toThrow("injected interruption");
 
-    expect((await readdir(store.directoryPath)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    expect((await readdir(store.directoryPath)).filter((name) => name.endsWith(".tmp"))).toEqual(
+      [],
+    );
     await expect(store.readState()).resolves.toBeUndefined();
   });
 
@@ -212,7 +217,11 @@ describe("Headlong durable actor store", () => {
     await writeFile(
       outsideState,
       JSON.stringify(
-        createInitialActorState({ workspace, sessionFile: join(root, "session.jsonl"), sessionId: "s" }),
+        createInitialActorState({
+          workspace,
+          sessionFile: join(root, "session.jsonl"),
+          sessionId: "s",
+        }),
       ),
     );
     await symlink(outsideState, store.statePath);

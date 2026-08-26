@@ -112,7 +112,7 @@ describe("Headlong wake-after-exit supervisor", () => {
 
       expect(result).toMatchObject({ kind: "failed-closed" });
       await expect(store.readState()).resolves.toMatchObject({
-        status: terminalStatus,
+        status: terminalStatus === "completed" ? "completed-unverified" : terminalStatus,
         activeWakeId: null,
       });
     },
@@ -150,7 +150,10 @@ describe("Headlong wake-after-exit supervisor", () => {
 
     expect(result).toEqual({ kind: "not-due", status: "paused" });
     expect(runChild).not.toHaveBeenCalled();
-    await expect(originalReadState()).resolves.toMatchObject({ status: "paused", activeWakeId: null });
+    await expect(originalReadState()).resolves.toMatchObject({
+      status: "paused",
+      activeWakeId: null,
+    });
   });
 
   it("recovers an interrupted active wake with bounded failure backoff before launching again", async () => {
@@ -178,7 +181,10 @@ describe("Headlong wake-after-exit supervisor", () => {
     });
 
     expect(runChild).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ kind: "failed-closed", reason: expect.stringContaining("interrupted") });
+    expect(result).toMatchObject({
+      kind: "failed-closed",
+      reason: expect.stringContaining("interrupted"),
+    });
     await expect(store.readState()).resolves.toMatchObject({
       status: "sleeping",
       wakeAt: new Date(now + 5_000).toISOString(),
@@ -187,7 +193,7 @@ describe("Headlong wake-after-exit supervisor", () => {
     });
   });
 
-  it("keeps supervisor recovery paused when its event cannot be appended", async () => {
+  it("continues supervisor recovery when operational logging is degraded", async () => {
     const root = await mkdtemp(join(tmpdir(), "headlong-supervisor-recovery-event-failure-"));
     roots.push(root);
     const now = 1_787_680_000_000;
@@ -210,6 +216,7 @@ describe("Headlong wake-after-exit supervisor", () => {
       return originalAppendEvent(event);
     });
     const runChild = vi.fn();
+    const onWarning = vi.fn();
 
     await expect(
       runSupervisorWake({
@@ -217,13 +224,21 @@ describe("Headlong wake-after-exit supervisor", () => {
         now: () => now,
         extensionPath: join(process.cwd(), "pi-extensions/headlong/index.ts"),
         runChild,
+        onWarning,
       }),
-    ).rejects.toThrow("simulated recovery event failure");
+    ).resolves.toMatchObject({
+      kind: "failed-closed",
+      reason: expect.stringContaining("bounded backoff"),
+    });
 
     expect(runChild).not.toHaveBeenCalled();
+    expect(onWarning).toHaveBeenCalledWith(
+      "Headlong operational event logging is degraded",
+      expect.any(Error),
+    );
     await expect(store.readState()).resolves.toMatchObject({
-      status: "paused",
-      wakeAt: null,
+      status: "sleeping",
+      wakeAt: new Date(now + 5_000).toISOString(),
       activeWakeId: null,
       consecutiveFailures: 1,
     });
@@ -472,9 +487,7 @@ describe("Headlong wake-after-exit supervisor", () => {
     } as unknown as Parameters<typeof terminateProcessGroup>[0];
 
     try {
-      await expect(
-        terminateProcessGroup(child),
-      ).rejects.toThrow("POSIX process-group containment");
+      await expect(terminateProcessGroup(child)).rejects.toThrow("POSIX process-group containment");
     } finally {
       platform.mockRestore();
     }
@@ -994,7 +1007,7 @@ process.stdin.on("data", chunk => {
     },
   );
 
-  it("rejects an accepted settlement when the Pi child exits nonzero", async () => {
+  it("reports an accepted settlement separately from a nonzero Pi child exit", async () => {
     const root = await mkdtemp(join(tmpdir(), "headlong-supervisor-rpc-nonzero-"));
     roots.push(root);
     const fixture = join(root, "rpc-nonzero-fixture.mjs");
@@ -1028,7 +1041,7 @@ process.stdin.on("data", chunk => {
       { command: process.execPath, prefixArgs: [fixture] },
     );
 
-    expect(result).toMatchObject({ settled: false, timedOut: false, exitCode: 42 });
+    expect(result).toMatchObject({ settled: true, timedOut: false, exitCode: 42 });
   });
 
   it("terminates a detached Pi process group when RPC protocol validation fails", async () => {
@@ -1102,7 +1115,9 @@ process.stdin.on("data", chunk => {
       },
       { command: process.execPath, prefixArgs: [fixture] },
     );
-    await vi.waitFor(async () => expect(Number(await readFile(pidPath, "utf8"))).toBeGreaterThan(0));
+    await vi.waitFor(async () =>
+      expect(Number(await readFile(pidPath, "utf8"))).toBeGreaterThan(0),
+    );
     controller.abort();
 
     await expect(childResult).resolves.toMatchObject({

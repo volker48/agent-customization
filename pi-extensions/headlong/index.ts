@@ -52,10 +52,7 @@ type HeadlongRuntime = {
   previousTools?: string[];
 };
 
-type OperationalEventInput = Omit<
-  HeadlongOperationalEvent,
-  "version" | "sequence" | "actorId"
->;
+type OperationalEventInput = Omit<HeadlongOperationalEvent, "version" | "sequence" | "actorId">;
 
 function defaultStateRoot(): string {
   const base = process.env.XDG_STATE_HOME?.trim() || join(homedir(), ".local", "state");
@@ -516,8 +513,7 @@ export function registerHeadlongExtension(
             sessionId: runtime.sessionId ?? "",
             now: now(),
           });
-        const terminal =
-          action === "pause" ? "paused" : action === "stop" ? "stopped" : "sleeping";
+        const terminal = action === "pause" ? "paused" : action === "stop" ? "stopped" : "sleeping";
         const next = {
           ...nextRevision(initial, now()),
           status: terminal,
@@ -648,6 +644,12 @@ export function registerHeadlongExtension(
     if (!sessionFile) {
       context.ui.notify("Headlong requires a persisted Pi session file.", "error");
       return;
+    }
+    if (allowUnsandboxedHostTools) {
+      context.ui.notify(
+        "Headlong host filesystem tools are enabled without built-in sandboxing. Run this host inside an operator-controlled container or equivalent boundary.",
+        "warning",
+      );
     }
     const store = new HeadlongStore({ stateRoot, workspace });
     const lease = await acquireLease({

@@ -3,11 +3,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { ActorLease, type ActorLeaseOwner } from "./lease.js";
 import { buildHeadlongWakePrompt } from "./index.js";
-import type {
-  HeadlongActorStatus,
-  HeadlongOperationalEvent,
-  HeadlongStore,
-} from "./store.js";
+import type { HeadlongActorStatus, HeadlongOperationalEvent, HeadlongStore } from "./store.js";
 
 export type SupervisorChildRequest = {
   wakeId: string;
@@ -51,10 +47,7 @@ export type RunSupervisorWakeOptions = {
   runChild: (request: SupervisorChildRequest) => Promise<SupervisorChildResult>;
 };
 
-type OperationalEventInput = Omit<
-  HeadlongOperationalEvent,
-  "version" | "sequence" | "actorId"
->;
+type OperationalEventInput = Omit<HeadlongOperationalEvent, "version" | "sequence" | "actorId">;
 
 async function appendOperationalEvent(
   options: RunSupervisorWakeOptions,
@@ -239,7 +232,8 @@ export async function runSupervisorWake(
   } finally {
     try {
       const released = await lease.release();
-      if (!released) options.onWarning?.("Headlong supervisor no longer owned its lease at release");
+      if (!released)
+        options.onWarning?.("Headlong supervisor no longer owned its lease at release");
     } catch (error) {
       options.onWarning?.("Headlong supervisor lease cleanup failed safely", error);
     }

@@ -150,7 +150,10 @@ function sameDelegate(
   );
 }
 
-function samePrimary(left: ActorLeaseOwner | undefined, right: ActorLeaseOwner | undefined): boolean {
+function samePrimary(
+  left: ActorLeaseOwner | undefined,
+  right: ActorLeaseOwner | undefined,
+): boolean {
   return (
     left !== undefined &&
     right !== undefined &&
@@ -302,7 +305,11 @@ export class ActorLease {
       const adopted: ActorLeaseOwner = { ...current, delegate };
       await replaceOwner(ownerPath, adopted);
       const confirmed = await readOwner(ownerPath);
-      if (!confirmed || !samePrimary(adopted, confirmed) || !sameDelegate(delegate, confirmed.delegate)) {
+      if (
+        !confirmed ||
+        !samePrimary(adopted, confirmed) ||
+        !sameDelegate(delegate, confirmed.delegate)
+      ) {
         throw new Error("Headlong lease delegation changed during adoption");
       }
       return new ActorLease(
@@ -409,7 +416,10 @@ export class ActorLease {
       await restoreMovedLease(tombstonePath, this.store.leasePath);
       return false;
     }
-    if (movedOwner.delegate && (await this.isOwnerLive(delegateAsOwner(movedOwner, movedOwner.delegate)))) {
+    if (
+      movedOwner.delegate &&
+      (await this.isOwnerLive(delegateAsOwner(movedOwner, movedOwner.delegate)))
+    ) {
       await restoreMovedLease(tombstonePath, this.store.leasePath);
       throw new Error("Refusing to release a Headlong lease while its delegate is live");
     }
@@ -422,7 +432,11 @@ export class ActorLease {
 
   private async releaseDelegate(): Promise<boolean> {
     const current = await readOwner(this.ownerPath);
-    if (!current || !samePrimary(this.owner, current) || !sameDelegate(this.delegate, current.delegate)) {
+    if (
+      !current ||
+      !samePrimary(this.owner, current) ||
+      !sameDelegate(this.delegate, current.delegate)
+    ) {
       return false;
     }
     const { delegate: _delegate, ...primary } = current;

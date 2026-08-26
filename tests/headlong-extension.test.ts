@@ -111,7 +111,10 @@ describe("Headlong Pi extension", () => {
     const context = createContext(root);
     registerHeadlongExtension(runtime.pi as never, { stateRoot });
 
-    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+    await runtime.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      context,
+    );
     await runtime.commands.get("headlong")?.handler("start", context);
 
     const store = new HeadlongStore({ stateRoot, workspace: context.cwd });
@@ -130,7 +133,10 @@ describe("Headlong Pi extension", () => {
         { deliverAs: "followUp" },
       ),
     );
-    await runtime.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, context);
+    await runtime.handlers.get("session_shutdown")?.(
+      { type: "session_shutdown", reason: "quit" },
+      context,
+    );
   });
 
   it("persists an explicit sleep transition for the active wake and arms durable wake_at", async () => {
@@ -141,7 +147,10 @@ describe("Headlong Pi extension", () => {
     const context = createContext(root);
     const clock = 1_787_680_000_000;
     registerHeadlongExtension(runtime.pi as never, { stateRoot, now: () => clock });
-    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+    await runtime.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      context,
+    );
     await runtime.commands.get("headlong")?.handler("start", context);
     const store = new HeadlongStore({ stateRoot, workspace: context.cwd });
     let wakeId = "";
@@ -161,7 +170,10 @@ describe("Headlong Pi extension", () => {
       activeWakeId: null,
       lastTransitionWakeId: wakeId,
     });
-    await runtime.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, context);
+    await runtime.handlers.get("session_shutdown")?.(
+      { type: "session_shutdown", reason: "quit" },
+      context,
+    );
   });
 
   it("keeps unattended tools restricted until a transitioned turn settles", async () => {
@@ -171,7 +183,10 @@ describe("Headlong Pi extension", () => {
     const runtime = createPi();
     const context = createContext(root);
     registerHeadlongExtension(runtime.pi as never, { stateRoot });
-    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+    await runtime.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      context,
+    );
     await runtime.commands.get("headlong")?.handler("start", context);
     const store = new HeadlongStore({ stateRoot, workspace: context.cwd });
     await vi.waitFor(async () => {
@@ -184,11 +199,80 @@ describe("Headlong Pi extension", () => {
 
     expect(context.abort).not.toHaveBeenCalled();
     expect(runtime.pi.setActiveTools).toHaveBeenLastCalledWith([]);
-    await runtime.handlers
-      .get("agent_settled")
-      ?.({ type: "agent_settled", outcome: "done", messages: [] }, context);
+    await runtime.handlers.get("agent_settled")?.(
+      { type: "agent_settled", outcome: "done", messages: [] },
+      context,
+    );
     expect(runtime.pi.setActiveTools).toHaveBeenLastCalledWith(["read", "bash"]);
     await expect(store.readState()).resolves.toMatchObject({ status: "completed" });
+  });
+
+  it("reconciles runtime after a committed transition when event append fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "headlong-extension-transition-event-failure-"));
+    roots.push(root);
+    const stateRoot = join(root, "state");
+    const runtime = createPi();
+    const context = createContext(root);
+    const callbacks: Array<() => Promise<void> | void> = [];
+    const clock = 1_787_680_000_000;
+    registerHeadlongExtension(runtime.pi as never, {
+      stateRoot,
+      now: () => clock,
+      setTimer: (callback: () => Promise<void> | void) => {
+        callbacks.push(callback);
+        return callbacks.length;
+      },
+      clearTimer: vi.fn(),
+    });
+    await runtime.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      context,
+    );
+    await runtime.commands.get("headlong")?.handler("start", context);
+    await callbacks[0]?.();
+    const store = new HeadlongStore({ stateRoot, workspace: context.cwd });
+    await expect(store.readState()).resolves.toMatchObject({
+      status: "running",
+      activeWakeId: expect.stringMatching(/^wake-1-/),
+    });
+
+    const appendEvent = HeadlongStore.prototype.appendEvent;
+    const appendSpy = vi
+      .spyOn(HeadlongStore.prototype, "appendEvent")
+      .mockImplementation(async function (event) {
+        if (event.type === "wake.sleep") throw new Error("transition event write failed");
+        return appendEvent.call(this, event);
+      });
+    try {
+      await runtime.tools
+        .get("headlong_sleep")
+        ?.execute("tool-sleep", { reason: "idle", delaySeconds: 5 }, undefined, undefined, context);
+
+      await expect(store.readState()).resolves.toMatchObject({
+        status: "sleeping",
+        wakeAt: new Date(clock + 5_000).toISOString(),
+        activeWakeId: null,
+      });
+      expect(runtime.pi.setActiveTools).toHaveBeenLastCalledWith([]);
+      expect(context.ui.notify).toHaveBeenCalledWith(
+        expect.stringContaining("operational logging is degraded"),
+        "warning",
+      );
+      expect(callbacks).toHaveLength(1);
+
+      await runtime.handlers.get("agent_settled")?.(
+        { type: "agent_settled", outcome: "done", messages: [] },
+        context,
+      );
+      expect(runtime.pi.setActiveTools).toHaveBeenLastCalledWith(["read", "bash"]);
+      expect(callbacks).toHaveLength(2);
+    } finally {
+      appendSpy.mockRestore();
+      await runtime.handlers.get("session_shutdown")?.(
+        { type: "session_shutdown", reason: "quit" },
+        context,
+      );
+    }
   });
 
   it("does not dispatch meaningful input while a transitioned turn is still settling", async () => {
@@ -198,7 +282,10 @@ describe("Headlong Pi extension", () => {
     const runtime = createPi();
     const context = createContext(root);
     registerHeadlongExtension(runtime.pi as never, { stateRoot });
-    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+    await runtime.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      context,
+    );
     await runtime.commands.get("headlong")?.handler("start", context);
     const store = new HeadlongStore({ stateRoot, workspace: context.cwd });
     await vi.waitFor(async () => {
@@ -227,7 +314,10 @@ describe("Headlong Pi extension", () => {
     const runtime = createPi();
     const context = createContext(root);
     registerHeadlongExtension(runtime.pi as never, { stateRoot });
-    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+    await runtime.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      context,
+    );
     await runtime.commands.get("headlong")?.handler("start", context);
     const store = new HeadlongStore({ stateRoot, workspace: context.cwd });
     await vi.waitFor(async () => {
@@ -237,8 +327,14 @@ describe("Headlong Pi extension", () => {
       .get("headlong_sleep")
       ?.execute("tool-sleep", { reason: "idle", delaySeconds: 5 }, undefined, undefined, context);
 
-    await runtime.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "reload" }, context);
-    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "reload" }, context);
+    await runtime.handlers.get("session_shutdown")?.(
+      { type: "session_shutdown", reason: "reload" },
+      context,
+    );
+    await runtime.handlers.get("session_start")?.(
+      { type: "session_start", reason: "reload" },
+      context,
+    );
     await runtime.handlers.get("input")?.(
       { type: "input", text: "resume with evidence", source: "interactive" },
       context,
@@ -249,7 +345,10 @@ describe("Headlong Pi extension", () => {
       wakeSequence: 2,
       activeWakeId: expect.stringMatching(/^wake-2-/),
     });
-    await runtime.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, context);
+    await runtime.handlers.get("session_shutdown")?.(
+      { type: "session_shutdown", reason: "quit" },
+      context,
+    );
   });
 
   it("turns meaningful interactive input into an immediate wake and resets idle backoff", async () => {
@@ -280,7 +379,10 @@ describe("Headlong Pi extension", () => {
       setTimer: () => 1,
       clearTimer: vi.fn(),
     });
-    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+    await runtime.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      context,
+    );
 
     await runtime.handlers.get("input")?.(
       { type: "input", text: "New evidence is available", source: "interactive" },
@@ -296,7 +398,10 @@ describe("Headlong Pi extension", () => {
       consecutiveFailures: 0,
     });
     expect(runtime.pi.sendUserMessage).not.toHaveBeenCalled();
-    await runtime.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, context);
+    await runtime.handlers.get("session_shutdown")?.(
+      { type: "session_shutdown", reason: "quit" },
+      context,
+    );
   });
 
   it("serializes simultaneous meaningful inputs into one active wake", async () => {
@@ -317,7 +422,10 @@ describe("Headlong Pi extension", () => {
       setTimer: () => 1,
       clearTimer: vi.fn(),
     });
-    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+    await runtime.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      context,
+    );
     const input = runtime.handlers.get("input");
 
     await Promise.all(
@@ -332,7 +440,10 @@ describe("Headlong Pi extension", () => {
     await expect(store.readState()).resolves.toMatchObject({ wakeSequence: 1, status: "running" });
     const events = readOperationalEvents(await readFile(store.eventsPath, "utf8"));
     expect(events.filter((event) => event.type === "wake.dispatched")).toHaveLength(1);
-    await runtime.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, context);
+    await runtime.handlers.get("session_shutdown")?.(
+      { type: "session_shutdown", reason: "quit" },
+      context,
+    );
   });
 
   it("fails closed when a dispatched wake settles without an explicit control transition", async () => {
@@ -342,16 +453,20 @@ describe("Headlong Pi extension", () => {
     const runtime = createPi();
     const context = createContext(root);
     registerHeadlongExtension(runtime.pi as never, { stateRoot });
-    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+    await runtime.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      context,
+    );
     await runtime.commands.get("headlong")?.handler("start", context);
     const store = new HeadlongStore({ stateRoot, workspace: context.cwd });
     await vi.waitFor(async () => {
       expect((await store.readState())?.activeWakeId).toMatch(/^wake-1-/);
     });
 
-    await runtime.handlers
-      .get("agent_settled")
-      ?.({ type: "agent_settled", outcome: "done", messages: [] }, context);
+    await runtime.handlers.get("agent_settled")?.(
+      { type: "agent_settled", outcome: "done", messages: [] },
+      context,
+    );
 
     await expect(store.readState()).resolves.toMatchObject({
       status: "paused",
@@ -360,7 +475,10 @@ describe("Headlong Pi extension", () => {
       consecutiveFailures: 1,
     });
     expect(runtime.pi.setActiveTools).toHaveBeenLastCalledWith(["read", "bash"]);
-    await runtime.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, context);
+    await runtime.handlers.get("session_shutdown")?.(
+      { type: "session_shutdown", reason: "quit" },
+      context,
+    );
   });
 
   it("aborts the active turn when the visible pause kill switch is used", async () => {
@@ -370,10 +488,15 @@ describe("Headlong Pi extension", () => {
     const runtime = createPi();
     const context = createContext(root);
     registerHeadlongExtension(runtime.pi as never, { stateRoot });
-    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+    await runtime.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      context,
+    );
     await runtime.commands.get("headlong")?.handler("start", context);
     const store = new HeadlongStore({ stateRoot, workspace: context.cwd });
-    await vi.waitFor(async () => expect((await store.readState())?.activeWakeId).toMatch(/^wake-1-/));
+    await vi.waitFor(async () =>
+      expect((await store.readState())?.activeWakeId).toMatch(/^wake-1-/),
+    );
 
     await runtime.commands.get("headlong")?.handler("pause", context);
 
@@ -383,17 +506,21 @@ describe("Headlong Pi extension", () => {
       activeWakeId: null,
       wakeAt: null,
     });
-    expect(runtime.pi.setActiveTools).toHaveBeenLastCalledWith(
-      expect.arrayContaining(["read", "headlong_sleep"]),
+    expect(runtime.pi.setActiveTools).toHaveBeenLastCalledWith([
+      "headlong_checkpoint",
+      "headlong_sleep",
+      "headlong_complete",
+      "headlong_blocked",
+    ]);
+    await runtime.handlers.get("agent_settled")?.(
+      { type: "agent_settled", outcome: "aborted", messages: [] },
+      context,
     );
-    expect(runtime.pi.setActiveTools).toHaveBeenLastCalledWith(
-      expect.not.arrayContaining(["bash", "external_message"]),
-    );
-    await runtime.handlers
-      .get("agent_settled")
-      ?.({ type: "agent_settled", outcome: "aborted", messages: [] }, context);
     expect(runtime.pi.setActiveTools).toHaveBeenLastCalledWith(["read", "bash"]);
-    await runtime.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, context);
+    await runtime.handlers.get("session_shutdown")?.(
+      { type: "session_shutdown", reason: "quit" },
+      context,
+    );
   });
 
   it("refuses to settle or mutate an active wake after lease ownership changes", async () => {
@@ -403,18 +530,24 @@ describe("Headlong Pi extension", () => {
     const runtime = createPi();
     const context = createContext(root);
     registerHeadlongExtension(runtime.pi as never, { stateRoot });
-    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+    await runtime.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      context,
+    );
     await runtime.commands.get("headlong")?.handler("start", context);
     const store = new HeadlongStore({ stateRoot, workspace: context.cwd });
-    await vi.waitFor(async () => expect((await store.readState())?.activeWakeId).toMatch(/^wake-1-/));
+    await vi.waitFor(async () =>
+      expect((await store.readState())?.activeWakeId).toMatch(/^wake-1-/),
+    );
     const ownerPath = join(store.leasePath, "owner.v1.json");
     const owner = JSON.parse(await readFile(ownerPath, "utf8"));
     await writeFile(ownerPath, `${JSON.stringify({ ...owner, token: "replacement-owner" })}\n`);
 
     await expect(
-      runtime.handlers
-        .get("agent_settled")
-        ?.({ type: "agent_settled", outcome: "done", messages: [] }, context),
+      runtime.handlers.get("agent_settled")?.(
+        { type: "agent_settled", outcome: "done", messages: [] },
+        context,
+      ),
     ).rejects.toThrow(/lease is not owned/i);
 
     await expect(store.readState()).resolves.toMatchObject({
@@ -438,7 +571,10 @@ describe("Headlong Pi extension", () => {
       },
       clearTimer: vi.fn(),
     });
-    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+    await runtime.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      context,
+    );
     await runtime.commands.get("headlong")?.handler("start", context);
     expect(callbacks).toHaveLength(1);
     const store = new HeadlongStore({ stateRoot, workspace: context.cwd });
@@ -469,13 +605,17 @@ describe("Headlong Pi extension", () => {
       },
       clearTimer: vi.fn(),
     });
-    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+    await runtime.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      context,
+    );
     await runtime.commands.get("headlong")?.handler("start", context);
     expect(callbacks).toHaveLength(1);
 
-    await runtime.handlers
-      .get("session_shutdown")
-      ?.({ type: "session_shutdown", reason: "reload" }, context);
+    await runtime.handlers.get("session_shutdown")?.(
+      { type: "session_shutdown", reason: "reload" },
+      context,
+    );
     await callbacks[0]?.();
 
     expect(runtime.pi.sendUserMessage).not.toHaveBeenCalled();
@@ -498,15 +638,17 @@ describe("Headlong Pi extension", () => {
     registerHeadlongExtension(runtime.pi as never, { stateRoot, acquireLease });
 
     const starting = Promise.resolve(
-      runtime.handlers
-        .get("session_start")
-        ?.({ type: "session_start", reason: "startup" }, context),
+      runtime.handlers.get("session_start")?.(
+        { type: "session_start", reason: "startup" },
+        context,
+      ),
     );
     await vi.waitFor(() => expect(acquireLease).toHaveBeenCalledTimes(1));
     const shutting = Promise.resolve(
-      runtime.handlers
-        .get("session_shutdown")
-        ?.({ type: "session_shutdown", reason: "reload" }, context),
+      runtime.handlers.get("session_shutdown")?.(
+        { type: "session_shutdown", reason: "reload" },
+        context,
+      ),
     );
     releaseAcquire();
     await Promise.all([starting, shutting]);
@@ -542,7 +684,10 @@ describe("Headlong Pi extension", () => {
       clearTimer: vi.fn(),
       beforeWakeStateWrite,
     });
-    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+    await runtime.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      context,
+    );
 
     const input = Promise.resolve(
       runtime.handlers.get("input")?.(
@@ -552,18 +697,24 @@ describe("Headlong Pi extension", () => {
     );
     await vi.waitFor(() => expect(beforeWakeStateWrite).toHaveBeenCalledTimes(1));
     const shutdown = Promise.resolve(
-      runtime.handlers
-        .get("session_shutdown")
-        ?.({ type: "session_shutdown", reason: "reload" }, context),
+      runtime.handlers.get("session_shutdown")?.(
+        { type: "session_shutdown", reason: "reload" },
+        context,
+      ),
     );
     releasePublication();
     await Promise.all([input, shutdown]);
 
-    await expect(store.readState()).resolves.toMatchObject({ status: "sleeping", activeWakeId: null });
-    const rawEvents = await readFile(store.eventsPath, "utf8").catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return "";
-      throw error;
+    await expect(store.readState()).resolves.toMatchObject({
+      status: "sleeping",
+      activeWakeId: null,
     });
+    const rawEvents = await readFile(store.eventsPath, "utf8").catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return "";
+        throw error;
+      },
+    );
     const events = readOperationalEvents(rawEvents);
     expect(events.filter((event) => event.type === "wake.dispatched")).toHaveLength(0);
   });
@@ -589,21 +740,28 @@ describe("Headlong Pi extension", () => {
       clearTimer: vi.fn(),
       beforeWakeStateWrite,
     });
-    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+    await runtime.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      context,
+    );
     await runtime.commands.get("headlong")?.handler("start", context);
     const dispatch = Promise.resolve(callbacks[0]?.());
     await vi.waitFor(() => expect(beforeWakeStateWrite).toHaveBeenCalledTimes(1));
 
     const shutdown = Promise.resolve(
-      runtime.handlers
-        .get("session_shutdown")
-        ?.({ type: "session_shutdown", reason: "reload" }, context),
+      runtime.handlers.get("session_shutdown")?.(
+        { type: "session_shutdown", reason: "reload" },
+        context,
+      ),
     );
     releasePublication();
     await Promise.all([dispatch, shutdown]);
 
     const store = new HeadlongStore({ stateRoot, workspace: context.cwd });
-    await expect(store.readState()).resolves.toMatchObject({ status: "sleeping", activeWakeId: null });
+    await expect(store.readState()).resolves.toMatchObject({
+      status: "sleeping",
+      activeWakeId: null,
+    });
     expect(runtime.pi.sendUserMessage).not.toHaveBeenCalled();
   });
 
@@ -614,17 +772,28 @@ describe("Headlong Pi extension", () => {
     const runtime = createPi();
     const context = createContext(root);
     registerHeadlongExtension(runtime.pi as never, { stateRoot, maxTurnsPerWake: 1 });
-    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+    await runtime.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      context,
+    );
     await runtime.commands.get("headlong")?.handler("start", context);
     const store = new HeadlongStore({ stateRoot, workspace: context.cwd });
-    await vi.waitFor(async () => expect((await store.readState())?.activeWakeId).toMatch(/^wake-1-/));
+    await vi.waitFor(async () =>
+      expect((await store.readState())?.activeWakeId).toMatch(/^wake-1-/),
+    );
 
     await runtime.handlers.get("turn_start")?.({ type: "turn_start" }, context);
     await runtime.handlers.get("turn_start")?.({ type: "turn_start" }, context);
 
     expect(context.abort).toHaveBeenCalledTimes(1);
-    await expect(store.readState()).resolves.toMatchObject({ status: "paused", activeWakeId: null });
-    await runtime.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, context);
+    await expect(store.readState()).resolves.toMatchObject({
+      status: "paused",
+      activeWakeId: null,
+    });
+    await runtime.handlers.get("session_shutdown")?.(
+      { type: "session_shutdown", reason: "quit" },
+      context,
+    );
   });
 
   it("aborts and pauses a hung live wake when its wall-clock deadline fires", async () => {
@@ -659,7 +828,10 @@ describe("Headlong Pi extension", () => {
       setDeadlineTimer,
       clearDeadlineTimer: vi.fn(),
     });
-    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+    await runtime.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      context,
+    );
     await runtime.handlers.get("input")?.(
       { type: "input", text: "Start now", source: "interactive" },
       context,
@@ -676,17 +848,16 @@ describe("Headlong Pi extension", () => {
     });
     const events = readOperationalEvents(await readFile(store.eventsPath, "utf8"));
     expect(events.at(-1)).toMatchObject({ type: "wake.budget_exceeded" });
-    expect(runtime.pi.setActiveTools).toHaveBeenLastCalledWith(
-      expect.arrayContaining(["read", "headlong_sleep"]),
+    expect(runtime.pi.setActiveTools).toHaveBeenLastCalledWith([]);
+    await runtime.handlers.get("agent_settled")?.(
+      { type: "agent_settled", outcome: "aborted", messages: [] },
+      context,
     );
-    expect(runtime.pi.setActiveTools).toHaveBeenLastCalledWith(
-      expect.not.arrayContaining(["bash", "external_message"]),
-    );
-    await runtime.handlers
-      .get("agent_settled")
-      ?.({ type: "agent_settled", outcome: "aborted", messages: [] }, context);
     expect(runtime.pi.setActiveTools).toHaveBeenLastCalledWith(["read", "bash"]);
-    await runtime.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, context);
+    await runtime.handlers.get("session_shutdown")?.(
+      { type: "session_shutdown", reason: "quit" },
+      context,
+    );
   });
 
   it.each(["start", "resume"] as const)(
@@ -707,13 +878,19 @@ describe("Headlong Pi extension", () => {
       const runtime = createPi();
       const setTimer = vi.fn(() => 1);
       registerHeadlongExtension(runtime.pi as never, { stateRoot, setTimer });
-      await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+      await runtime.handlers.get("session_start")?.(
+        { type: "session_start", reason: "startup" },
+        context,
+      );
 
       await runtime.commands.get("headlong")?.handler(action, context);
 
       await expect(store.readState()).resolves.toMatchObject({ status: "stopped", wakeAt: null });
       expect(setTimer).not.toHaveBeenCalled();
-      expect(context.ui.notify).toHaveBeenCalledWith(expect.stringContaining("terminal"), "warning");
+      expect(context.ui.notify).toHaveBeenCalledWith(
+        expect.stringContaining("terminal"),
+        "warning",
+      );
       await runtime.handlers.get("session_shutdown")?.(
         { type: "session_shutdown", reason: "quit" },
         context,
@@ -744,7 +921,10 @@ describe("Headlong Pi extension", () => {
     const setTimer = vi.fn(() => 1);
     registerHeadlongExtension(runtime.pi as never, { stateRoot, setTimer });
 
-    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+    await runtime.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      context,
+    );
 
     expect(setTimer).not.toHaveBeenCalled();
     expect(runtime.pi.sendUserMessage).not.toHaveBeenCalled();
@@ -790,7 +970,10 @@ describe("Headlong Pi extension", () => {
       clearTimer: vi.fn(),
     });
 
-    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+    await runtime.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      context,
+    );
 
     await expect(store.readState()).resolves.toMatchObject({
       status: "sleeping",
@@ -811,10 +994,13 @@ describe("Headlong Pi extension", () => {
     expect(callbacks).toHaveLength(1);
     expect(runtime.pi.sendUserMessage).not.toHaveBeenCalled();
 
-    await runtime.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, context);
+    await runtime.handlers.get("session_shutdown")?.(
+      { type: "session_shutdown", reason: "quit" },
+      context,
+    );
   });
 
-  it("pauses recovered work when its operational event cannot be appended", async () => {
+  it("continues recovered work from canonical state when operational logging is degraded", async () => {
     const root = await mkdtemp(join(tmpdir(), "headlong-extension-recovery-event-failure-"));
     roots.push(root);
     const stateRoot = join(root, "state");
@@ -841,26 +1027,31 @@ describe("Headlong Pi extension", () => {
         return appendEvent.call(this, event);
       });
     const runtime = createPi();
-    registerHeadlongExtension(runtime.pi as never, { stateRoot, setTimer: vi.fn(() => 1) });
+    const setTimer = vi.fn(() => 1);
+    registerHeadlongExtension(runtime.pi as never, { stateRoot, setTimer });
 
     try {
-      await expect(
-        runtime.handlers.get("session_start")?.(
-          { type: "session_start", reason: "startup" },
-          context,
-        ),
-      ).rejects.toThrow("event write failed");
+      await runtime.handlers.get("session_start")?.(
+        { type: "session_start", reason: "startup" },
+        context,
+      );
       await expect(store.readState()).resolves.toMatchObject({
-        status: "paused",
-        wakeAt: null,
+        status: "sleeping",
+        wakeAt: expect.any(String),
         activeWakeId: null,
         consecutiveFailures: 1,
       });
+      expect(setTimer).toHaveBeenCalledTimes(1);
+      expect(context.ui.notify).toHaveBeenCalledWith(
+        expect.stringContaining("operational logging is degraded"),
+        "warning",
+      );
     } finally {
       appendSpy.mockRestore();
-      await runtime.handlers
-        .get("session_shutdown")
-        ?.({ type: "session_shutdown", reason: "quit" }, context);
+      await runtime.handlers.get("session_shutdown")?.(
+        { type: "session_shutdown", reason: "quit" },
+        context,
+      );
     }
   });
 
@@ -919,9 +1110,10 @@ describe("Headlong Pi extension", () => {
       );
     } finally {
       writeSpy.mockRestore();
-      await runtime.handlers
-        .get("session_shutdown")
-        ?.({ type: "session_shutdown", reason: "quit" }, context);
+      await runtime.handlers.get("session_shutdown")?.(
+        { type: "session_shutdown", reason: "quit" },
+        context,
+      );
     }
   });
 
@@ -969,9 +1161,11 @@ describe("Headlong Pi extension", () => {
       },
       clearTimer: vi.fn(),
     });
-    await runtime.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, context);
+    await runtime.handlers.get("session_start")?.(
+      { type: "session_start", reason: "startup" },
+      context,
+    );
     expect(runtime.pi.setActiveTools).toHaveBeenCalledWith([
-      "read",
       "headlong_checkpoint",
       "headlong_sleep",
       "headlong_complete",
@@ -988,7 +1182,10 @@ describe("Headlong Pi extension", () => {
       activeWakeId: null,
       lastTransitionWakeId: "wake-supervised",
     });
-    await runtime.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, context);
+    await runtime.handlers.get("session_shutdown")?.(
+      { type: "session_shutdown", reason: "quit" },
+      context,
+    );
     await supervisor?.release();
   });
 });
