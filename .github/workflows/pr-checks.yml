@@ -49,7 +49,7 @@ jobs:
         run: |
           cat .github/headlong-repair.part* > /tmp/headlong-repair.b64
           base64 --decode /tmp/headlong-repair.b64 > /tmp/headlong-repair.tar.gz
-          echo "1225fac1e497ac6d9dbb8d4c5984da4b72438de8164e14e1b236fd2a3cb8f0ad  /tmp/headlong-repair.tar.gz" | sha256sum --check -
+          echo "849d4ed387a1cdd13c8e9876986928a2d28b528f1fb3cd89bbfed92225ceab07  /tmp/headlong-repair.tar.gz" | sha256sum --check -
           tar -xzf /tmp/headlong-repair.tar.gz
           rm .github/headlong-repair.part*
           pnpm exec oxfmt --write pi-extensions/headlong tests/headlong-*.test.ts
