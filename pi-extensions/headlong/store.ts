@@ -1,8 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants, realpathSync } from "node:fs";
-import { chmod, lstat, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import {
+  currentProcessIdentity,
+  defaultIsOwnerLive,
+  type ActorLeaseOwner,
+} from "./lease.js";
 
 export const HEADLONG_STATE_VERSION = 1 as const;
 const HEADLONG_STATUSES = new Set<HeadlongActorStatus>([
@@ -11,6 +16,7 @@ const HEADLONG_STATUSES = new Set<HeadlongActorStatus>([
   "paused",
   "stopped",
   "completed",
+  "completed-unverified",
   "blocked",
 ]);
 const HEADLONG_STATE_KEYS = new Set([
@@ -30,6 +36,9 @@ const HEADLONG_STATE_KEYS = new Set([
   "lastTransitionWakeId",
   "updatedAt",
 ]);
+const MAX_OPERATIONAL_EVENT_TAIL_BYTES = 256 * 1024;
+
+class MalformedOperationalEventError extends Error {}
 
 export type HeadlongActorStatus =
   | "running"
@@ -37,6 +46,7 @@ export type HeadlongActorStatus =
   | "paused"
   | "stopped"
   | "completed"
+  | "completed-unverified"
   | "blocked";
 
 export type HeadlongActorState = {
@@ -71,6 +81,18 @@ export type HeadlongStoreOptions = {
   stateRoot: string;
   workspace: string;
   beforeStateRename?: () => Promise<void>;
+  beforeEventAppend?: () => Promise<void>;
+  eventLockTimeoutMs?: number;
+  eventLockStaleAfterMs?: number;
+  eventLockNow?: () => number;
+  isEventLockOwnerLive?: (owner: ActorLeaseOwner) => Promise<boolean>;
+  onEventTailRead?: (bytesRead: number) => void;
+};
+
+type EventTail = {
+  sequence: number;
+  separator: string;
+  truncateTo?: number;
 };
 
 function canonicalWorkspace(workspace: string): string {
@@ -143,6 +165,192 @@ async function syncDirectory(path: string): Promise<void> {
   }
 }
 
+function isValidTimestamp(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function parseEventLockOwner(raw: string, path: string): ActorLeaseOwner {
+  let value: Partial<ActorLeaseOwner>;
+  try {
+    value = JSON.parse(raw) as Partial<ActorLeaseOwner>;
+  } catch (error) {
+    throw new Error(`Invalid Headlong event append lock owner: ${path}`, { cause: error });
+  }
+  if (
+    value.version !== 1 ||
+    typeof value.token !== "string" ||
+    !value.token ||
+    !Number.isSafeInteger(value.pid) ||
+    (value.pid ?? 0) <= 0 ||
+    typeof value.processIdentity !== "string" ||
+    !value.processIdentity ||
+    value.role !== "event-log" ||
+    !isValidTimestamp(value.acquiredAt) ||
+    !isValidTimestamp(value.heartbeatAt) ||
+    value.delegate !== undefined
+  ) {
+    throw new Error(`Invalid Headlong event append lock owner: ${path}`);
+  }
+  return value as ActorLeaseOwner;
+}
+
+async function readEventLockOwner(path: string): Promise<ActorLeaseOwner | undefined> {
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+    handle = await open(path, constants.O_RDONLY | noFollow);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") {
+      throw new Error(`Refusing unsafe Headlong event lock: ${path}`, { cause: error });
+    }
+    throw error;
+  }
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || !ownedByCurrentUser(metadata.uid)) {
+      throw new Error(`Refusing unsafe Headlong event lock: ${path}`);
+    }
+    return parseEventLockOwner(await handle.readFile("utf8"), path);
+  } finally {
+    await handle.close();
+  }
+}
+
+function sameLockOwner(left: ActorLeaseOwner | undefined, right: ActorLeaseOwner | undefined): boolean {
+  return (
+    left !== undefined &&
+    right !== undefined &&
+    left.version === right.version &&
+    left.token === right.token &&
+    left.pid === right.pid &&
+    left.processIdentity === right.processIdentity &&
+    left.role === right.role &&
+    left.acquiredAt === right.acquiredAt &&
+    left.heartbeatAt === right.heartbeatAt &&
+    left.delegate === undefined &&
+    right.delegate === undefined
+  );
+}
+
+async function restoreMovedFile(tombstonePath: string, originalPath: string): Promise<void> {
+  try {
+    await rename(tombstonePath, originalPath);
+  } catch {
+    // A replacement owner may already exist. Preserve the tombstone instead of deleting either file.
+  }
+}
+
+function parseOperationalEventValue(value: unknown, label: string): HeadlongOperationalEvent {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    !("version" in value) ||
+    value.version !== 1 ||
+    !("sequence" in value) ||
+    !Number.isSafeInteger(value.sequence) ||
+    (value.sequence as number) <= 0 ||
+    !("at" in value) ||
+    !isValidTimestamp(value.at) ||
+    !("type" in value) ||
+    typeof value.type !== "string" ||
+    !value.type ||
+    !("actorId" in value) ||
+    typeof value.actorId !== "string" ||
+    !value.actorId
+  ) {
+    throw new Error(`Invalid Headlong operational event ${label}`);
+  }
+  return value as HeadlongOperationalEvent;
+}
+
+function parseOperationalEventLine(line: string, label: string): HeadlongOperationalEvent {
+  let value: unknown;
+  try {
+    value = JSON.parse(line);
+  } catch (error) {
+    throw new MalformedOperationalEventError(`Malformed Headlong operational event ${label}`, {
+      cause: error,
+    });
+  }
+  return parseOperationalEventValue(value, label);
+}
+
+function assertEventActor(event: HeadlongOperationalEvent, actorId: string): void {
+  if (event.actorId !== actorId) {
+    throw new Error("Headlong operational event log belongs to another actor");
+  }
+}
+
+async function inspectEventTail(
+  handle: Awaited<ReturnType<typeof open>>,
+  size: number,
+  actorId: string,
+  onRead?: (bytesRead: number) => void,
+): Promise<EventTail> {
+  if (size === 0) return { sequence: 0, separator: "" };
+
+  const requested = Math.min(size, MAX_OPERATIONAL_EVENT_TAIL_BYTES);
+  const buffer = Buffer.alloc(requested);
+  const offset = size - requested;
+  let bytesRead = 0;
+  while (bytesRead < requested) {
+    const result = await handle.read(
+      buffer,
+      bytesRead,
+      requested - bytesRead,
+      offset + bytesRead,
+    );
+    if (result.bytesRead === 0) break;
+    bytesRead += result.bytesRead;
+  }
+  if (bytesRead !== requested) {
+    throw new Error("Headlong operational event log changed during bounded tail read");
+  }
+  onRead?.(bytesRead);
+  const tail = buffer.toString("utf8");
+  const tailStart = offset;
+  if (!tail) return { sequence: 0, separator: "" };
+
+  let lineEnd: number;
+  let truncateTo: number | undefined;
+  if (tail.endsWith("\n")) {
+    lineEnd = tail.length - 1;
+  } else {
+    const lastNewline = tail.lastIndexOf("\n");
+    if (tailStart > 0 && lastNewline < 0) {
+      throw new Error("Headlong operational event tail exceeds the bounded record window");
+    }
+    const finalLine = tail.slice(lastNewline + 1);
+    try {
+      const event = parseOperationalEventLine(finalLine, "at the log tail");
+      assertEventActor(event, actorId);
+      return { sequence: event.sequence, separator: "\n" };
+    } catch (error) {
+      if (!(error instanceof MalformedOperationalEventError)) throw error;
+      truncateTo = tailStart + Buffer.byteLength(tail.slice(0, lastNewline + 1));
+      lineEnd = lastNewline;
+    }
+  }
+
+  while (lineEnd >= 0) {
+    const previousNewline = tail.lastIndexOf("\n", lineEnd - 1);
+    if (previousNewline < 0 && tailStart > 0) {
+      throw new Error("Headlong operational event tail exceeds the bounded record window");
+    }
+    const line = tail.slice(previousNewline + 1, lineEnd);
+    if (line) {
+      const event = parseOperationalEventLine(line, "at the log tail");
+      assertEventActor(event, actorId);
+      return { sequence: event.sequence, separator: "", truncateTo };
+    }
+    if (previousNewline < 0) break;
+    lineEnd = previousNewline;
+  }
+
+  return { sequence: 0, separator: "", truncateTo };
+}
+
 export class HeadlongStore {
   readonly actorId: string;
   readonly directoryPath: string;
@@ -155,14 +363,26 @@ export class HeadlongStore {
 
   private eventTail: Promise<void> = Promise.resolve();
   private readonly beforeStateRename?: () => Promise<void>;
+  private readonly beforeEventAppend?: () => Promise<void>;
+  private readonly eventLockTimeoutMs: number;
+  private readonly eventLockStaleAfterMs: number;
+  private readonly eventLockNow: () => number;
+  private readonly isEventLockOwnerLive: (owner: ActorLeaseOwner) => Promise<boolean>;
+  private readonly onEventTailRead?: (bytesRead: number) => void;
 
   constructor(options: HeadlongStoreOptions) {
     assertAbsoluteRoot(options.stateRoot);
     this.beforeStateRename = options.beforeStateRename;
+    this.beforeEventAppend = options.beforeEventAppend;
+    this.eventLockTimeoutMs = options.eventLockTimeoutMs ?? 5_000;
+    this.eventLockStaleAfterMs = options.eventLockStaleAfterMs ?? 30_000;
+    this.eventLockNow = options.eventLockNow ?? Date.now;
+    this.isEventLockOwnerLive = options.isEventLockOwnerLive ?? defaultIsOwnerLive;
+    this.onEventTailRead = options.onEventTailRead;
     this.stateRoot = resolve(options.stateRoot);
     this.workspace = canonicalWorkspace(options.workspace);
     this.actorId = workspaceActorId(this.workspace);
-    this.directoryPath = join(options.stateRoot, this.actorId);
+    this.directoryPath = join(this.stateRoot, this.actorId);
     this.statePath = join(this.directoryPath, "actor-state.v1.json");
     this.eventsPath = join(this.directoryPath, "events.v1.jsonl");
     this.eventLockPath = join(this.directoryPath, ".events.append.lock");
@@ -233,42 +453,82 @@ export class HeadlongStore {
   }
 
   private async acquireEventLock(): Promise<() => Promise<void>> {
-    const token = randomUUID();
-    const deadline = Date.now() + 5_000;
+    const at = new Date(this.eventLockNow()).toISOString();
+    const owner: ActorLeaseOwner = {
+      version: 1,
+      token: randomUUID(),
+      pid: process.pid,
+      processIdentity: await currentProcessIdentity(),
+      role: "event-log",
+      acquiredAt: at,
+      heartbeatAt: at,
+    };
+    const deadline = Date.now() + this.eventLockTimeoutMs;
     for (;;) {
       try {
         const handle = await open(this.eventLockPath, "wx", 0o600);
         try {
-          await handle.writeFile(token, "utf8");
+          await handle.writeFile(`${JSON.stringify(owner)}\n`, "utf8");
           await handle.sync();
         } finally {
           await handle.close();
         }
         return async () => {
-          const current = await readFile(this.eventLockPath, "utf8");
-          if (current !== token) throw new Error("Headlong event append lock ownership changed");
-          await unlink(this.eventLockPath);
+          const tombstonePath = `${this.eventLockPath}.release-${randomUUID()}`;
+          try {
+            await rename(this.eventLockPath, tombstonePath);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+              throw new Error("Headlong event append lock ownership changed", { cause: error });
+            }
+            throw error;
+          }
+          let movedOwner: ActorLeaseOwner | undefined;
+          try {
+            movedOwner = await readEventLockOwner(tombstonePath);
+          } catch (error) {
+            await restoreMovedFile(tombstonePath, this.eventLockPath);
+            throw error;
+          }
+          if (!sameLockOwner(owner, movedOwner)) {
+            await restoreMovedFile(tombstonePath, this.eventLockPath);
+            throw new Error("Headlong event append lock ownership changed");
+          }
+          await unlink(tombstonePath);
         };
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        let metadata;
-        try {
-          metadata = await lstat(this.eventLockPath);
-        } catch (metadataError) {
-          if ((metadataError as NodeJS.ErrnoException).code === "ENOENT") continue;
-          throw metadataError;
-        }
-        if (metadata.isSymbolicLink() || !metadata.isFile() || !ownedByCurrentUser(metadata.uid)) {
-          throw new Error(`Refusing unsafe Headlong event lock: ${this.eventLockPath}`);
-        }
-        if (Date.now() - metadata.mtimeMs > 30_000) {
-          await unlink(this.eventLockPath).catch((unlinkError: NodeJS.ErrnoException) => {
-            if (unlinkError.code !== "ENOENT") throw unlinkError;
-          });
+        const current = await readEventLockOwner(this.eventLockPath);
+        if (!current) continue;
+        const stale =
+          this.eventLockNow() - Date.parse(current.heartbeatAt) >= this.eventLockStaleAfterMs;
+        if (stale && !(await this.isEventLockOwnerLive(current))) {
+          const confirmed = await readEventLockOwner(this.eventLockPath);
+          if (!sameLockOwner(current, confirmed)) continue;
+          const tombstonePath = `${this.eventLockPath}.stale-${randomUUID()}`;
+          try {
+            await rename(this.eventLockPath, tombstonePath);
+          } catch (renameError) {
+            if ((renameError as NodeJS.ErrnoException).code === "ENOENT") continue;
+            throw renameError;
+          }
+          let movedOwner: ActorLeaseOwner | undefined;
+          try {
+            movedOwner = await readEventLockOwner(tombstonePath);
+          } catch (error) {
+            await restoreMovedFile(tombstonePath, this.eventLockPath);
+            throw error;
+          }
+          if (!sameLockOwner(current, movedOwner)) {
+            await restoreMovedFile(tombstonePath, this.eventLockPath);
+            continue;
+          }
+          await unlink(tombstonePath);
           continue;
         }
-        if (Date.now() >= deadline)
+        if (Date.now() >= deadline) {
           throw new Error("Timed out acquiring Headlong event append lock");
+        }
         await delay(2);
       }
     }
@@ -292,30 +552,21 @@ export class HeadlongStore {
           if (!metadata.isFile() || !ownedByCurrentUser(metadata.uid)) {
             throw new Error(`Refusing unsafe Headlong event log: ${this.eventsPath}`);
           }
-          let raw = await handle.readFile("utf8");
-          let existing = readOperationalEvents(raw);
-          let separator = "";
-          if (raw && !raw.endsWith("\n")) {
-            const lineCount = raw.split("\n").filter(Boolean).length;
-            if (existing.length === lineCount) {
-              separator = "\n";
-            } else {
-              const completePrefix = raw.slice(0, raw.lastIndexOf("\n") + 1);
-              await handle.truncate(Buffer.byteLength(completePrefix));
-              raw = completePrefix;
-              existing = readOperationalEvents(raw);
-            }
-          }
-          if (existing.some((existingEvent) => existingEvent.actorId !== this.actorId)) {
-            throw new Error("Headlong operational event log belongs to another actor");
-          }
+          const tail = await inspectEventTail(
+            handle,
+            metadata.size,
+            this.actorId,
+            this.onEventTailRead,
+          );
+          if (tail.truncateTo !== undefined) await handle.truncate(tail.truncateTo);
+          await this.beforeEventAppend?.();
           const record: HeadlongOperationalEvent = {
             version: 1,
-            sequence: (existing.at(-1)?.sequence ?? 0) + 1,
+            sequence: tail.sequence + 1,
             actorId: this.actorId,
             ...event,
           };
-          await handle.write(`${separator}${JSON.stringify(record)}\n`);
+          await handle.write(`${tail.separator}${JSON.stringify(record)}\n`);
           await handle.sync();
         } finally {
           await handle.close();
@@ -328,10 +579,6 @@ export class HeadlongStore {
     this.eventTail = operation.catch(() => undefined);
     return operation;
   }
-}
-
-function isValidTimestamp(value: unknown): value is string {
-  return typeof value === "string" && Number.isFinite(Date.parse(value));
 }
 
 export function parseActorState(raw: string, expectedWorkspace?: string): HeadlongActorState {
@@ -395,36 +642,26 @@ export function readOperationalEvents(raw: string): HeadlongOperationalEvent[] {
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
     if (!line) continue;
-    let value: unknown;
+    let event: HeadlongOperationalEvent;
     try {
-      value = JSON.parse(line);
+      event = parseOperationalEventLine(line, `at line ${index + 1}`);
     } catch (error) {
-      if (hasTruncatedTail && index === lines.length - 1) break;
-      throw new Error(`Malformed Headlong operational event at line ${index + 1}`, {
-        cause: error,
-      });
+      if (
+        error instanceof MalformedOperationalEventError &&
+        hasTruncatedTail &&
+        index === lines.length - 1
+      ) {
+        break;
+      }
+      throw error;
     }
     if (
-      !value ||
-      typeof value !== "object" ||
-      !("version" in value) ||
-      value.version !== 1 ||
-      !("sequence" in value) ||
-      !Number.isSafeInteger(value.sequence) ||
-      value.sequence !== events.length + 1 ||
-      !("at" in value) ||
-      !isValidTimestamp(value.at) ||
-      !("type" in value) ||
-      typeof value.type !== "string" ||
-      !value.type ||
-      !("actorId" in value) ||
-      typeof value.actorId !== "string" ||
-      !value.actorId ||
-      (events.length > 0 && value.actorId !== events[0]?.actorId)
+      event.sequence !== events.length + 1 ||
+      (events.length > 0 && event.actorId !== events[0]?.actorId)
     ) {
       throw new Error(`Invalid Headlong operational event at line ${index + 1}`);
     }
-    events.push(value as HeadlongOperationalEvent);
+    events.push(event);
   }
   return events;
 }
