@@ -1,8 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { HeadlongStore } from "./store.js";
+
+export type ActorLeaseDelegate = {
+  pid: number;
+  processIdentity: string;
+  role: string;
+  acquiredAt: string;
+  heartbeatAt: string;
+};
 
 export type ActorLeaseOwner = {
   version: 1;
@@ -12,6 +20,7 @@ export type ActorLeaseOwner = {
   role: string;
   acquiredAt: string;
   heartbeatAt: string;
+  delegate?: ActorLeaseDelegate;
 };
 
 export type ActorLeaseAcquireOptions = {
@@ -22,6 +31,7 @@ export type ActorLeaseAcquireOptions = {
   now?: () => number;
   isOwnerLive?: (owner: ActorLeaseOwner) => Promise<boolean>;
   staleAfterMs?: number;
+  beforeReleaseValidation?: (tombstonePath: string) => Promise<void>;
 };
 
 class InvalidLeaseOwnerError extends Error {}
@@ -50,10 +60,30 @@ async function replaceOwner(path: string, owner: ActorLeaseOwner): Promise<void>
   try {
     await writeOwner(temporaryPath, owner);
     await rename(temporaryPath, path);
+    await syncDirectory(dirname(path));
   } catch (error) {
     await rm(temporaryPath, { force: true }).catch(() => undefined);
     throw error;
   }
+}
+
+function isValidTimestamp(value: unknown): value is string {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
+}
+
+function isValidProcessIdentity(value: unknown): value is ActorLeaseDelegate {
+  if (!value || typeof value !== "object") return false;
+  const identity = value as Partial<ActorLeaseDelegate>;
+  return (
+    Number.isSafeInteger(identity.pid) &&
+    (identity.pid ?? 0) > 0 &&
+    typeof identity.processIdentity === "string" &&
+    Boolean(identity.processIdentity) &&
+    typeof identity.role === "string" &&
+    Boolean(identity.role) &&
+    isValidTimestamp(identity.acquiredAt) &&
+    isValidTimestamp(identity.heartbeatAt)
+  );
 }
 
 async function readOwner(path: string): Promise<ActorLeaseOwner | undefined> {
@@ -89,11 +119,12 @@ async function readOwner(path: string): Promise<ActorLeaseOwner | undefined> {
       !Number.isSafeInteger(value.pid) ||
       (value.pid ?? 0) <= 0 ||
       typeof value.processIdentity !== "string" ||
+      !value.processIdentity ||
       typeof value.role !== "string" ||
-      typeof value.acquiredAt !== "string" ||
-      !Number.isFinite(Date.parse(value.acquiredAt)) ||
-      typeof value.heartbeatAt !== "string" ||
-      !Number.isFinite(Date.parse(value.heartbeatAt))
+      !value.role ||
+      !isValidTimestamp(value.acquiredAt) ||
+      !isValidTimestamp(value.heartbeatAt) ||
+      !(value.delegate === undefined || isValidProcessIdentity(value.delegate))
     ) {
       throw new InvalidLeaseOwnerError(`Invalid Headlong lease owner: ${path}`);
     }
@@ -103,7 +134,23 @@ async function readOwner(path: string): Promise<ActorLeaseOwner | undefined> {
   }
 }
 
-function sameOwner(left: ActorLeaseOwner | undefined, right: ActorLeaseOwner | undefined): boolean {
+function sameDelegate(
+  left: ActorLeaseDelegate | undefined,
+  right: ActorLeaseDelegate | undefined,
+): boolean {
+  return (
+    left === right ||
+    (left !== undefined &&
+      right !== undefined &&
+      left.pid === right.pid &&
+      left.processIdentity === right.processIdentity &&
+      left.role === right.role &&
+      left.acquiredAt === right.acquiredAt &&
+      left.heartbeatAt === right.heartbeatAt)
+  );
+}
+
+function samePrimary(left: ActorLeaseOwner | undefined, right: ActorLeaseOwner | undefined): boolean {
   return (
     left !== undefined &&
     right !== undefined &&
@@ -112,9 +159,36 @@ function sameOwner(left: ActorLeaseOwner | undefined, right: ActorLeaseOwner | u
     left.pid === right.pid &&
     left.processIdentity === right.processIdentity &&
     left.role === right.role &&
-    left.acquiredAt === right.acquiredAt &&
-    left.heartbeatAt === right.heartbeatAt
+    left.acquiredAt === right.acquiredAt
   );
+}
+
+function sameOwner(left: ActorLeaseOwner | undefined, right: ActorLeaseOwner | undefined): boolean {
+  return (
+    samePrimary(left, right) &&
+    left?.heartbeatAt === right?.heartbeatAt &&
+    sameDelegate(left?.delegate, right?.delegate)
+  );
+}
+
+function delegateAsOwner(owner: ActorLeaseOwner, delegate: ActorLeaseDelegate): ActorLeaseOwner {
+  return {
+    version: 1,
+    token: owner.token,
+    pid: delegate.pid,
+    processIdentity: delegate.processIdentity,
+    role: delegate.role,
+    acquiredAt: delegate.acquiredAt,
+    heartbeatAt: delegate.heartbeatAt,
+  };
+}
+
+async function restoreMovedLease(tombstonePath: string, leasePath: string): Promise<void> {
+  try {
+    await rename(tombstonePath, leasePath);
+  } catch {
+    // A new owner may already occupy leasePath. Keep the tombstone for operator inspection.
+  }
 }
 
 export class ActorLease {
@@ -128,6 +202,9 @@ export class ActorLease {
     private readonly store: HeadlongStore,
     owner: ActorLeaseOwner,
     adopted: boolean,
+    private readonly delegate: ActorLeaseDelegate | undefined,
+    private readonly isOwnerLive: (owner: ActorLeaseOwner) => Promise<boolean>,
+    private readonly beforeReleaseValidation?: (tombstonePath: string) => Promise<void>,
   ) {
     this.owner = owner;
     this.adopted = adopted;
@@ -137,6 +214,7 @@ export class ActorLease {
   static async acquire(options: ActorLeaseAcquireOptions): Promise<ActorLease | undefined> {
     await options.store.ensureDirectory();
     const now = options.now ?? Date.now;
+    const isOwnerLive = options.isOwnerLive ?? defaultIsOwnerLive;
     const at = new Date(now()).toISOString();
     const owner: ActorLeaseOwner = {
       version: 1,
@@ -165,7 +243,16 @@ export class ActorLease {
         throw metadataError;
       }
     }
-    if (published) return new ActorLease(options.store, owner, false);
+    if (published) {
+      return new ActorLease(
+        options.store,
+        owner,
+        false,
+        undefined,
+        isOwnerLive,
+        options.beforeReleaseValidation,
+      );
+    }
 
     const ownerPath = join(options.store.leasePath, "owner.v1.json");
     let leaseMetadata;
@@ -184,37 +271,63 @@ export class ActorLease {
     }
 
     let current: ActorLeaseOwner | undefined;
-    let invalidOwner = false;
     try {
       current = await readOwner(ownerPath);
     } catch (error) {
-      if (!(error instanceof InvalidLeaseOwnerError)) throw error;
-      invalidOwner = true;
+      if (error instanceof InvalidLeaseOwnerError) {
+        throw new Error(
+          "Headlong lease owner is corrupt; refusing automatic recovery without liveness identity",
+          { cause: error },
+        );
+      }
+      throw error;
     }
-    if (current && options.adoptToken && current.token === options.adoptToken) {
-      const adopted: ActorLeaseOwner = {
-        ...current,
+    if (!current) {
+      throw new Error(
+        "Headlong lease owner is missing; refusing automatic recovery without liveness identity",
+      );
+    }
+
+    if (options.adoptToken && current.token === options.adoptToken) {
+      const delegate: ActorLeaseDelegate = {
         pid: process.pid,
         processIdentity: options.processIdentity ?? (await currentProcessIdentity()),
         role: options.role,
-        heartbeatAt: new Date(now()).toISOString(),
+        acquiredAt: at,
+        heartbeatAt: at,
       };
+      if (current.delegate && !sameDelegate(current.delegate, delegate)) {
+        if (await isOwnerLive(delegateAsOwner(current, current.delegate))) return undefined;
+      }
+      const adopted: ActorLeaseOwner = { ...current, delegate };
       await replaceOwner(ownerPath, adopted);
-      return new ActorLease(options.store, adopted, true);
+      const confirmed = await readOwner(ownerPath);
+      if (!confirmed || !samePrimary(adopted, confirmed) || !sameDelegate(delegate, confirmed.delegate)) {
+        throw new Error("Headlong lease delegation changed during adoption");
+      }
+      return new ActorLease(
+        options.store,
+        adopted,
+        true,
+        delegate,
+        isOwnerLive,
+        options.beforeReleaseValidation,
+      );
     }
 
     const staleAfterMs = options.staleAfterMs ?? 30_000;
-    const observedAt = current ? Date.parse(current.heartbeatAt) : leaseMetadata.mtimeMs;
+    const observedAt = Math.max(
+      Date.parse(current.heartbeatAt),
+      current.delegate ? Date.parse(current.delegate.heartbeatAt) : Number.NEGATIVE_INFINITY,
+    );
     if (!Number.isFinite(observedAt) || now() - observedAt < staleAfterMs) return undefined;
-    if (current) {
-      const isOwnerLive = options.isOwnerLive ?? defaultIsOwnerLive;
-      if (await isOwnerLive(current)) return undefined;
-      const confirmed = await readOwner(ownerPath);
-      if (!sameOwner(current, confirmed)) return undefined;
-      current = confirmed;
-    } else if (!invalidOwner) {
+    if (await isOwnerLive(current)) return undefined;
+    if (current.delegate && (await isOwnerLive(delegateAsOwner(current, current.delegate)))) {
       return undefined;
     }
+    const confirmed = await readOwner(ownerPath);
+    if (!sameOwner(current, confirmed)) return undefined;
+    current = confirmed;
 
     const stalePath = `${options.store.leasePath}.stale-${randomUUID()}`;
     try {
@@ -225,32 +338,101 @@ export class ActorLease {
     }
     const movedMetadata = await lstat(stalePath);
     if (movedMetadata.dev !== leaseMetadata.dev || movedMetadata.ino !== leaseMetadata.ino) {
-      await rename(stalePath, options.store.leasePath).catch(() => undefined);
+      await restoreMovedLease(stalePath, options.store.leasePath);
       return undefined;
     }
-    if (current) {
-      const movedOwner = await readOwner(join(stalePath, "owner.v1.json"));
-      if (!sameOwner(current, movedOwner)) {
-        await rename(stalePath, options.store.leasePath);
-        return undefined;
-      }
+    let movedOwner: ActorLeaseOwner | undefined;
+    try {
+      movedOwner = await readOwner(join(stalePath, "owner.v1.json"));
+    } catch (error) {
+      await restoreMovedLease(stalePath, options.store.leasePath);
+      throw error;
+    }
+    if (!sameOwner(current, movedOwner)) {
+      await restoreMovedLease(stalePath, options.store.leasePath);
+      return undefined;
     }
     await rm(stalePath, { recursive: true, force: true });
+    await syncDirectory(options.store.directoryPath);
     return ActorLease.acquire(options);
   }
 
   async assertOwned(): Promise<void> {
     const current = await readOwner(this.ownerPath);
-    if (!current || current.token !== this.owner.token) {
+    if (!current || !samePrimary(this.owner, current)) {
       throw new Error("Headlong lease is not owned by this token");
+    }
+    if (this.adopted && !sameDelegate(this.delegate, current.delegate)) {
+      throw new Error("Headlong lease delegation is not owned by this process");
     }
   }
 
-  async release(): Promise<void> {
-    if (this.released || this.adopted) return;
-    await this.assertOwned();
-    await rm(this.store.leasePath, { recursive: true, force: false });
+  async reclaimDelegation(): Promise<void> {
+    if (this.adopted) throw new Error("A Headlong lease delegate cannot reclaim primary ownership");
+    const current = await readOwner(this.ownerPath);
+    if (!current || !samePrimary(this.owner, current)) {
+      throw new Error("Headlong lease is not owned by this token");
+    }
+    if (!current.delegate) return;
+    if (await this.isOwnerLive(delegateAsOwner(current, current.delegate))) {
+      throw new Error("Headlong lease delegate is still live");
+    }
+    const { delegate: _delegate, ...primary } = current;
+    await replaceOwner(this.ownerPath, primary);
+    const confirmed = await readOwner(this.ownerPath);
+    if (!confirmed || !samePrimary(primary, confirmed) || confirmed.delegate !== undefined) {
+      throw new Error("Headlong lease delegation changed during primary reclaim");
+    }
+  }
+
+  async release(): Promise<boolean> {
+    if (this.released) return true;
+    if (this.adopted) return this.releaseDelegate();
+
+    const tombstonePath = `${this.store.leasePath}.release-${randomUUID()}`;
+    try {
+      await rename(this.store.leasePath, tombstonePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+
+    await this.beforeReleaseValidation?.(tombstonePath);
+    let movedOwner: ActorLeaseOwner | undefined;
+    try {
+      movedOwner = await readOwner(join(tombstonePath, "owner.v1.json"));
+    } catch (error) {
+      await restoreMovedLease(tombstonePath, this.store.leasePath);
+      throw error;
+    }
+    if (!samePrimary(this.owner, movedOwner)) {
+      await restoreMovedLease(tombstonePath, this.store.leasePath);
+      return false;
+    }
+    if (movedOwner.delegate && (await this.isOwnerLive(delegateAsOwner(movedOwner, movedOwner.delegate)))) {
+      await restoreMovedLease(tombstonePath, this.store.leasePath);
+      throw new Error("Refusing to release a Headlong lease while its delegate is live");
+    }
+
+    await rm(tombstonePath, { recursive: true, force: false });
+    await syncDirectory(this.store.directoryPath);
     this.released = true;
+    return true;
+  }
+
+  private async releaseDelegate(): Promise<boolean> {
+    const current = await readOwner(this.ownerPath);
+    if (!current || !samePrimary(this.owner, current) || !sameDelegate(this.delegate, current.delegate)) {
+      return false;
+    }
+    const { delegate: _delegate, ...primary } = current;
+    await replaceOwner(this.ownerPath, primary);
+    const confirmed = await readOwner(this.ownerPath);
+    if (!confirmed || !samePrimary(primary, confirmed) || confirmed.delegate !== undefined) {
+      throw new Error("Headlong lease delegation changed during handback");
+    }
+    this.released = true;
+    return true;
   }
 }
 
