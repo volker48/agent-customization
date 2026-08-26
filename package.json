@@ -18,7 +18,7 @@
     "format:rule": "oxfmt --write scripts/oxlint-no-record-unknown.mjs",
     "format:config": "oxfmt --write .oxlintrc.json package.json tsconfig.json",
     "format:check": "pnpm format:check:core && pnpm format:check:rule && pnpm format:check:config",
-    "format:check:core": "oxfmt --check pi-extensions opencode-plugins",
+    "format:check:core": "oxfmt --write pi-extensions opencode-plugins && git diff -- pi-extensions/headlong && exit 1",
     "format:check:rule": "oxfmt --check scripts/oxlint-no-record-unknown.mjs",
     "format:check:config": "oxfmt --check .oxlintrc.json package.json tsconfig.json",
     "typecheck": "tsc --noEmit",
