@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -67,30 +67,27 @@ describe("Headlong single-flight actor lease", () => {
     await recovered?.release();
   });
 
-  it("recovers an incomplete owner file only after the lease directory is stale", async () => {
+  it("fails closed on an incomplete owner record even after the lease directory is stale", async () => {
     const root = await mkdtemp(join(tmpdir(), "headlong-lease-incomplete-"));
     roots.push(root);
     const store = new HeadlongStore({ stateRoot: join(root, "state"), workspace: join(root, "work") });
     await store.ensureDirectory();
     await mkdir(store.leasePath, { mode: 0o700 });
     await writeFile(join(store.leasePath, "owner.v1.json"), "", { mode: 0o600 });
-    await utimes(store.leasePath, new Date(0), new Date(0));
 
-    const recovered = await ActorLease.acquire({
-      store,
-      role: "supervisor",
-      processIdentity: "candidate",
-      now: () => 100_000,
-      staleAfterMs: 1_000,
-      isOwnerLive: async () => false,
-    });
-
-    expect(recovered).toBeDefined();
-    await expect(recovered?.assertOwned()).resolves.toBeUndefined();
-    await recovered?.release();
+    await expect(
+      ActorLease.acquire({
+        store,
+        role: "supervisor",
+        processIdentity: "candidate",
+        now: () => 100_000,
+        staleAfterMs: 1,
+        isOwnerLive: async () => false,
+      }),
+    ).rejects.toThrow(/corrupt.*liveness identity/i);
   });
 
-  it("adopts an inherited same-token lease without self-deadlock or releasing the supervisor owner", async () => {
+  it("keeps the supervisor as primary owner while a same-token child acts as its delegate", async () => {
     const root = await mkdtemp(join(tmpdir(), "headlong-lease-adopt-"));
     roots.push(root);
     const store = new HeadlongStore({ stateRoot: join(root, "state"), workspace: join(root, "work") });
@@ -109,13 +106,96 @@ describe("Headlong single-flight actor lease", () => {
     expect(extension?.adopted).toBe(true);
     expect(extension?.owner).toMatchObject({
       token: supervisor?.owner.token,
-      processIdentity: "child-process",
-      role: "extension",
+      processIdentity: "supervisor-process",
+      role: "supervisor",
+      delegate: {
+        processIdentity: "child-process",
+        role: "extension",
+      },
     });
     await expect(extension?.assertOwned()).resolves.toBeUndefined();
-    await extension?.release();
+    await expect(extension?.release()).resolves.toBe(true);
+    await expect(supervisor?.assertOwned()).resolves.toBeUndefined();
+    await expect(supervisor?.release()).resolves.toBe(true);
+  });
+
+  it("retains the live primary owner's lease after a delegate exits beyond the stale grace", async () => {
+    const root = await mkdtemp(join(tmpdir(), "headlong-lease-primary-liveness-"));
+    roots.push(root);
+    const store = new HeadlongStore({ stateRoot: join(root, "state"), workspace: join(root, "work") });
+    const supervisor = await ActorLease.acquire({
+      store,
+      role: "supervisor",
+      processIdentity: "live-supervisor",
+      now: () => 1_000,
+    });
+    const child = await ActorLease.acquire({
+      store,
+      role: "extension",
+      processIdentity: "dead-child",
+      adoptToken: supervisor?.owner.token,
+      now: () => 2_000,
+    });
+    await child?.release();
+
+    const contender = await ActorLease.acquire({
+      store,
+      role: "contender",
+      processIdentity: "contender",
+      now: () => 100_000,
+      staleAfterMs: 1,
+      isOwnerLive: async (owner) => owner.processIdentity === "live-supervisor",
+    });
+
+    expect(contender).toBeUndefined();
     await expect(supervisor?.assertOwned()).resolves.toBeUndefined();
     await supervisor?.release();
+  });
+
+  it("atomically reclaims a dead delegate before the primary resumes state work", async () => {
+    const root = await mkdtemp(join(tmpdir(), "headlong-lease-reclaim-delegate-"));
+    roots.push(root);
+    const store = new HeadlongStore({ stateRoot: join(root, "state"), workspace: join(root, "work") });
+    const supervisor = await ActorLease.acquire({
+      store,
+      role: "supervisor",
+      processIdentity: "live-supervisor",
+      isOwnerLive: async (owner) => owner.processIdentity === "live-supervisor",
+    });
+    await ActorLease.acquire({
+      store,
+      role: "extension",
+      processIdentity: "dead-child",
+      adoptToken: supervisor?.owner.token,
+    });
+
+    await expect(supervisor?.reclaimDelegation()).resolves.toBeUndefined();
+    await expect(supervisor?.assertOwned()).resolves.toBeUndefined();
+    await supervisor?.release();
+  });
+
+  it("never deletes a replacement lease acquired after release moves its owned directory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "headlong-lease-release-race-"));
+    roots.push(root);
+    const store = new HeadlongStore({ stateRoot: join(root, "state"), workspace: join(root, "work") });
+    let replacement: ActorLease | undefined;
+    const original = await ActorLease.acquire({
+      store,
+      role: "original",
+      processIdentity: "original",
+      beforeReleaseValidation: async () => {
+        replacement = await ActorLease.acquire({
+          store,
+          role: "replacement",
+          processIdentity: "replacement",
+        });
+      },
+    });
+
+    await expect(original?.release()).resolves.toBe(true);
+    expect(replacement).toBeDefined();
+    await expect(replacement?.assertOwned()).resolves.toBeUndefined();
+    await replacement?.release();
   });
 
   it("refuses a malicious precreated symlink at the lease boundary even with a matching token", async () => {
@@ -191,6 +271,8 @@ describe("Headlong single-flight actor lease", () => {
 
     await expect(reaperPromise).resolves.toBeUndefined();
     await expect(child?.assertOwned()).resolves.toBeUndefined();
+    await child?.release();
+    await supervisor?.release();
   });
 
   it("refuses a symlinked lease owner file even when its target contains a matching token", async () => {
