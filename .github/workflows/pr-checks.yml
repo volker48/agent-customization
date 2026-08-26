@@ -37,6 +37,7 @@ jobs:
             "@earendil-works/pi-client@0.84.2",
             "@earendil-works/pi-coding-agent@0.84.2",
             "@earendil-works/pi-protocol@0.84.2",
+            "@earendil-works/pi-coding-agent@0.84.2",
             "@earendil-works/pi-telemetry@0.84.2",
             "@earendil-works/pi-tui@0.84.2"
           ]'
@@ -59,6 +60,10 @@ jobs:
           path: |
             pi-extensions/headlong
             tests/headlong-*.test.ts
+            README.md
+            docs/adr/0010-headlong-persistent-workspace-actor.md
+            package.json
+            .github/workflows/pr-checks.yml
           if-no-files-found: error
           retention-days: 1
 
