@@ -5,7 +5,12 @@ import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ActorLease } from "./lease.js";
 import { applyMeaningfulEvent, computeIdleDelayMs, nextIdleBackoff } from "./policy.js";
-import { HeadlongStore, createInitialActorState, type HeadlongActorState } from "./store.js";
+import {
+  HeadlongStore,
+  createInitialActorState,
+  type HeadlongActorState,
+  type HeadlongOperationalEvent,
+} from "./store.js";
 
 const CONTROL_TOOLS = [
   "headlong_checkpoint",
@@ -13,7 +18,7 @@ const CONTROL_TOOLS = [
   "headlong_complete",
   "headlong_blocked",
 ] as const;
-const SAFE_UNATTENDED_TOOLS = new Set(["read", "grep", "find", "ls", "edit", "write"]);
+const UNSANDBOXED_HOST_TOOLS = new Set(["read", "grep", "find", "ls", "edit", "write"]);
 
 export type HeadlongExtensionOptions = {
   stateRoot?: string;
@@ -26,6 +31,7 @@ export type HeadlongExtensionOptions = {
   maxWakeMs?: number;
   leaseToken?: string;
   supervisorWakeId?: string;
+  allowUnsandboxedHostTools?: boolean;
   beforeWakeStateWrite?: () => Promise<void>;
   acquireLease?: typeof ActorLease.acquire;
 };
@@ -45,6 +51,11 @@ type HeadlongRuntime = {
   turnCount: number;
   previousTools?: string[];
 };
+
+type OperationalEventInput = Omit<
+  HeadlongOperationalEvent,
+  "version" | "sequence" | "actorId"
+>;
 
 function defaultStateRoot(): string {
   const base = process.env.XDG_STATE_HOME?.trim() || join(homedir(), ".local", "state");
@@ -88,8 +99,11 @@ export function registerHeadlongExtension(
     options.clearDeadlineTimer ?? ((timer: unknown) => clearTimeout(timer as NodeJS.Timeout));
   const stateRoot = options.stateRoot ?? process.env.PI_HEADLONG_STATE_ROOT ?? defaultStateRoot();
   const supervisorWakeId = options.supervisorWakeId ?? process.env.PI_HEADLONG_SUPERVISOR_WAKE_ID;
+  const allowUnsandboxedHostTools =
+    options.allowUnsandboxedHostTools ?? process.env.PI_HEADLONG_UNSANDBOXED_HOST === "1";
   const acquireLease = options.acquireLease ?? ActorLease.acquire;
   let wakeMutationTail: Promise<void> = Promise.resolve();
+  let scheduleWake!: (state: HeadlongActorState, generation?: number) => void;
 
   const serializeWakeMutation = async <T>(operation: () => Promise<T>): Promise<T> => {
     const previous = wakeMutationTail;
@@ -115,10 +129,12 @@ export function registerHeadlongExtension(
   const restrictUnattendedTools = () => {
     runtime.previousTools ??= pi.getActiveTools();
     const available = new Set(pi.getAllTools().map((tool) => tool.name));
-    const configured = (process.env.PI_HEADLONG_TOOLS ?? "read,grep,find,ls,edit,write")
-      .split(",")
-      .map((name) => name.trim())
-      .filter((name) => SAFE_UNATTENDED_TOOLS.has(name));
+    const configured = allowUnsandboxedHostTools
+      ? (process.env.PI_HEADLONG_TOOLS ?? "read,grep,find,ls,edit,write")
+          .split(",")
+          .map((name) => name.trim())
+          .filter((name) => UNSANDBOXED_HOST_TOOLS.has(name))
+      : [];
     pi.setActiveTools([...configured, ...CONTROL_TOOLS].filter((name) => available.has(name)));
   };
 
@@ -130,6 +146,36 @@ export function registerHeadlongExtension(
   const clearWakeDeadline = () => {
     if (runtime.deadlineTimer !== undefined) clearDeadlineTimer(runtime.deadlineTimer);
     runtime.deadlineTimer = undefined;
+  };
+
+  const appendOperationalEvent = async (
+    store: HeadlongStore,
+    event: OperationalEventInput,
+  ): Promise<void> => {
+    try {
+      await store.appendEvent(event);
+    } catch (error) {
+      runtime.context?.ui.notify(
+        `Headlong state committed, but operational logging is degraded: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        "warning",
+      );
+    }
+  };
+
+  const reconcileCommittedWake = (state: HeadlongActorState, alreadySettled: boolean): void => {
+    runtime.activeWakeId = undefined;
+    clearWakeTimer();
+    clearWakeDeadline();
+    if (alreadySettled) {
+      runtime.pendingTransition = undefined;
+      restoreTools();
+      if (state.status === "sleeping" && !supervisorWakeId) scheduleWake(state);
+      return;
+    }
+    runtime.pendingTransition = state;
+    pi.setActiveTools([]);
   };
 
   const failClosedActiveWake = async (
@@ -144,9 +190,12 @@ export function registerHeadlongExtension(
     if (!store || !lease || !context || runtime.activeWakeId !== wakeId) return;
     await lease.assertOwned();
     const state = await store.readState();
-    if (!state?.activeWakeId || state.activeWakeId !== wakeId || runtime.activeWakeId !== wakeId) {
+    if (!state || runtime.activeWakeId !== wakeId) return;
+    if (state.activeWakeId === null) {
+      reconcileCommittedWake(state, alreadySettled);
       return;
     }
+    if (state.activeWakeId !== wakeId) return;
     if (!alreadySettled) context.abort();
     const next: HeadlongActorState = {
       ...nextRevision(state, now()),
@@ -157,12 +206,8 @@ export function registerHeadlongExtension(
       consecutiveFailures: state.consecutiveFailures + 1,
     };
     await store.writeState(next);
-    await store.appendEvent({ at: next.updatedAt, type, wakeId, detail });
-    runtime.activeWakeId = undefined;
-    clearWakeTimer();
-    clearWakeDeadline();
-    if (alreadySettled) restoreTools();
-    else runtime.pendingTransition = next;
+    reconcileCommittedWake(next, alreadySettled);
+    await appendOperationalEvent(store, { at: next.updatedAt, type, wakeId, detail });
   };
 
   const armWakeDeadline = (generation: number, wakeId: string): void => {
@@ -222,7 +267,7 @@ export function registerHeadlongExtension(
       activeWakeId: wakeId,
       wakeStartedAt: startedAt,
     });
-    await store.appendEvent({
+    await appendOperationalEvent(store, {
       at: startedAt,
       type: "wake.dispatched",
       wakeId,
@@ -232,15 +277,16 @@ export function registerHeadlongExtension(
       const published = await store.readState();
       if (published?.activeWakeId === wakeId) {
         const invalidatedAt = new Date(now()).toISOString();
-        await store.writeState({
+        const invalidated: HeadlongActorState = {
           ...nextRevision(published, now()),
           status: "paused",
           wakeAt: null,
           activeWakeId: null,
           wakeStartedAt: null,
           consecutiveFailures: published.consecutiveFailures + 1,
-        });
-        await store.appendEvent({
+        };
+        await store.writeState(invalidated);
+        await appendOperationalEvent(store, {
           at: invalidatedAt,
           type: "wake.dispatch_invalidated",
           wakeId,
@@ -256,7 +302,7 @@ export function registerHeadlongExtension(
     pi.sendUserMessage(buildHeadlongWakePrompt(wakeId), { deliverAs: "followUp" });
   };
 
-  const scheduleWake = (state: HeadlongActorState, generation = runtime.generation): void => {
+  scheduleWake = (state: HeadlongActorState, generation = runtime.generation): void => {
     clearWakeTimer();
     if (!["running", "sleeping"].includes(state.status) || state.activeWakeId) return;
     const delay = Math.max(0, (state.wakeAt ? Date.parse(state.wakeAt) : now()) - now());
@@ -282,16 +328,17 @@ export function registerHeadlongExtension(
         }
         const current = await store.readState();
         if (!current) return;
-        await store.writeState({
+        const failed: HeadlongActorState = {
           ...nextRevision(current, now()),
           status: "paused",
           wakeAt: null,
           activeWakeId: null,
           wakeStartedAt: null,
           consecutiveFailures: current.consecutiveFailures + 1,
-        });
-        await store.appendEvent({
-          at: new Date(now()).toISOString(),
+        };
+        await store.writeState(failed);
+        await appendOperationalEvent(store, {
+          at: failed.updatedAt,
           type: "wake.dispatch_failed",
           detail: { message: error instanceof Error ? error.message : String(error) },
         });
@@ -357,17 +404,13 @@ export function registerHeadlongExtension(
       consecutiveFailures,
     };
     await store.writeState(next);
-    await store.appendEvent({
+    reconcileCommittedWake(next, false);
+    await appendOperationalEvent(store, {
       at: next.updatedAt,
       type: `wake.${kind}`,
       wakeId,
       detail,
     });
-    runtime.activeWakeId = undefined;
-    runtime.pendingTransition = next;
-    pi.setActiveTools([]);
-    clearWakeTimer();
-    clearWakeDeadline();
     return textResult(
       status === "sleeping"
         ? `Headlong ${kind} recorded; next wake ${wakeAt}.`
@@ -448,7 +491,7 @@ export function registerHeadlongExtension(
         }
         if (
           existing &&
-          (existing.status === "stopped" || existing.status === "completed") &&
+          ["stopped", "completed", "completed-unverified"].includes(existing.status) &&
           (action === "start" || action === "resume")
         ) {
           context.ui.notify(
@@ -473,7 +516,8 @@ export function registerHeadlongExtension(
             sessionId: runtime.sessionId ?? "",
             now: now(),
           });
-        const terminal = action === "pause" ? "paused" : action === "stop" ? "stopped" : "sleeping";
+        const terminal =
+          action === "pause" ? "paused" : action === "stop" ? "stopped" : "sleeping";
         const next = {
           ...nextRevision(initial, now()),
           status: terminal,
@@ -489,7 +533,7 @@ export function registerHeadlongExtension(
           Boolean(existing?.activeWakeId || runtime.pendingTransition);
         if (interruptsTurn && existing?.activeWakeId) context.abort();
         await store.writeState(next);
-        await store.appendEvent({
+        await appendOperationalEvent(store, {
           at: next.updatedAt,
           type: `actor.${action}`,
           detail: { sessionId: next.sessionId },
@@ -557,7 +601,7 @@ export function registerHeadlongExtension(
         activeWakeId: wakeId,
         wakeStartedAt: startedAt,
       });
-      await store.appendEvent({
+      await appendOperationalEvent(store, {
         at: startedAt,
         type: "wake.dispatched",
         wakeId,
@@ -567,15 +611,16 @@ export function registerHeadlongExtension(
         const published = await store.readState();
         if (published?.activeWakeId === wakeId) {
           const invalidatedAt = new Date(now()).toISOString();
-          await store.writeState({
+          const invalidated: HeadlongActorState = {
             ...nextRevision(published, now()),
             status: "paused",
             wakeAt: null,
             activeWakeId: null,
             wakeStartedAt: null,
             consecutiveFailures: published.consecutiveFailures + 1,
-          });
-          await store.appendEvent({
+          };
+          await store.writeState(invalidated);
+          await appendOperationalEvent(store, {
             at: invalidatedAt,
             type: "wake.dispatch_invalidated",
             wakeId,
@@ -701,7 +746,7 @@ export function registerHeadlongExtension(
           wakeAt: paused ? null : new Date(recoveredMs + retryDelayMs).toISOString(),
         };
         await store.writeState(safe);
-        await store.appendEvent({
+        await appendOperationalEvent(store, {
           at: recoveredAt,
           type: "wake.interrupted_recovered",
           wakeId: current.activeWakeId,
