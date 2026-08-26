@@ -85,7 +85,8 @@ escapes through those tools. Host filesystem tools require the explicit
 `--allow-unsandboxed-host-tools` operator flag or equivalent extension option. The CLI emits a
 prominent warning. Only after that opt-in may `PI_HEADLONG_TOOLS` choose a subset of
 `read,grep,find,ls,edit,write`; it still cannot add shell, network, publication, GitHub mutation,
-release, deployment, messaging, or arbitrary extension tools.
+release, deployment, messaging, or arbitrary extension tools. `PI_HEADLONG_TOOLS` alone cannot
+enable host filesystem access without the explicit unsandboxed-mode opt-in.
 
 Operators who enable host filesystem tools must supply the isolation boundary outside Headlong, such
 as a container with the workspace mounted read/write, required Pi session and PRO-LONG paths mounted
