@@ -18,6 +18,7 @@ pi-extensions/         # Pi agent extensions (TypeScript)
   webfetch.ts          # Generic web fetch tool
   rtk.ts               # RTK bash rewrite hook
   prolong.ts           # PRO-LONG active-branch programmatic memory
+  headlong/            # Persistent workspace actor and wake-after-exit supervisor
   fusion/              # Multi-model Fusion panel and judge command
 
 pi-subagents/          # Package-owned prompt overrides for selected pi-subagents roles
@@ -240,6 +241,97 @@ nonce recovery, and cleanup:
 pnpm verify:prolong -- --model provider/model --keep-session
 ```
 
+### Pi: Headlong persistent workspace actor (`pi-extensions/headlong/`)
+
+Headlong keeps one persistent actor per filesystem-canonical workspace while leaving Pi's session
+tree/JSONL as the canonical conversation trajectory. It stores versioned operational state and an
+operational JSONL event log under `$PI_HEADLONG_STATE_ROOT/<actor-id>/` (default:
+`$XDG_STATE_HOME/pi-headlong/<actor-id>/`, with `~/.local/state/pi-headlong` as the fallback).
+Directories are owner-private, state transitions use fsync plus atomic rename, and operational event
+append failures are reported as degraded health without undoing an already committed actor state.
+Event sequence allocation reads only a bounded log tail, and its cross-process append lock uses PID
+plus process-start identity rather than elapsed wall time alone.
+
+A process-identity-aware directory lease enforces one writer. The supervisor remains the primary
+owner while its RPC child is recorded as a same-token delegate. The parent must atomically reclaim a
+dead delegate before reading or mutating post-child state. Stale takeover requires an expired grace
+period and negative liveness evidence for both primary and delegate. Missing or malformed owner
+metadata fails closed for operator recovery. Release first moves the owned lease to a unique
+tombstone, revalidates the moved token, and only then deletes it, so an old process cannot remove a
+replacement owner's lease.
+
+Control the actor inside Pi:
+
+```text
+/headlong start    Create the actor and wake immediately
+/headlong resume   Resume a paused or blocked actor
+/headlong pause    Reversible kill switch
+/headlong status   Show status, wake time, failures, and exact state path
+/headlong stop     Terminal kill switch
+```
+
+Each unattended wake must call exactly one of `headlong_checkpoint`, `headlong_sleep`,
+`headlong_complete`, or `headlong_blocked`. Settling without a transition, exceeding a turn budget,
+tripping the independent wall-clock watchdog, or losing the lease fails closed. Meaningful
+interactive input becomes one serialized immediate wake and resets idle backoff. A `stopped` or
+cleanly `completed` actor is terminal. A durable completion followed by an unclean RPC stream or
+nonzero child exit becomes `completed-unverified`, which preserves the finished work but requires
+operator review rather than being reported as ordinary success.
+
+Once canonical state commits a transition, runtime wake state, timers, and tools are reconciled even
+if the operational event append fails. Tools remain disabled until that turn settles; only then is
+the interactive tool set restored and any next wake scheduled. Pause, stop, and budget watchdogs
+abort the turn and retain unattended restrictions through settlement cleanup.
+
+The extension can self-wake **only while its Pi host remains alive**. For wake-after-exit, run the
+external supervisor from an installed package:
+
+```bash
+pi-headlong --workspace /absolute/path/to/workspace
+```
+
+From this checkout, the equivalent is:
+
+```bash
+pnpm exec tsx pi-extensions/headlong/cli.ts --workspace /absolute/path/to/workspace
+```
+
+Use `--once` for one due-wake attempt, `--poll-seconds N` for loop polling, and
+`--timeout-seconds N` for the per-wake host budget. Stop the supervisor with `SIGINT` or `SIGTERM`
+before manual recovery. It resumes the exact stored Pi session, explicitly loads Headlong and
+PRO-LONG, preserves repository context files while excluding arbitrary project extensions, and
+accepts a wake only after a matching durable transition, RPC settlement, a complete stream, and a
+clean zero-status exit. One-shot failures, missing state, exhausted loops, and unverified terminal
+outcomes return a nonzero process exit status. Wake-after-exit supervision requires POSIX
+process-group containment and therefore fails closed before spawning an RPC child on Windows.
+
+**Headlong does not provide a filesystem sandbox.** The default unattended tool set contains only
+the four Headlong control tools, so absolute-path access, `..` traversal, home expansion, `/proc`
+access, and symlink escapes are unavailable through model-facing filesystem tools. To grant host
+filesystem tools, the operator must pass `--allow-unsandboxed-host-tools` (or set the equivalent
+extension option). The supervisor prints a prominent warning and forwards the opt-in to the child.
+`PI_HEADLONG_TOOLS` can then select only from `read,grep,find,ls,edit,write`; it still cannot add
+`bash`, networking, messaging, release, deployment, or arbitrary extension tools.
+
+Use the unsandboxed flag only when the entire supervisor already runs inside an operator-controlled
+container or equivalent boundary. Mount the workspace read/write, mount only required session and
+PRO-LONG data read-only, keep Headlong's state inaccessible to model-facing tools, and use dedicated
+credentials. Without that external boundary, the allowed filesystem tools can access absolute paths
+and follow filesystem links according to Pi's normal host semantics.
+
+If state, lease metadata, or an ownership/symlink boundary is unsafe, Headlong refuses to guess.
+Stop the supervisor, preserve or move aside the actor directory reported by `/headlong status`,
+restart Pi, and use `/headlong start` for fresh state against the current canonical session. See
+[`ADR-0010`](docs/adr/0010-headlong-persistent-workspace-actor.md) for invariants and trust
+boundaries.
+
+Verification:
+
+```bash
+pnpm test:headlong
+pnpm verify:headlong
+```
+
 ### Pi: RTK (`pi-extensions/rtk.ts`)
 
 Intercepts `bash` tool calls and delegates command rewriting to `rtk rewrite <command>`. Only rewrites when RTK returns a different non-empty command. Supports `PI_RTK_BIN` or Pi's `--rtk-bin` flag for binary overrides.
@@ -281,6 +373,8 @@ pnpm format        # Format with oxfmt
 pnpm test          # Run tests with vitest
 pnpm test:prolong  # Focused PRO-LONG storage and extension tests
 pnpm verify:prolong -- --benchmark-only # Model-free active-branch benchmark
+pnpm test:headlong # Focused Headlong state, lease, extension, and supervisor tests
+pnpm verify:headlong # Real pinned-Pi 0.84.2 model-free integration proof
 pnpm test:rtk      # Fast RTK extension regression tests
 pnpm test:rtk:e2e  # Opt-in real RTK integration tests
 pnpm verify:rtk    # Standalone Pi CLI verification using --session and --extension
