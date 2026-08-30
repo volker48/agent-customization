@@ -176,6 +176,46 @@ class AnalyzerTests(unittest.TestCase):
 
         self.assertEqual([], report["findings"])
 
+    def test_content_embedded_duplicate_json_argument_keys_are_skipped_without_false_repeat(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        content = (
+            '{"tool_calls":['
+            '{"name":"read_file","arguments":{"path":"private.txt","path":"other.txt"}},'
+            '{"name":"read_file","arguments":{"path":"other.txt"}},'
+            '{"name":"read_file","arguments":{"path":"other.txt"}}'
+            ']}'
+        )
+
+        report = analyze(
+            FakeStore(
+                sessions=[{"id": "s-1", "source": "telegram"}],
+                messages=[
+                    {"session_id": "s-1", "role": "user", "active": 1},
+                    {"session_id": "s-1", "role": "assistant", "active": 1, "content": content},
+                ],
+            )
+        )
+
+        self.assertEqual([], report["findings"])
+
+    def test_deeply_nested_content_embedded_tool_calls_fail_soft(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        content = '{"tool_calls":[],"nested":' + '[' * 1_500 + 'null' + ']' * 1_500 + '}'
+
+        report = analyze(
+            FakeStore(
+                sessions=[{"id": "s-1", "source": "telegram"}],
+                messages=[
+                    {"session_id": "s-1", "role": "user", "active": 1},
+                    {"session_id": "s-1", "role": "assistant", "active": 1, "content": content},
+                ],
+            )
+        )
+
+        self.assertEqual([], report["findings"])
+
     def test_deeply_nested_tool_arguments_fail_soft(self):
         from trajectory_analyzer.analyzer import _tool_call_fingerprints
 

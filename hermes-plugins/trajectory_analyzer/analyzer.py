@@ -163,8 +163,8 @@ def _tool_calls(row: Any):
     content = _value(row, "content")
     if isinstance(content, str):
         try:
-            content = json.loads(content)
-        except json.JSONDecodeError:
+            content = json.loads(content, object_pairs_hook=_unique_object)
+        except (json.JSONDecodeError, RecursionError, TypeError, ValueError):
             return ()
     if isinstance(content, dict):
         return content.get("tool_calls", ())
