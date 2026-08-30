@@ -155,6 +155,44 @@ class AnalyzerTests(unittest.TestCase):
 
         self.assertEqual((), fingerprints)
 
+    def test_duplicate_json_argument_keys_are_skipped_without_false_repeat(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        calls = [
+            {"name": "read_file", "arguments": '{"path":"private.txt","path":"other.txt"}'},
+            {"name": "read_file", "arguments": {"path": "other.txt"}},
+            {"name": "read_file", "arguments": {"path": "other.txt"}},
+        ]
+
+        report = analyze(
+            FakeStore(
+                sessions=[{"id": "s-1", "source": "telegram"}],
+                messages=[
+                    {"session_id": "s-1", "role": "user", "active": 1},
+                    {"session_id": "s-1", "role": "assistant", "active": 1, "tool_calls": calls},
+                ],
+            )
+        )
+
+        self.assertEqual([], report["findings"])
+
+    def test_deeply_nested_tool_arguments_fail_soft(self):
+        from trajectory_analyzer.analyzer import _tool_call_fingerprints
+
+        deeply_nested_json = '{"nested":' * 1_000 + 'null' + '}' * 1_000
+        deeply_nested_dict = None
+        for _ in range(1_000):
+            deeply_nested_dict = {"nested": deeply_nested_dict}
+
+        fingerprints = _tool_call_fingerprints(
+            [
+                {"name": "read_file", "arguments": deeply_nested_json},
+                {"name": "read_file", "arguments": deeply_nested_dict},
+            ]
+        )
+
+        self.assertEqual((), fingerprints)
+
     def test_empty_store_returns_the_versioned_zero_report(self):
         from trajectory_analyzer.analyzer import analyze
 

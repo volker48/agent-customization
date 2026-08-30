@@ -132,7 +132,7 @@ def _tool_call_fingerprints(tool_calls: Any) -> tuple[tuple[str, str], ...]:
             canonical = json.dumps(
                 arguments, sort_keys=True, separators=(",", ":"), allow_nan=False
             )
-        except (TypeError, ValueError):
+        except (RecursionError, TypeError, ValueError):
             continue
         fingerprints.append((name, sha256(canonical.encode()).hexdigest()[:16]))
     return tuple(fingerprints)
@@ -141,10 +141,19 @@ def _tool_call_fingerprints(tool_calls: Any) -> tuple[tuple[str, str], ...]:
 def _canonical_arguments(arguments: Any):
     if isinstance(arguments, str):
         try:
-            arguments = json.loads(arguments)
-        except json.JSONDecodeError:
+            arguments = json.loads(arguments, object_pairs_hook=_unique_object)
+        except (json.JSONDecodeError, RecursionError, ValueError):
             return None
     return arguments if isinstance(arguments, dict) else None
+
+
+def _unique_object(pairs: list[tuple[Any, Any]]) -> dict[Any, Any]:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
 
 
 def _tool_calls(row: Any):
