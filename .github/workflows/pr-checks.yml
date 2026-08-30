@@ -57,6 +57,21 @@ jobs:
       - name: Run unit tests
         run: pnpm test:unit
 
+  trajectory-analyzer:
+    name: Trajectory analyzer Python tests
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Run trajectory analyzer tests
+        run: >-
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover
+          -s hermes-plugins/trajectory_analyzer/tests -p 'test_*.py' -v
+
   swift-remote-control:
     name: Swift checks and iOS simulator build
     runs-on: macos-26
