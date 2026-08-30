@@ -73,7 +73,7 @@ class AnalyzerTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             thresholds.assistant_steps_per_turn = 9
 
-    def test_large_initial_prompt_reports_bytes_estimate_and_cache_caveat(self):
+    def test_large_initial_prompt_reports_token_estimate_method_and_cache_context_caveat(self):
         from trajectory_analyzer.analyzer import analyze
 
         prompt = "x" * 100_001
@@ -104,9 +104,15 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual("large-prompt", finding["session_id"])
         self.assertEqual(100_001, finding["system_prompt_bytes"])
         self.assertEqual(2, finding["api_calls"])
-        self.assertEqual(200_002, finding["estimated_repeated_workload_bytes"])
-        self.assertEqual("estimated_exposure", finding["impact"]["kind"])
+        self.assertEqual(50_002, finding["estimated_repeated_workload_tokens"])
+        self.assertEqual(
+            "ceil(system_prompt_utf8_bytes / 4) * api_call_count",
+            finding["workload_estimate_method"],
+        )
+        self.assertEqual("measured_exposure", finding["impact"]["kind"])
         self.assertIn("cache", finding["impact"]["caveat"])
+        self.assertIn("context", finding["impact"]["caveat"])
+        self.assertNotIn("estimated_repeated_workload_bytes", finding)
         serialized = str(report)
         self.assertNotIn(prompt, serialized)
         self.assertNotIn("Private title", serialized)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+import math
 from typing import Any, Protocol, Sequence
 
 
@@ -253,10 +254,17 @@ def _large_initial_prompt_findings(
                     "session_id": session.id,
                     "system_prompt_bytes": prompt_bytes,
                     "api_calls": session.api_calls,
-                    "estimated_repeated_workload_bytes": prompt_bytes * session.api_calls,
+                    "estimated_repeated_workload_tokens": math.ceil(prompt_bytes / 4)
+                    * session.api_calls,
+                    "workload_estimate_method": (
+                        "ceil(system_prompt_utf8_bytes / 4) * api_call_count"
+                    ),
                     "impact": {
-                        "kind": "estimated_exposure",
-                        "caveat": "Actual savings depend on provider cache behavior; this is not automatic savings.",
+                        "kind": "measured_exposure",
+                        "caveat": (
+                            "Estimated token workload uses UTF-8 bytes divided by four per API "
+                            "call; cache and context behavior may reduce repeated provider exposure."
+                        ),
                     },
                 }
             )

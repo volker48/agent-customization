@@ -43,9 +43,15 @@ def _print_report(report):
             for field in _DISPLAY_FIELDS
             if field in finding
         )
+        impact = finding["impact"]
+        impact_details = " ".join(
+            f"impact_{field}={impact[field]}"
+            for field in ("kind", "caveat")
+            if field in impact
+        )
         print(
             f"{finding['code']} severity={finding['severity']} "
-            f"session_id={finding['session_id']} {details}".rstrip()
+            f"session_id={finding['session_id']} {details} {impact_details}".rstrip()
         )
     print(f"Methodology: {METHODOLOGY_WARNING}")
 
@@ -55,7 +61,8 @@ _DISPLAY_FIELDS = (
     "assistant_steps",
     "system_prompt_bytes",
     "api_calls",
-    "estimated_repeated_workload_bytes",
+    "estimated_repeated_workload_tokens",
+    "workload_estimate_method",
     "relevant_workload_tokens",
     "observed_cache_reuse_ratio",
     "parent_session_id",

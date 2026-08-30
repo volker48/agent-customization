@@ -89,6 +89,9 @@ class CommandRegistrationTests(unittest.TestCase):
         self.assertEqual("large_initial_prompt", report["findings"][0]["code"])
         self.assertIn("large_initial_prompt", terminal)
         self.assertIn("system_prompt_bytes=210000", terminal)
+        self.assertIn("estimated_repeated_workload_tokens=105000", terminal)
+        self.assertIn("cache", terminal)
+        self.assertIn("context", terminal)
         self.assertNotIn("private system prompt", terminal)
 
     def test_analyze_rejects_an_extreme_positive_day_count(self):
