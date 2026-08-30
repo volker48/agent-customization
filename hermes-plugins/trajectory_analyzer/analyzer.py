@@ -273,7 +273,15 @@ def _large_tool_payload_finding(candidate: dict[str, Any]) -> dict[str, Any]:
     return {
         "code": "large_tool_payload",
         "severity": "high",
-        **candidate,
+        "session_id": candidate["session_id"],
+        "turn_index": candidate["turn_index"],
+        "turn_user_message_id": candidate["turn_user_message_id"],
+        "tool_message_id": candidate["tool_message_id"],
+        "tool_name": candidate["tool_name"],
+        "observed": {
+            "payload_bytes": candidate["payload_bytes"],
+            "later_assistant_steps": candidate["later_assistant_steps"],
+        },
         "impact": {
             "kind": "estimated_avoidable_workload",
             "tokens": estimated_tokens,

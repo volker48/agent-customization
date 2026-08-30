@@ -102,12 +102,35 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(1, finding["turn_index"])
         self.assertEqual("tool-1", finding["tool_message_id"])
         self.assertEqual("web_extract", finding["tool_name"])
-        self.assertEqual(40_001, finding["payload_bytes"])
-        self.assertEqual(2, finding["later_assistant_steps"])
+        self.assertEqual(40_001, finding["observed"]["payload_bytes"])
+        self.assertEqual(2, finding["observed"]["later_assistant_steps"])
         self.assertEqual("estimated_avoidable_workload", finding["impact"]["kind"])
         self.assertEqual(20_002, finding["impact"]["tokens"])
         self.assertEqual(20_002, report["summary"]["estimated_avoidable_tokens"])
         self.assertNotIn("PAYLOAD_SENTINEL", str(report))
+
+    def test_large_tool_payload_nests_observed_evidence_without_flat_duplicates(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        report = analyze(
+            FakeStore(
+                sessions=[{"id": "session-1", "source": "telegram"}],
+                messages=[
+                    {"id": "user-1", "session_id": "session-1", "role": "user", "active": 1},
+                    {"id": "tool-1", "session_id": "session-1", "role": "tool", "tool_name": "web_extract", "content": "x" * 40_001, "active": 1},
+                    {"session_id": "session-1", "role": "assistant", "active": 1},
+                    {"session_id": "session-1", "role": "assistant", "active": 1},
+                ],
+            )
+        )
+
+        finding = report["findings"][0]
+        self.assertEqual(
+            {"payload_bytes": 40_001, "later_assistant_steps": 2},
+            finding["observed"],
+        )
+        self.assertNotIn("payload_bytes", finding)
+        self.assertNotIn("later_assistant_steps", finding)
 
     def test_tool_payload_at_the_40_000_byte_threshold_is_silent(self):
         from trajectory_analyzer.analyzer import analyze
@@ -197,7 +220,7 @@ class AnalyzerTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(40_002, report["findings"][0]["payload_bytes"])
+        self.assertEqual(40_002, report["findings"][0]["observed"]["payload_bytes"])
         self.assertEqual(20_002, report["findings"][0]["impact"]["tokens"])
 
     def test_numeric_turn_user_and_tool_message_ids_are_retained_as_evidence(self):
