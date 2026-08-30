@@ -41,6 +41,28 @@ def _print_report(report):
         print(
             f"{finding['code']} severity={finding['severity']} "
             f"session_id={finding['session_id']} turn_index={finding['turn_index']} "
-            f"assistant_steps={finding['assistant_steps']}"
+            f"{_finding_measurement(finding)}"
         )
+        recommendation = _recommendation(finding["code"])
+        if recommendation:
+            print(f"Recommendation: {recommendation}")
     print(f"Methodology: {METHODOLOGY_WARNING}")
+
+
+def _finding_measurement(finding):
+    if finding["code"] == "high_assistant_steps_per_turn":
+        return f"assistant_steps={finding['assistant_steps']}"
+    if finding["code"] == "high_tool_fanout_per_turn":
+        return f"tool_calls={finding['tool_calls']}"
+    return (
+        f"tool_name={finding['tool_name']} fingerprint={finding['fingerprint']} "
+        f"repeat_count={finding['repeat_count']}"
+    )
+
+
+def _recommendation(code):
+    if code == "high_tool_fanout_per_turn":
+        return "Review batching, caching, or execute_code for safe aggregation."
+    if code == "repeated_exact_tool_call":
+        return "Review caching or execute_code, while preserving legitimate retries."
+    return None
