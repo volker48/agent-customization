@@ -42,6 +42,7 @@ def _print_report(report):
             print(
                 f"{finding['code']} severity={finding['severity']} "
                 f"session_id={finding['session_id']} turn_index={finding['turn_index']} "
+                f"turn_user_message_id={finding['turn_user_message_id']} "
                 f"tool_message_id={finding['tool_message_id']} tool_name={finding['tool_name']} "
                 f"payload_bytes={finding['payload_bytes']} "
                 f"later_assistant_steps={finding['later_assistant_steps']} "

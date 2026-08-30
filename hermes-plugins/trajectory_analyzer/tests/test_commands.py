@@ -78,8 +78,8 @@ class CommandRegistrationTests(unittest.TestCase):
         store = FakeStore(
             sessions=[{"id": "session-1", "source": "telegram"}],
             messages=[
-                {"session_id": "session-1", "role": "user", "active": 1},
-                {"id": "tool-1", "session_id": "session-1", "role": "tool", "tool_name": "web_extract", "content": "PAYLOAD_SENTINEL" + "x" * (40_001 - len("PAYLOAD_SENTINEL")), "active": 1},
+                {"id": 13, "session_id": "session-1", "role": "user", "active": 1},
+                {"id": 17, "session_id": "session-1", "role": "tool", "tool_name": "web_extract", "content": "PAYLOAD_SENTINEL" + "x" * (40_001 - len("PAYLOAD_SENTINEL")), "active": 1},
                 {"session_id": "session-1", "role": "assistant", "active": 1},
                 {"session_id": "session-1", "role": "assistant", "active": 1},
             ],
@@ -92,7 +92,8 @@ class CommandRegistrationTests(unittest.TestCase):
 
         terminal = output.getvalue()
         self.assertEqual("large_tool_payload", report["findings"][0]["code"])
-        self.assertIn("tool_message_id=tool-1", terminal)
+        self.assertIn("turn_user_message_id=13", terminal)
+        self.assertIn("tool_message_id=17", terminal)
         self.assertIn("tool_name=web_extract", terminal)
         self.assertIn("payload_bytes=40001", terminal)
         self.assertIn("later_assistant_steps=2", terminal)

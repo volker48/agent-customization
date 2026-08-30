@@ -53,6 +53,7 @@ class MessageRecord:
 class TurnRecord:
     session_id: str
     turn_index: int
+    user_message_id: str | int | None
     assistant_steps: int
 
 
@@ -140,7 +141,7 @@ def analyze(
         for turn in turns
         if turn.assistant_steps > thresholds.assistant_steps_per_turn
     ]
-    findings.extend(_large_tool_payload_findings(messages, thresholds))
+    findings.extend(_large_tool_payload_findings(messages, turns, thresholds))
     return {
         "schema_version": 1,
         "days": days,
@@ -207,19 +208,31 @@ def _turns(messages: Sequence[MessageRecord], session_ids: Sequence[str]) -> tup
     for message in messages:
         if message.role == "user":
             counts[message.session_id] += 1
-            turns.append(TurnRecord(message.session_id, counts[message.session_id], 0))
+            turns.append(
+                TurnRecord(message.session_id, counts[message.session_id], message.id, 0)
+            )
             active[message.session_id] = len(turns) - 1
         elif message.role == "assistant" and active[message.session_id] is not None:
             index = active[message.session_id]
             assert index is not None
             turn = turns[index]
-            turns[index] = TurnRecord(turn.session_id, turn.turn_index, turn.assistant_steps + 1)
+            turns[index] = TurnRecord(
+                turn.session_id,
+                turn.turn_index,
+                turn.user_message_id,
+                turn.assistant_steps + 1,
+            )
     return tuple(turns)
 
 
 def _large_tool_payload_findings(
-    messages: Sequence[MessageRecord], thresholds: AnalyzerThresholds
+    messages: Sequence[MessageRecord],
+    turns: Sequence[TurnRecord],
+    thresholds: AnalyzerThresholds,
 ) -> list[dict[str, Any]]:
+    turn_user_message_ids = {
+        (turn.session_id, turn.turn_index): turn.user_message_id for turn in turns
+    }
     turn_indices: dict[str, int] = {}
     candidates: list[dict[str, Any]] = []
     for message in messages:
@@ -232,6 +245,9 @@ def _large_tool_payload_findings(
                     {
                         "session_id": message.session_id,
                         "turn_index": turn_indices[message.session_id],
+                        "turn_user_message_id": turn_user_message_ids[
+                            (message.session_id, turn_indices[message.session_id])
+                        ],
                         "tool_message_id": message.id,
                         "tool_name": message.tool_name,
                         "payload_bytes": payload_bytes,

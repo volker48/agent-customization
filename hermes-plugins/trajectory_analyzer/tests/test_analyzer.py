@@ -200,14 +200,14 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(40_002, report["findings"][0]["payload_bytes"])
         self.assertEqual(20_002, report["findings"][0]["impact"]["tokens"])
 
-    def test_numeric_tool_message_id_is_retained_as_evidence(self):
+    def test_numeric_turn_user_and_tool_message_ids_are_retained_as_evidence(self):
         from trajectory_analyzer.analyzer import analyze
 
         report = analyze(
             FakeStore(
                 sessions=[{"id": "session-1", "source": "telegram"}],
                 messages=[
-                    {"session_id": "session-1", "role": "user", "active": 1},
+                    {"id": 13, "session_id": "session-1", "role": "user", "active": 1},
                     {"id": 17, "session_id": "session-1", "role": "tool", "tool_name": "web_extract", "content": "x" * 40_001, "active": 1},
                     {"session_id": "session-1", "role": "assistant", "active": 1},
                     {"session_id": "session-1", "role": "assistant", "active": 1},
@@ -215,7 +215,9 @@ class AnalyzerTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(17, report["findings"][0]["tool_message_id"])
+        finding = report["findings"][0]
+        self.assertEqual(13, finding["turn_user_message_id"])
+        self.assertEqual(17, finding["tool_message_id"])
 
     def test_eight_assistant_steps_is_silent(self):
         from trajectory_analyzer.analyzer import analyze
