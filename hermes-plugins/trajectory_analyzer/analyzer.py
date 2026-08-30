@@ -102,6 +102,18 @@ def open_runtime_store() -> RuntimeStore:
     return RuntimeStore(SessionDB(read_only=True))
 
 
+def validate_days(days: int, now: datetime | None = None) -> int:
+    """Return a lookback that can be subtracted safely from ``now``."""
+    reference = now or datetime.now(timezone.utc)
+    maximum_days = (reference.date() - datetime.min.date()).days
+    is_integer = isinstance(days, int) and not isinstance(days, bool)
+    if not is_integer or not 1 <= days <= maximum_days:
+        raise ValueError(
+            f"days must be between 1 and {maximum_days} for the supplied timestamp"
+        )
+    return days
+
+
 def analyze(
     store: TrajectoryStore,
     days: int = 30,
@@ -110,9 +122,12 @@ def analyze(
     thresholds: AnalyzerThresholds = DEFAULT_THRESHOLDS,
 ):
     generated_at = now or datetime.now(timezone.utc)
-    sessions = _sessions(store.fetch_sessions(days, source, generated_at))
+    validated_days = validate_days(days, generated_at)
+    sessions = _sessions(store.fetch_sessions(validated_days, source, generated_at))
     session_ids = tuple(session.id for session in sessions)
-    messages = _messages(store.fetch_active_messages(days, source, generated_at), set(session_ids))
+    messages = _messages(
+        store.fetch_active_messages(validated_days, source, generated_at), set(session_ids)
+    )
     turns = _turns(messages, session_ids)
     findings = [
         _finding(turn)

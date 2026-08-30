@@ -72,6 +72,17 @@ class CommandRegistrationTests(unittest.TestCase):
         self.assertNotIn("private prompt", json.dumps(report))
         self.assertNotIn("secret response", json.dumps(report))
 
+    def test_analyze_rejects_an_extreme_positive_day_count(self):
+        from trajectory_analyzer.cli import setup_cli
+
+        parser = argparse.ArgumentParser()
+        setup_cli(parser)
+
+        with self.assertRaises(SystemExit) as raised:
+            parser.parse_args(["analyze", "--days", str(10**100)])
+
+        self.assertEqual(2, raised.exception.code)
+
     def test_analyze_rejects_non_positive_days(self):
         from trajectory_analyzer.cli import setup_cli
 

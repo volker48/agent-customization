@@ -1,13 +1,13 @@
 import argparse
 
-from .analyzer import METHODOLOGY_WARNING, analyze, open_runtime_store
+from .analyzer import METHODOLOGY_WARNING, analyze, open_runtime_store, validate_days
 
 
 def _positive_days(value):
-    days = int(value)
-    if days < 1:
-        raise argparse.ArgumentTypeError("--days must be at least 1")
-    return days
+    try:
+        return validate_days(int(value))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
 
 
 def setup_cli(subparser):

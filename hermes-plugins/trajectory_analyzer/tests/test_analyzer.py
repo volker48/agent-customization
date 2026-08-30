@@ -43,6 +43,20 @@ class AnalyzerTests(unittest.TestCase):
             report,
         )
 
+    def test_analyze_rejects_invalid_windows_before_accessing_the_store(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        generated_at = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
+        for days in (0, -1, 10**100):
+            with self.subTest(days=days):
+                store = FakeStore()
+
+                with self.assertRaisesRegex(ValueError, "days must be between 1 and"):
+                    analyze(store, days=days, now=generated_at)
+
+                self.assertEqual([], store.session_calls)
+                self.assertEqual([], store.message_calls)
+
     def test_threshold_defaults_are_explicit_and_immutable(self):
         from trajectory_analyzer.analyzer import AnalyzerThresholds
 
