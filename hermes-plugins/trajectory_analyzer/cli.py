@@ -38,9 +38,20 @@ def _print_report(report):
         f"turns={report['turns_analyzed']}"
     )
     for finding in report["findings"]:
-        print(
-            f"{finding['code']} severity={finding['severity']} "
-            f"session_id={finding['session_id']} turn_index={finding['turn_index']} "
-            f"assistant_steps={finding['assistant_steps']}"
-        )
+        if finding["code"] == "large_tool_payload":
+            print(
+                f"{finding['code']} severity={finding['severity']} "
+                f"session_id={finding['session_id']} turn_index={finding['turn_index']} "
+                f"tool_message_id={finding['tool_message_id']} tool_name={finding['tool_name']} "
+                f"payload_bytes={finding['payload_bytes']} "
+                f"later_assistant_steps={finding['later_assistant_steps']} "
+                f"impact={finding['impact']['kind']} "
+                f"estimated_tokens={finding['impact']['tokens']}"
+            )
+        else:
+            print(
+                f"{finding['code']} severity={finding['severity']} "
+                f"session_id={finding['session_id']} turn_index={finding['turn_index']} "
+                f"assistant_steps={finding['assistant_steps']}"
+            )
     print(f"Methodology: {METHODOLOGY_WARNING}")

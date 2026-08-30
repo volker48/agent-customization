@@ -73,6 +73,150 @@ class AnalyzerTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             thresholds.assistant_steps_per_turn = 9
 
+    def test_retained_large_tool_payload_reports_observed_bytes_and_estimated_workload(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        report = analyze(
+            FakeStore(
+                sessions=[{"id": "session-1", "source": "telegram"}],
+                messages=[
+                    {"id": "user-1", "session_id": "session-1", "role": "user", "active": 1},
+                    {
+                        "id": "tool-1",
+                        "session_id": "session-1",
+                        "role": "tool",
+                        "tool_name": "web_extract",
+                        "content": "PAYLOAD_SENTINEL" + "x" * (40_001 - len("PAYLOAD_SENTINEL")),
+                        "active": 1,
+                    },
+                    {"id": "assistant-1", "session_id": "session-1", "role": "assistant", "active": 1},
+                    {"id": "assistant-2", "session_id": "session-1", "role": "assistant", "active": 1},
+                ],
+            )
+        )
+
+        self.assertEqual(1, len(report["findings"]))
+        finding = report["findings"][0]
+        self.assertEqual("large_tool_payload", finding["code"])
+        self.assertEqual("session-1", finding["session_id"])
+        self.assertEqual(1, finding["turn_index"])
+        self.assertEqual("tool-1", finding["tool_message_id"])
+        self.assertEqual("web_extract", finding["tool_name"])
+        self.assertEqual(40_001, finding["payload_bytes"])
+        self.assertEqual(2, finding["later_assistant_steps"])
+        self.assertEqual("estimated_avoidable_workload", finding["impact"]["kind"])
+        self.assertEqual(20_002, finding["impact"]["tokens"])
+        self.assertEqual(20_002, report["summary"]["estimated_avoidable_tokens"])
+        self.assertNotIn("PAYLOAD_SENTINEL", str(report))
+
+    def test_tool_payload_at_the_40_000_byte_threshold_is_silent(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        report = analyze(
+            FakeStore(
+                sessions=[{"id": "session-1", "source": "telegram"}],
+                messages=[
+                    {"session_id": "session-1", "role": "user", "active": 1},
+                    {
+                        "id": "tool-1",
+                        "session_id": "session-1",
+                        "role": "tool",
+                        "tool_name": "web_extract",
+                        "content": "x" * 40_000,
+                        "active": 1,
+                    },
+                    {"session_id": "session-1", "role": "assistant", "active": 1},
+                    {"session_id": "session-1", "role": "assistant", "active": 1},
+                ],
+            )
+        )
+
+        self.assertEqual([], report["findings"])
+
+    def test_large_tool_payload_with_one_later_assistant_step_is_silent(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        report = analyze(
+            FakeStore(
+                sessions=[{"id": "session-1", "source": "telegram"}],
+                messages=[
+                    {"session_id": "session-1", "role": "user", "active": 1},
+                    {"id": "tool-1", "session_id": "session-1", "role": "tool", "tool_name": "web_extract", "content": "x" * 40_001, "active": 1},
+                    {"session_id": "session-1", "role": "assistant", "active": 1},
+                ],
+            )
+        )
+
+        self.assertEqual([], report["findings"])
+
+    def test_large_tool_payload_at_turn_end_is_silent(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        report = analyze(
+            FakeStore(
+                sessions=[{"id": "session-1", "source": "telegram"}],
+                messages=[
+                    {"session_id": "session-1", "role": "user", "active": 1},
+                    {"id": "tool-1", "session_id": "session-1", "role": "tool", "tool_name": "web_extract", "content": "x" * 40_001, "active": 1},
+                ],
+            )
+        )
+
+        self.assertEqual([], report["findings"])
+
+    def test_assistant_steps_in_the_next_user_turn_are_not_counted(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        report = analyze(
+            FakeStore(
+                sessions=[{"id": "session-1", "source": "telegram"}],
+                messages=[
+                    {"session_id": "session-1", "role": "user", "active": 1},
+                    {"id": "tool-1", "session_id": "session-1", "role": "tool", "tool_name": "web_extract", "content": "x" * 40_001, "active": 1},
+                    {"session_id": "session-1", "role": "user", "active": 1},
+                    {"session_id": "session-1", "role": "assistant", "active": 1},
+                    {"session_id": "session-1", "role": "assistant", "active": 1},
+                ],
+            )
+        )
+
+        self.assertEqual([], report["findings"])
+
+    def test_multibyte_tool_content_is_measured_in_utf8_bytes(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        report = analyze(
+            FakeStore(
+                sessions=[{"id": "session-1", "source": "telegram"}],
+                messages=[
+                    {"session_id": "session-1", "role": "user", "active": 1},
+                    {"id": "tool-1", "session_id": "session-1", "role": "tool", "tool_name": "web_extract", "content": "é" * 20_001, "active": 1},
+                    {"session_id": "session-1", "role": "assistant", "active": 1},
+                    {"session_id": "session-1", "role": "assistant", "active": 1},
+                ],
+            )
+        )
+
+        self.assertEqual(40_002, report["findings"][0]["payload_bytes"])
+        self.assertEqual(20_002, report["findings"][0]["impact"]["tokens"])
+
+    def test_numeric_tool_message_id_is_retained_as_evidence(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        report = analyze(
+            FakeStore(
+                sessions=[{"id": "session-1", "source": "telegram"}],
+                messages=[
+                    {"session_id": "session-1", "role": "user", "active": 1},
+                    {"id": 17, "session_id": "session-1", "role": "tool", "tool_name": "web_extract", "content": "x" * 40_001, "active": 1},
+                    {"session_id": "session-1", "role": "assistant", "active": 1},
+                    {"session_id": "session-1", "role": "assistant", "active": 1},
+                ],
+            )
+        )
+
+        self.assertEqual(17, report["findings"][0]["tool_message_id"])
+
     def test_eight_assistant_steps_is_silent(self):
         from trajectory_analyzer.analyzer import analyze
 
@@ -121,18 +265,18 @@ class AnalyzerTests(unittest.TestCase):
             CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL);
             CREATE TABLE messages (
                 id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, active INTEGER,
-                timestamp REAL NOT NULL, content TEXT
+                timestamp REAL NOT NULL, content TEXT, tool_name TEXT
             );
             INSERT INTO sessions VALUES ('telegram-session', 'telegram', 1788048000.0);
             INSERT INTO sessions VALUES ('other-session', 'discord', 1788048000.0);
             INSERT INTO messages VALUES
-                (1, 'telegram-session', 'user', 1, 1788048001.0, 'private prompt');
+                (1, 'telegram-session', 'user', 1, 1788048001.0, 'private prompt', NULL);
             INSERT INTO messages VALUES
-                (2, 'telegram-session', 'assistant', 1, 1788048002.0, 'private response');
+                (2, 'telegram-session', 'assistant', 1, 1788048002.0, 'private response', NULL);
             INSERT INTO messages VALUES
-                (3, 'telegram-session', 'assistant', 0, 1788048003.0, 'inactive response');
+                (3, 'telegram-session', 'assistant', 0, 1788048003.0, 'inactive response', NULL);
             INSERT INTO messages VALUES
-                (4, 'other-session', 'user', 1, 1788048004.0, 'other prompt');
+                (4, 'other-session', 'user', 1, 1788048004.0, 'other prompt', NULL);
             """
         )
         statements = []
@@ -172,7 +316,7 @@ class AnalyzerTests(unittest.TestCase):
             CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL);
             CREATE TABLE messages (
                 id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, active INTEGER,
-                timestamp REAL NOT NULL, content TEXT
+                timestamp REAL NOT NULL, content TEXT, tool_name TEXT
             );
             """
         )

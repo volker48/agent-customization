@@ -23,6 +23,7 @@ METHODOLOGY_WARNING = (
     "Assistant steps are not an exact per-turn or provider-call mapping; "
     "persisted session-level API call counts cannot be attributed to individual turns."
 )
+ESTIMATED_TOKEN_METHOD = "ceil(payload_bytes / 4) * later_assistant_steps"
 
 
 class TrajectoryStore(Protocol):
@@ -42,7 +43,10 @@ class SessionRecord:
 @dataclass(frozen=True)
 class MessageRecord:
     session_id: str
+    id: str | int | None
     role: str
+    tool_name: str | None
+    content: str | None
 
 
 @dataclass(frozen=True)
@@ -74,7 +78,7 @@ class SqliteStore:
     def fetch_active_messages(self, days: int, source: str | None, now: datetime):
         cutoff = (now - timedelta(days=days)).timestamp()
         query = (
-            "SELECT m.session_id, m.role FROM messages AS m "
+            "SELECT m.session_id, m.id, m.role, m.tool_name, m.content FROM messages AS m "
             "JOIN sessions AS s ON s.id = m.session_id "
             "WHERE m.active = 1 AND s.started_at >= ?"
         )
@@ -83,7 +87,9 @@ class SqliteStore:
             query += " AND s.source = ?"
             parameters = (cutoff, source)
         cursor = self._connection.execute(query + " ORDER BY m.session_id, m.id", parameters)
-        return [_row_dict(row, ("session_id", "role")) for row in cursor]
+        return [
+            _row_dict(row, ("session_id", "id", "role", "tool_name", "content")) for row in cursor
+        ]
 
 
 class RuntimeStore(SqliteStore):
@@ -134,6 +140,7 @@ def analyze(
         for turn in turns
         if turn.assistant_steps > thresholds.assistant_steps_per_turn
     ]
+    findings.extend(_large_tool_payload_findings(messages, thresholds))
     return {
         "schema_version": 1,
         "days": days,
@@ -146,7 +153,11 @@ def analyze(
             "sessions_with_findings": len({finding["session_id"] for finding in findings}),
             "by_code": _counts(findings, "code"),
             "by_severity": _counts(findings, "severity"),
-            "estimated_avoidable_tokens": 0,
+            "estimated_avoidable_tokens": sum(
+                finding["impact"]["tokens"]
+                for finding in findings
+                if finding["impact"]["kind"] == "estimated_avoidable_workload"
+            ),
             "benchmark_required_tokens": 0,
             "methodology_note": METHODOLOGY_WARNING,
         },
@@ -172,9 +183,20 @@ def _messages(rows: Sequence[Any], session_ids: set[str]) -> tuple[MessageRecord
             isinstance(session_id, str)
             and isinstance(role, str)
             and session_id in session_ids
-            and role in {"user", "assistant"}
+            and role in {"user", "assistant", "tool"}
         ):
-            records.append(MessageRecord(session_id, role))
+            message_id = _value(row, "id")
+            tool_name = _value(row, "tool_name")
+            content = _value(row, "content")
+            records.append(
+                MessageRecord(
+                    session_id,
+                    message_id if isinstance(message_id, (str, int)) and not isinstance(message_id, bool) else None,
+                    role,
+                    tool_name if isinstance(tool_name, str) else None,
+                    content if isinstance(content, str) else None,
+                )
+            )
     return tuple(records)
 
 
@@ -187,12 +209,61 @@ def _turns(messages: Sequence[MessageRecord], session_ids: Sequence[str]) -> tup
             counts[message.session_id] += 1
             turns.append(TurnRecord(message.session_id, counts[message.session_id], 0))
             active[message.session_id] = len(turns) - 1
-        elif active[message.session_id] is not None:
+        elif message.role == "assistant" and active[message.session_id] is not None:
             index = active[message.session_id]
             assert index is not None
             turn = turns[index]
             turns[index] = TurnRecord(turn.session_id, turn.turn_index, turn.assistant_steps + 1)
     return tuple(turns)
+
+
+def _large_tool_payload_findings(
+    messages: Sequence[MessageRecord], thresholds: AnalyzerThresholds
+) -> list[dict[str, Any]]:
+    turn_indices: dict[str, int] = {}
+    candidates: list[dict[str, Any]] = []
+    for message in messages:
+        if message.role == "user":
+            turn_indices[message.session_id] = turn_indices.get(message.session_id, 0) + 1
+        elif message.role == "tool" and message.session_id in turn_indices and message.content is not None:
+            payload_bytes = len(message.content.encode("utf-8", "replace"))
+            if payload_bytes > thresholds.large_tool_payload_bytes:
+                candidates.append(
+                    {
+                        "session_id": message.session_id,
+                        "turn_index": turn_indices[message.session_id],
+                        "tool_message_id": message.id,
+                        "tool_name": message.tool_name,
+                        "payload_bytes": payload_bytes,
+                        "later_assistant_steps": 0,
+                    }
+                )
+        elif message.role == "assistant":
+            for candidate in candidates:
+                if (
+                    candidate["session_id"] == message.session_id
+                    and candidate["turn_index"] == turn_indices.get(message.session_id)
+                ):
+                    candidate["later_assistant_steps"] += 1
+    return [
+        _large_tool_payload_finding(candidate)
+        for candidate in candidates
+        if candidate["later_assistant_steps"] >= thresholds.minimum_later_steps_for_retention
+    ]
+
+
+def _large_tool_payload_finding(candidate: dict[str, Any]) -> dict[str, Any]:
+    estimated_tokens = (candidate["payload_bytes"] + 3) // 4 * candidate["later_assistant_steps"]
+    return {
+        "code": "large_tool_payload",
+        "severity": "high",
+        **candidate,
+        "impact": {
+            "kind": "estimated_avoidable_workload",
+            "tokens": estimated_tokens,
+            "method": ESTIMATED_TOKEN_METHOD,
+        },
+    }
 
 
 def _finding(turn: TurnRecord) -> dict[str, Any]:
