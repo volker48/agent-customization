@@ -38,9 +38,27 @@ def _print_report(report):
         f"turns={report['turns_analyzed']}"
     )
     for finding in report["findings"]:
+        details = " ".join(
+            f"{field}={finding[field]}"
+            for field in _DISPLAY_FIELDS
+            if field in finding
+        )
         print(
             f"{finding['code']} severity={finding['severity']} "
-            f"session_id={finding['session_id']} turn_index={finding['turn_index']} "
-            f"assistant_steps={finding['assistant_steps']}"
+            f"session_id={finding['session_id']} {details}".rstrip()
         )
     print(f"Methodology: {METHODOLOGY_WARNING}")
+
+
+_DISPLAY_FIELDS = (
+    "turn_index",
+    "assistant_steps",
+    "system_prompt_bytes",
+    "api_calls",
+    "estimated_repeated_workload_bytes",
+    "relevant_workload_tokens",
+    "observed_cache_reuse_ratio",
+    "parent_session_id",
+    "model",
+    "child_workload_tokens",
+)

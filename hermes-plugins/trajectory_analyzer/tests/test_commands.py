@@ -72,6 +72,25 @@ class CommandRegistrationTests(unittest.TestCase):
         self.assertNotIn("private prompt", json.dumps(report))
         self.assertNotIn("secret response", json.dumps(report))
 
+    def test_analyze_prints_large_prompt_finding_without_prompt_text(self):
+        from trajectory_analyzer.cli import handle_cli
+
+        prompt = "private system prompt" * 10_000
+        output = io.StringIO()
+        with redirect_stdout(output):
+            report = handle_cli(
+                argparse.Namespace(trajectory_command="analyze", days=30, source=None),
+                store=FakeStore(
+                    sessions=[{"id": "session-2", "system_prompt": prompt, "api_calls": 2}]
+                ),
+            )
+
+        terminal = output.getvalue()
+        self.assertEqual("large_initial_prompt", report["findings"][0]["code"])
+        self.assertIn("large_initial_prompt", terminal)
+        self.assertIn("system_prompt_bytes=210000", terminal)
+        self.assertNotIn("private system prompt", terminal)
+
     def test_analyze_rejects_an_extreme_positive_day_count(self):
         from trajectory_analyzer.cli import setup_cli
 

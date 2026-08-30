@@ -73,6 +73,144 @@ class AnalyzerTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             thresholds.assistant_steps_per_turn = 9
 
+    def test_large_initial_prompt_reports_bytes_estimate_and_cache_caveat(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        prompt = "x" * 100_001
+        report = analyze(
+            FakeStore(
+                sessions=[
+                    {
+                        "id": "large-prompt",
+                        "source": "telegram",
+                        "title": "Private title",
+                        "system_prompt": prompt,
+                        "api_calls": 2,
+                    },
+                    {
+                        "id": "prompt-boundary",
+                        "source": "telegram",
+                        "system_prompt": "x" * 100_000,
+                        "api_calls": 2,
+                    },
+                ]
+            )
+        )
+
+        findings = report["findings"]
+        self.assertEqual(1, len(findings))
+        finding = findings[0]
+        self.assertEqual("large_initial_prompt", finding["code"])
+        self.assertEqual("large-prompt", finding["session_id"])
+        self.assertEqual(100_001, finding["system_prompt_bytes"])
+        self.assertEqual(2, finding["api_calls"])
+        self.assertEqual(200_002, finding["estimated_repeated_workload_bytes"])
+        self.assertEqual("estimated_exposure", finding["impact"]["kind"])
+        self.assertIn("cache", finding["impact"]["caveat"])
+        serialized = str(report)
+        self.assertNotIn(prompt, serialized)
+        self.assertNotIn("Private title", serialized)
+
+    def test_low_cache_reuse_reports_observed_ratio_after_workload_and_call_gates(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        report = analyze(
+            FakeStore(
+                sessions=[
+                    {
+                        "id": "low-cache",
+                        "source": "telegram",
+                        "input_tokens": 80_000,
+                        "cache_read_tokens": 20_000,
+                        "api_calls": 3,
+                    },
+                    {
+                        "id": "below-workload",
+                        "input_tokens": 79_999,
+                        "cache_read_tokens": 20_000,
+                        "api_calls": 3,
+                    },
+                    {
+                        "id": "ratio-boundary",
+                        "input_tokens": 50_000,
+                        "cache_read_tokens": 50_000,
+                        "api_calls": 3,
+                    },
+                    {
+                        "id": "one-call",
+                        "input_tokens": 80_000,
+                        "cache_read_tokens": 20_000,
+                        "api_calls": 1,
+                    },
+                ]
+            )
+        )
+
+        findings = [finding for finding in report["findings"] if finding["code"] == "low_cache_reuse"]
+        self.assertEqual(1, len(findings))
+        finding = findings[0]
+        self.assertEqual("low-cache", finding["session_id"])
+        self.assertEqual(100_000, finding["relevant_workload_tokens"])
+        self.assertEqual(0.20, finding["observed_cache_reuse_ratio"])
+        self.assertEqual("measured_exposure", finding["impact"]["kind"])
+        self.assertNotIn("TTL", str(finding))
+
+    def test_same_model_child_exposure_requires_benchmark_and_skips_invalid_links(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        report = analyze(
+            FakeStore(
+                sessions=[
+                    {"id": "parent", "model": "gpt-5.6-sol"},
+                    {
+                        "id": "child", "parent_session_id": "parent", "model": "gpt-5.6-sol",
+                        "api_calls": 10, "input_tokens": 100, "output_tokens": 20,
+                        "cache_read_tokens": 30, "cache_write_tokens": 40, "reasoning_tokens": 50,
+                    },
+                    {"id": "other-parent", "model": "gpt-5.6-sol"},
+                    {
+                        "id": "other-model", "parent_session_id": "other-parent", "model": "gpt-5.6-mini",
+                        "api_calls": 10, "input_tokens": 999,
+                    },
+                    {
+                        "id": "under-calls", "parent_session_id": "parent", "model": "gpt-5.6-sol",
+                        "api_calls": 9, "input_tokens": 999,
+                    },
+                    {
+                        "id": "missing-parent", "parent_session_id": "absent", "model": "gpt-5.6-sol",
+                        "api_calls": 10, "input_tokens": 999,
+                    },
+                    {
+                        "id": "cycle-a", "parent_session_id": "cycle-b", "model": "gpt-5.6-sol",
+                        "api_calls": 10, "input_tokens": 999,
+                    },
+                    {
+                        "id": "cycle-b", "parent_session_id": "cycle-a", "model": "gpt-5.6-sol",
+                        "api_calls": 10, "input_tokens": 999,
+                    },
+                    {"id": "no-model-parent"},
+                    {
+                        "id": "no-model", "parent_session_id": "no-model-parent", "api_calls": 10,
+                        "input_tokens": 999,
+                    },
+                ]
+            )
+        )
+
+        findings = [
+            finding for finding in report["findings"]
+            if finding["code"] == "same_model_subagent_exposure"
+        ]
+        self.assertEqual(1, len(findings))
+        finding = findings[0]
+        self.assertEqual("child", finding["session_id"])
+        self.assertEqual("parent", finding["parent_session_id"])
+        self.assertEqual("gpt-5.6-sol", finding["model"])
+        self.assertEqual(240, finding["child_workload_tokens"])
+        self.assertEqual("benchmark_required", finding["impact"]["kind"])
+        self.assertIn("benchmark", finding["impact"]["caveat"])
+        self.assertNotIn("replacement", str(finding).lower())
+
     def test_eight_assistant_steps_is_silent(self):
         from trajectory_analyzer.analyzer import analyze
 
@@ -118,13 +256,19 @@ class AnalyzerTests(unittest.TestCase):
         connection = sqlite3.connect(":memory:")
         connection.executescript(
             """
-            CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL);
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL, title TEXT, model TEXT,
+                parent_session_id TEXT, system_prompt TEXT, api_calls INTEGER DEFAULT 0,
+                input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
+                cache_read_tokens INTEGER DEFAULT 0, cache_write_tokens INTEGER DEFAULT 0,
+                reasoning_tokens INTEGER DEFAULT 0
+            );
             CREATE TABLE messages (
                 id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, active INTEGER,
                 timestamp REAL NOT NULL, content TEXT
             );
-            INSERT INTO sessions VALUES ('telegram-session', 'telegram', 1788048000.0);
-            INSERT INTO sessions VALUES ('other-session', 'discord', 1788048000.0);
+            INSERT INTO sessions (id, source, started_at) VALUES ('telegram-session', 'telegram', 1788048000.0);
+            INSERT INTO sessions (id, source, started_at) VALUES ('other-session', 'discord', 1788048000.0);
             INSERT INTO messages VALUES
                 (1, 'telegram-session', 'user', 1, 1788048001.0, 'private prompt');
             INSERT INTO messages VALUES
@@ -169,7 +313,13 @@ class AnalyzerTests(unittest.TestCase):
         connection = sqlite3.connect(":memory:")
         connection.executescript(
             """
-            CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL);
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL, title TEXT, model TEXT,
+                parent_session_id TEXT, system_prompt TEXT, api_calls INTEGER DEFAULT 0,
+                input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
+                cache_read_tokens INTEGER DEFAULT 0, cache_write_tokens INTEGER DEFAULT 0,
+                reasoning_tokens INTEGER DEFAULT 0
+            );
             CREATE TABLE messages (
                 id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, active INTEGER,
                 timestamp REAL NOT NULL, content TEXT
@@ -177,7 +327,7 @@ class AnalyzerTests(unittest.TestCase):
             """
         )
         connection.executemany(
-            "INSERT INTO sessions VALUES (?, 'telegram', 1788048000.0)",
+            "INSERT INTO sessions (id, source, started_at) VALUES (?, 'telegram', 1788048000.0)",
             [(f"session-{index}",) for index in range(1_001)],
         )
         recorded = RecordingConnection(connection)
