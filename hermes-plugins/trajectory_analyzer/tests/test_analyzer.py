@@ -256,6 +256,39 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(0, report["turns_analyzed"])
         self.assertEqual([], report["findings"])
 
+    def test_sqlite_store_reads_authoritative_api_call_count_schema(self):
+        from trajectory_analyzer.analyzer import SqliteStore, analyze
+
+        connection = sqlite3.connect(":memory:")
+        connection.executescript(
+            """
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL, title TEXT, model TEXT,
+                parent_session_id TEXT, system_prompt TEXT, api_call_count INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, active INTEGER,
+                timestamp REAL NOT NULL, content TEXT
+            );
+            INSERT INTO sessions (
+                id, source, started_at, system_prompt, api_call_count
+            ) VALUES ('authoritative-schema', 'telegram', 1788048000.0, 'x', 2);
+            """
+        )
+
+        now = datetime(2026, 8, 30, tzinfo=timezone.utc)
+        store = SqliteStore(connection)
+
+        sessions = store.fetch_sessions(days=30, source="telegram", now=now)
+        report = analyze(store, source="telegram", now=now)
+
+        self.assertEqual(2, sessions[0]["api_calls"])
+        self.assertEqual(1, report["sessions_analyzed"])
+        self.assertEqual([], report["findings"])
+
     def test_sqlite_store_filters_source_and_inactive_rows_in_its_two_queries(self):
         from trajectory_analyzer.analyzer import SqliteStore, analyze
 
@@ -264,7 +297,7 @@ class AnalyzerTests(unittest.TestCase):
             """
             CREATE TABLE sessions (
                 id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL, title TEXT, model TEXT,
-                parent_session_id TEXT, system_prompt TEXT, api_calls INTEGER DEFAULT 0,
+                parent_session_id TEXT, system_prompt TEXT, api_call_count INTEGER DEFAULT 0,
                 input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
                 cache_read_tokens INTEGER DEFAULT 0, cache_write_tokens INTEGER DEFAULT 0,
                 reasoning_tokens INTEGER DEFAULT 0
@@ -321,7 +354,7 @@ class AnalyzerTests(unittest.TestCase):
             """
             CREATE TABLE sessions (
                 id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL, title TEXT, model TEXT,
-                parent_session_id TEXT, system_prompt TEXT, api_calls INTEGER DEFAULT 0,
+                parent_session_id TEXT, system_prompt TEXT, api_call_count INTEGER DEFAULT 0,
                 input_tokens INTEGER DEFAULT 0, output_tokens INTEGER DEFAULT 0,
                 cache_read_tokens INTEGER DEFAULT 0, cache_write_tokens INTEGER DEFAULT 0,
                 reasoning_tokens INTEGER DEFAULT 0

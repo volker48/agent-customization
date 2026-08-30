@@ -70,13 +70,18 @@ class SqliteStore:
         "id", "source", "title", "model", "parent_session_id", "system_prompt", "api_calls",
         "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens",
     )
+    _SESSION_SELECT_FIELDS = (
+        "id", "source", "title", "model", "parent_session_id", "system_prompt",
+        "api_call_count AS api_calls", "input_tokens", "output_tokens", "cache_read_tokens",
+        "cache_write_tokens", "reasoning_tokens",
+    )
 
     def __init__(self, connection):
         self._connection = connection
 
     def fetch_sessions(self, days: int, source: str | None, now: datetime):
         cutoff = (now - timedelta(days=days)).timestamp()
-        columns = ", ".join(self._SESSION_FIELDS)
+        columns = ", ".join(self._SESSION_SELECT_FIELDS)
         query = f"SELECT {columns} FROM sessions WHERE started_at >= ?"
         parameters: tuple[float, ...] | tuple[float, str] = (cutoff,)
         if source is not None:
