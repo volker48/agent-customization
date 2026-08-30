@@ -295,7 +295,11 @@ function watchCancellation(client, job, options) {
       });
       killTimer = setTimeout(() => {
         killTimer = null;
-        void terminateCancellationProcess(job);
+        void terminateCancellationProcess(job, options).catch(async (error) => {
+          await appendJobLog(job, "abort-timeout-kill-failed", {
+            errorMessage: errorMessage(error),
+          }).catch(() => {});
+        });
       }, options.cancelKillTimeoutMs ?? 1_000);
     } catch (error) {
       aborting = false;
@@ -318,11 +322,12 @@ async function jobIsCancelling(job) {
   return latest.status === "cancelling";
 }
 
-async function terminateCancellationProcess(job) {
+async function terminateCancellationProcess(job, options = {}) {
   const latest = await readJob(job.jobFile).catch(() => null);
   if (latest?.status !== "cancelling") return;
   await appendJobLog(job, "abort-timeout-kill", { piPid: latest.piPid });
-  await terminateProcessTree(latest.piPid, { timeoutMs: 500 });
+  const terminate = options.terminateProcessTree ?? terminateProcessTree;
+  await terminate(latest.piPid, { timeoutMs: 500 });
 }
 
 function buildPiArgs(job, options) {

@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { exitedProcessPid } from "./helpers/process.js";
 import { runCancel } from "../plugins/pi/scripts/lib/cancel.mjs";
+import { runImplement } from "../plugins/pi/scripts/lib/implement.mjs";
 import {
   createImplementationJob,
   persistJob,
@@ -116,6 +117,21 @@ async function waitForLogCommands(path: string) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(`Timed out waiting for fake Pi log: ${path}`);
+}
+
+async function waitForLogCommand(path: string, type: string) {
+  const deadline = Date.now() + 4_000;
+  while (Date.now() < deadline) {
+    const log = await readFile(path, "utf8").catch(() => "");
+    const commands = log
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    if (commands.some((command) => command.type === type)) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for fake Pi command: ${type}`);
 }
 
 async function waitForPid(path: string) {
@@ -310,6 +326,77 @@ describe("Pi background implementation cancellation", () => {
 
     expect(cancelled.stdout).toContain("Status: cancelled");
     expect(log).toContain('"type":"abort"');
+  }, 20_000);
+
+  it("records a rejected cancellation timeout kill without dropping the promise", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-bg-data-"));
+    const workspaceRoot = await realpath(await mkdtemp(join(tmpdir(), "pi-bg-workspace-")));
+    const logPath = join(dataDir, "fake-pi.jsonl");
+    const fakePi = await writeFakePi(`
+import { appendFileSync, writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(logPath)}, "");
+process.stdin.setEncoding("utf8");
+let buffer = "";
+function emit(message) { process.stdout.write(JSON.stringify(message) + "\\n"); }
+function record(command) {
+  appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(command) + "\\n");
+}
+record({ type: "argv", argv: process.argv.slice(2) });
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  while (buffer.includes("\\n")) {
+    const index = buffer.indexOf("\\n");
+    const line = buffer.slice(0, index);
+    buffer = buffer.slice(index + 1);
+    if (!line) continue;
+    const command = JSON.parse(line);
+    record(command);
+    if (command.type === "get_state") emit({ id: command.id, type: "response", success: true,
+      data: { model: { provider: "openai", id: "gpt-5.5" }, sessionId: "bg-session" } });
+    if (command.type === "prompt") emit({ id: command.id, type: "response", success: true });
+    if (command.type === "abort") {
+      emit({ id: command.id, type: "response", success: true });
+      setTimeout(() => emit({ type: "agent_end", messages: [] }), 75);
+    }
+  }
+});
+process.on("SIGTERM", () => process.exit(0));
+`);
+    const job = createImplementationJob({ dataDir, workspaceRoot });
+    let terminationAttempts = 0;
+    const execution = runImplement({
+      brief: "cancel after a failed timeout kill",
+      cancelKillTimeoutMs: 5,
+      cancelPollMs: 5,
+      dataDir,
+      job,
+      piCommand: process.execPath,
+      piPrefixArgs: [fakePi],
+      terminateProcessTree: async () => {
+        terminationAttempts += 1;
+        throw new Error("simulated termination failure");
+      },
+      terminateTimeoutMs: 100,
+      timeoutMs: 500,
+      workspaceRoot,
+    });
+    await waitForLogCommand(logPath, "prompt");
+    await updateJobRecord(job, { status: "cancelling", phase: "cancelling" });
+
+    await execution;
+    const entries = (await readFile(job.logFile, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+
+    expect(job.status).toBe("cancelled");
+    expect(terminationAttempts).toBe(1);
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "abort-timeout-kill-failed",
+        errorMessage: "simulated termination failure",
+      }),
+    );
   }, 20_000);
 
   it("session cleanup cancels active jobs owned by the ending Claude session", async () => {

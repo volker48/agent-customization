@@ -165,6 +165,50 @@ describe("remote Unix-socket IPC", () => {
     }
   });
 
+  it("closes a rejected frame socket and keeps accepting sessions", async () => {
+    const socketPath = await tempSocketPath();
+    const daemon = await startIpcDaemonServer(socketPath, {
+      onStop: () => Promise.reject(new Error("simulated stop failure")),
+    });
+
+    try {
+      const failing = await connectIpcExtension(socketPath, {
+        sessionId: "session-1",
+        name: "Failing",
+        cwd: "/repo/one",
+      });
+      await daemon.waitForSession("session-1");
+
+      await failing.send({ sessionId: null, type: "daemon_stop", payload: {} });
+      await expect(failing.readNext()).resolves.toEqual({
+        sessionId: null,
+        type: "daemon_stop",
+        payload: { stopping: true },
+      });
+      await expect(
+        Promise.race([
+          failing.readNext(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("IPC frame socket stayed open")), 100),
+          ),
+        ]),
+      ).rejects.toThrow("IPC extension socket closed before receiving a frame");
+
+      const healthy = await connectIpcExtension(socketPath, {
+        sessionId: "session-2",
+        name: "Healthy",
+        cwd: "/repo/two",
+      });
+      await expect(daemon.waitForSession("session-2")).resolves.toMatchObject({
+        name: "Healthy",
+        cwd: "/repo/two",
+      });
+      await healthy.close();
+    } finally {
+      await daemon.close();
+    }
+  });
+
   it("ignores malformed frames and keeps accepting sessions", async () => {
     const socketPath = await tempSocketPath();
     const daemon = await startIpcDaemonServer(socketPath);
