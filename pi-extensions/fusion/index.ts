@@ -6,7 +6,6 @@ import {
 import { Markdown } from "@earendil-works/pi-tui";
 import {
   createFusionDebugLogger,
-  progressLogDetails,
   resolveFusionDebugLogPath,
   resultLogDetails,
   type FusionDebugLogger,
@@ -242,7 +241,7 @@ export default function fusionExtension(pi: ExtensionAPI) {
           registry: ctx.modelRegistry,
           signal: controller.signal,
           onProgress: (event) => {
-            debugLogger?.log("progress", progressLogDetails(event));
+            debugLogger?.log("progress", event);
             progressState = reduceProgress(progressState, event);
             updateProgress(formatProgress(progressState));
           },

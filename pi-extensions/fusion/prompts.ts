@@ -50,10 +50,6 @@ Answer style:
 - Do not pad.
 - Do not defer to the judge.`;
 
-export function buildPanelPrompt(prompt: string): string {
-  return prompt;
-}
-
 export const META_SYSTEM_PROMPT = `You generate binary evaluation rubrics for Fusion judge calls.
 Return only the JSON shape requested by the user prompt.`;
 

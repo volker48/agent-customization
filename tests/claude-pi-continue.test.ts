@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { chmod, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,26 +7,7 @@ import { runContinue } from "../plugins/pi/scripts/lib/implement.mjs";
 import { runResult } from "../plugins/pi/scripts/lib/inspect.mjs";
 import { createImplementationJob, persistJob } from "../plugins/pi/scripts/lib/jobs.mjs";
 
-const COMPANION = join(process.cwd(), "plugins/pi/scripts/pi-companion.mjs");
-
-async function runCompanion(args: string[], input: string, env: NodeJS.ProcessEnv, cwd: string) {
-  const child = spawn(process.execPath, [COMPANION, ...args], {
-    cwd,
-    env,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  let stderr = "";
-  let stdout = "";
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk.toString();
-  });
-  child.stdout.on("data", (chunk) => {
-    stdout += chunk.toString();
-  });
-  child.stdin.end(input);
-  const status = await new Promise<number | null>((resolve) => child.on("exit", resolve));
-  return { status, stderr, stdout };
-}
+import { runCompanion } from "./helpers/pi-companion.js";
 
 async function writeFakePi(logPath: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "fake-pi-continue-"));

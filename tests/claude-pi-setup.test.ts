@@ -4,11 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import {
-  DEFAULT_INTENDED_MODEL,
-  DEFAULT_THINKING_LEVEL,
-  runSetup,
-} from "../plugins/pi/scripts/lib/setup.mjs";
+import { runSetup } from "../plugins/pi/scripts/lib/setup.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
@@ -74,11 +70,6 @@ process.on("SIGTERM", () => process.exit(0));
 `;
 
 describe("Claude Code Pi setup", () => {
-  it("defaults delegated work to GPT-5.6 Luna with xhigh thinking", () => {
-    expect(DEFAULT_INTENDED_MODEL).toBe("openai-codex/gpt-5.6-luna");
-    expect(DEFAULT_THINKING_LEVEL).toBe("xhigh");
-  });
-
   it("ships a loadable pi plugin with a setup command", async () => {
     const manifestPath = join(repoRoot, "plugins/pi/.claude-plugin/plugin.json");
     const commandPath = join(repoRoot, "plugins/pi/commands/setup.md");

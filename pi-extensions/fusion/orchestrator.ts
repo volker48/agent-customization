@@ -4,7 +4,6 @@ import { FusionModelRunError, completeWithTools } from "./model-runner.js";
 import {
   buildJudgePrompt,
   buildMetaPrompt,
-  buildPanelPrompt,
   computeConfidence,
   emptyAnalysis,
   JUDGE_SYSTEM_PROMPT,
@@ -200,7 +199,7 @@ async function runPanelModel(args: {
     const result = await completeWithTools({
       model: args.model,
       systemPrompt: PANEL_SYSTEM_PROMPT,
-      userPrompt: buildPanelPrompt(args.prompt),
+      userPrompt: args.prompt,
       tools: args.tools,
       maxToolCalls: args.config.maxToolCalls,
       signal: args.signal,

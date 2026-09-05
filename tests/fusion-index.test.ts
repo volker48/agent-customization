@@ -25,7 +25,6 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 
 vi.mock("../pi-extensions/fusion/debug-log.js", () => ({
   createFusionDebugLogger: debug.create,
-  progressLogDetails: vi.fn((event) => event),
   resolveFusionDebugLogPath: debug.resolvePath,
   resultLogDetails: vi.fn((result) => ({ status: result.status })),
 }));
