@@ -43,6 +43,34 @@ export class PiRpcClient {
     return responsePromise;
   }
 
+  async requestData(command) {
+    const response = await this.request(command);
+    if (!response.success) {
+      throw new Error(`Pi RPC ${command.type} failed: ${response.error ?? "unknown error"}`);
+    }
+    return response.data;
+  }
+
+  async getFinalText(agentEndEvent, label = "Pi") {
+    const response = await this.requestData({ type: "get_last_assistant_text" });
+    if (typeof response?.text === "string" && response.text.trim()) return response.text;
+    for (const message of [...(agentEndEvent?.messages ?? [])].reverse()) {
+      if (message?.role !== "assistant") continue;
+      const content = message.content;
+      let text = "";
+      if (typeof content === "string") text = content.trim();
+      else if (Array.isArray(content)) {
+        text = content
+          .filter((part) => part?.type === "text" && typeof part.text === "string")
+          .map((part) => part.text)
+          .join("\n")
+          .trim();
+      }
+      if (text) return text;
+    }
+    throw new Error(`${label} completed without a final assistant response`);
+  }
+
   waitForEvent(type, options = {}) {
     return this.waitForEventHandle(type, options).promise;
   }

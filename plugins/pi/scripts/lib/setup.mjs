@@ -68,9 +68,9 @@ function buildSetupResult(input) {
   const model = input.state?.success ? input.state.data?.model : null;
   const availableModels = input.models?.success ? (input.models.data?.models ?? []) : [];
   const activeModel = model ? modelRef(model) : null;
-  const intendedModelAvailable = availableModels.some((candidate) => {
-    return modelMatches(candidate, input.intendedModel);
-  });
+  const intendedModelAvailable = availableModels.some(
+    (candidate) => modelRef(candidate) === input.intendedModel,
+  );
   const ok =
     input.nodeCheck.ok && input.piCheck.ok && !input.rpcError && input.state?.success === true;
   return {
@@ -118,8 +118,4 @@ function modelGuidance(intendedModel, available) {
 export function modelRef(model) {
   if (!model || typeof model.provider !== "string" || typeof model.id !== "string") return null;
   return `${model.provider}/${model.id}`;
-}
-
-function modelMatches(model, intendedModel) {
-  return modelRef(model) === intendedModel;
 }

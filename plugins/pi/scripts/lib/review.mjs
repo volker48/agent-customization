@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import { appendJobLog, createReviewJob, updateJobRecord } from "./jobs.mjs";
+import { appendJobLog, completeJob, createReviewJob, failJob, updateJobRecord } from "./jobs.mjs";
 import { PiRpcClient } from "./pi-rpc-client.mjs";
 import { DEFAULT_INTENDED_MODEL, DEFAULT_THINKING_LEVEL, modelRef } from "./setup.mjs";
 
@@ -13,7 +13,6 @@ const DEFAULT_CONTEXT_LIMITS = {
   maxTotalBytes: 180_000,
   maxStatusBytes: 20_000,
 };
-const TERMINAL_STATUSES = new Set(["cancelled", "completed", "failed"]);
 const execFileAsync = promisify(execFile);
 
 export async function runReview(options = {}) {
@@ -48,7 +47,7 @@ export async function runReview(options = {}) {
 }
 
 export async function collectGitContext(workspaceRoot, options = {}) {
-  const limits = { ...DEFAULT_CONTEXT_LIMITS, ...(options.limits ?? {}) };
+  const limits = { ...DEFAULT_CONTEXT_LIMITS, ...options.limits };
   const notes = [];
   const status = await git(workspaceRoot, ["status", "--short", "--untracked-files=all"]);
   const ignored = await git(workspaceRoot, ["status", "--ignored", "--short"], {
@@ -71,11 +70,12 @@ export async function collectGitContext(workspaceRoot, options = {}) {
 }
 
 export function buildReviewPiArgs(job, options = {}) {
+  const model = options.model ?? process.env.PI_REVIEW_MODEL ?? DEFAULT_INTENDED_MODEL;
   return [
     ...(options.piPrefixArgs ?? []),
     "--mode",
     "rpc",
-    ...modelArgs(options.model ?? process.env.PI_REVIEW_MODEL ?? DEFAULT_INTENDED_MODEL),
+    ...(model ? ["--model", model] : []),
     "--thinking",
     options.thinkingLevel ?? process.env.PI_REVIEW_THINKING_LEVEL ?? DEFAULT_THINKING_LEVEL,
     "--session-dir",
@@ -92,7 +92,7 @@ export function buildReviewPiArgs(job, options = {}) {
 }
 
 async function startReviewJob(job, details) {
-  await updateJob(job, { mode: details.mode, phase: "collecting", target: details.target });
+  await updateJobRecord(job, { mode: details.mode, phase: "collecting", target: details.target });
   await appendJobLog(job, "started", details);
 }
 
@@ -103,7 +103,7 @@ async function executeReview(client, job, gitContext, options) {
   try {
     agentEndWaiter = await promptPiForReview(client, job, gitContext, options);
     const agentEndEvent = await agentEndWaiter.promise;
-    finalText = await getFinalText(client, agentEndEvent);
+    finalText = await client.getFinalText(agentEndEvent, "Pi review");
     await completeJob(job, finalText);
   } catch (error) {
     agentEndWaiter?.cancel();
@@ -114,16 +114,16 @@ async function executeReview(client, job, gitContext, options) {
 }
 
 async function promptPiForReview(client, job, gitContext, options) {
-  const state = await requestData(client, { type: "get_state" });
+  const state = await client.requestData({ type: "get_state" });
   await updateJobFromState(job, state);
   const waiter = client.waitForEventHandle("agent_end", {
     predicate: (event) => event?.willRetry !== true,
     timeoutMs: options.agentEndTimeoutMs ?? DEFAULT_AGENT_END_TIMEOUT_MS,
   });
   try {
-    await updateJob(job, { phase: "prompting" });
-    await requestOk(client, { type: "prompt", message: buildReviewPrompt(gitContext, options) });
-    await updateJob(job, { phase: "running" });
+    await updateJobRecord(job, { phase: "prompting" });
+    await client.requestData({ type: "prompt", message: buildReviewPrompt(gitContext, options) });
+    await updateJobRecord(job, { phase: "running" });
     return waiter;
   } catch (error) {
     waiter.cancel();
@@ -132,7 +132,11 @@ async function promptPiForReview(client, job, gitContext, options) {
 }
 
 function buildReviewPrompt(gitContext, options) {
-  const focus = options.mode === "adversarial" ? adversarialFocus() : normalFocus();
+  const focus =
+    options.mode === "adversarial"
+      ? "Take an adversarial review stance. Explicitly examine assumptions, design tradeoffs, " +
+        "failure modes, simpler alternatives, race conditions, rollback risk, and data-loss risk."
+      : "Find correctness, safety, test, and maintainability issues in the proposed changes.";
   return [
     "You are an ephemeral read-only Pi review delegate for Claude Code.",
     "Review only the supplied git context. Do not modify files or run shell commands.",
@@ -145,18 +149,6 @@ function buildReviewPrompt(gitContext, options) {
   ]
     .filter(Boolean)
     .join("\n\n");
-}
-
-function normalFocus() {
-  return "Find correctness, safety, test, and maintainability issues in the proposed changes.";
-}
-
-function adversarialFocus() {
-  return [
-    "Take an adversarial review stance.",
-    "Explicitly examine assumptions, design tradeoffs, failure modes, simpler alternatives,",
-    "race conditions, rollback risk, and data-loss risk.",
-  ].join(" ");
 }
 
 async function workingTreeSections(workspaceRoot, files, limits, notes) {
@@ -288,27 +280,12 @@ function section(title, body) {
   return [`## ${title}`, body || "(empty)"].join("\n");
 }
 
-function modelArgs(model) {
-  return model ? ["--model", model] : [];
-}
-
 function normalizeText(value) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-async function requestData(client, command) {
-  const response = await requestOk(client, command);
-  return response.data;
-}
-
-async function requestOk(client, command) {
-  const response = await client.request(command);
-  if (response.success) return response;
-  throw new Error(`Pi RPC ${command.type} failed: ${response.error ?? "unknown error"}`);
-}
-
 async function updateJobFromState(job, state) {
-  await updateJob(job, {
+  await updateJobRecord(job, {
     phase: "delegating",
     sessionId: state?.sessionId,
     piSessionFile: state?.sessionFile,
@@ -316,88 +293,12 @@ async function updateJobFromState(job, state) {
   });
 }
 
-async function completeJob(job, finalText) {
-  await updateJobRecord(job, (current) => {
-    if (current.status === "cancelling" || TERMINAL_STATUSES.has(current.status)) return null;
-    return {
-      status: "completed",
-      phase: "completed",
-      result: finalText,
-      summary: firstNonEmptyLine(finalText),
-    };
-  });
-}
-
-async function failJob(job, errorMessage) {
-  await updateJobRecord(job, (current) => {
-    if (current.status === "cancelling") return cancellationChanges(errorMessage);
-    if (TERMINAL_STATUSES.has(current.status)) return null;
-    return {
-      status: "failed",
-      phase: "failed",
-      errorMessage,
-      summary: `Failed: ${errorMessage}`,
-    };
-  });
-}
-
-function cancellationChanges(reason) {
-  return {
-    status: "cancelled",
-    phase: "cancelled",
-    cancelledAt: new Date().toISOString(),
-    summary: "Cancelled by Claude session request.",
-    errorMessage: reason,
-  };
-}
-
 async function finishReviewJob(job, gitContext, piTerminated) {
-  await updateJob(job, {
+  await updateJobRecord(job, {
     changedFiles: gitContext.files.map((file) => file.path),
     completedAt: new Date().toISOString(),
   });
   await appendJobLog(job, "finished", { status: job.status, piTerminated });
-}
-
-async function getFinalText(client, agentEndEvent) {
-  const response = await requestData(client, { type: "get_last_assistant_text" });
-  if (typeof response?.text === "string" && response.text.trim()) return response.text;
-  const fallback = extractLastAssistantText(agentEndEvent?.messages ?? []);
-  if (fallback) return fallback;
-  throw new Error("Pi review completed without a final assistant response");
-}
-
-function extractLastAssistantText(messages) {
-  for (const message of [...messages].reverse()) {
-    if (message?.role !== "assistant") continue;
-    const text = extractMessageContentText(message.content);
-    if (text) return text;
-  }
-  return null;
-}
-
-function extractMessageContentText(content) {
-  if (typeof content === "string") return content.trim() || null;
-  if (!Array.isArray(content)) return null;
-  const text = content
-    .filter((part) => part?.type === "text" && typeof part.text === "string")
-    .map((part) => part.text)
-    .join("\n")
-    .trim();
-  return text || null;
-}
-
-function firstNonEmptyLine(text) {
-  return (
-    text
-      .split("\n")
-      .find((line) => line.trim())
-      ?.trim() ?? ""
-  );
-}
-
-async function updateJob(job, changes) {
-  await updateJobRecord(job, changes);
 }
 
 function buildReviewResult(input) {

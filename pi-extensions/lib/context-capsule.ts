@@ -466,10 +466,6 @@ function capsulePath(value: unknown, cwd: string): string | undefined {
   return normalized.split(pathApi.sep).join("/");
 }
 
-function resourcePath(value: unknown, cwd: string): string | undefined {
-  return capsulePath(value, cwd);
-}
-
 function firstMarkdownHeading(content: unknown): string | undefined {
   const source = textParts(content).join("\n").slice(0, MAX_HEADING_SCAN_LENGTH);
   return sanitizeText(source.match(/^#\s+(.+)$/m)?.[1], MAX_ENTRY).value;
@@ -555,7 +551,7 @@ export function extractSafeResourceFacts(
   for (const call of toolCalls(entries)) {
     let fact: string | undefined;
     if (call.name === "read" || call.name === "edit" || call.name === "write") {
-      const path = resourcePath(call.path, _cwd);
+      const path = capsulePath(call.path, _cwd);
       const heading =
         call.name === "read" && path && [".md", ".mdx"].includes(extname(path).toLowerCase())
           ? firstMarkdownHeading(results.get(call.id)?.message?.content)
@@ -682,7 +678,7 @@ function currentStructuredObjective(
 }
 
 function safeSummaryItems(
-  values: string[],
+  values: readonly string[],
   exclusions: CapsuleExclusion[],
   max = CAPSULE_MAX_ENTRIES,
 ): string[] {
@@ -967,13 +963,6 @@ export function extractSessionEvidence(
     nextAction: nextSteps[0],
     exclusions,
   };
-}
-
-function sanitizeGeneratedList(
-  values: readonly string[],
-  exclusions: CapsuleExclusion[],
-): string[] {
-  return safeSummaryItems([...values], exclusions);
 }
 
 function fitCapsuleToByteLimit(capsule: Capsule): void {
@@ -1325,7 +1314,7 @@ export async function generateCapsule(
     },
     ...(options.predecessor ? { predecessor: { ...options.predecessor } } : {}),
     objective: objective.value ?? "No objective recorded.",
-    constraints: sanitizeGeneratedList(snapshot.constraints, exclusions),
+    constraints: safeSummaryItems(snapshot.constraints, exclusions),
     decisions: sanitizeDecisions(snapshot.decisions, exclusions),
     resources: sanitizeResources(snapshot.resources, exclusions, options.cwd ?? process.cwd()),
     observedChanges: sanitizeObservedChanges(
@@ -1334,8 +1323,8 @@ export async function generateCapsule(
       options.cwd ?? process.cwd(),
     ),
     validation: sanitizeValidation(snapshot.validation, exclusions),
-    blockers: sanitizeGeneratedList(snapshot.blockers, exclusions),
-    risks: sanitizeGeneratedList(snapshot.risks, exclusions),
+    blockers: safeSummaryItems(snapshot.blockers, exclusions),
+    risks: safeSummaryItems(snapshot.risks, exclusions),
     nextAction: nextAction.value ?? "Review the objective and choose the next concrete action.",
     exclusions: exclusions.sort((a, b) => a.category.localeCompare(b.category)),
   };
@@ -1415,10 +1404,6 @@ export type CapsuleRefreshProposal = {
 
 function semanticText(value: string): string {
   return value.normalize("NFKC").trim().toLocaleLowerCase("en-US").replace(/\s+/g, " ");
-}
-
-function semanticCommand(value: string): string {
-  return value.trim();
 }
 
 function scalarDrift(before: string, after: string): ScalarCapsuleDrift {
@@ -1518,7 +1503,7 @@ function validationsByCommand(
 ): Map<string, CapsuleValidation[]> {
   const output = new Map<string, CapsuleValidation[]>();
   for (const value of values) {
-    const command = semanticCommand(value.command);
+    const command = value.command.trim();
     const entries = output.get(command);
     if (entries) entries.push(value);
     else output.set(command, [value]);

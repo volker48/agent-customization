@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { exitedProcessPid } from "./helpers/process.js";
+import { runCompanion } from "./helpers/pi-companion.js";
 import { runCancel } from "../plugins/pi/scripts/lib/cancel.mjs";
 import {
   createImplementationJob,
@@ -14,28 +15,8 @@ import {
 import { runResult, runStatus } from "../plugins/pi/scripts/lib/inspect.mjs";
 import { isProcessAlive, terminateProcessTree } from "../plugins/pi/scripts/lib/process-tree.mjs";
 
-const COMPANION = join(process.cwd(), "plugins/pi/scripts/pi-companion.mjs");
 const PLUGIN_MANIFEST = join(process.cwd(), "plugins/pi/.claude-plugin/plugin.json");
 const PLUGIN_HOOKS = join(process.cwd(), "plugins/pi/hooks/hooks.json");
-
-async function runCompanion(args: string[], input: string, env: NodeJS.ProcessEnv, cwd: string) {
-  const child = spawn(process.execPath, [COMPANION, ...args], {
-    cwd,
-    env,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  let stdout = "";
-  let stderr = "";
-  child.stdout.on("data", (chunk) => {
-    stdout += chunk.toString();
-  });
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk.toString();
-  });
-  child.stdin.end(input);
-  const status = await new Promise<number | null>((resolve) => child.on("close", resolve));
-  return { status, stderr, stdout };
-}
 
 async function writeExecutableScript(
   prefix: string,

@@ -22,7 +22,7 @@ interface FusionFailedDetails {
 
 type FusionDebugLogArgs =
   | [event: "command-started", details: CommandStartedDetails]
-  | [event: "progress", details: ReturnType<typeof progressLogDetails>]
+  | [event: "progress", details: FusionProgressEvent]
   | [event: "result", details: ReturnType<typeof resultLogDetails>]
   | [event: "synthesis-triggered", details: SynthesisTriggeredDetails]
   | [event: "failed", details: FusionFailedDetails]
@@ -74,10 +74,6 @@ export function createFusionDebugLogger(
   };
 
   return logger;
-}
-
-export function progressLogDetails(event: FusionProgressEvent): FusionProgressEvent {
-  return event;
 }
 
 interface ResultLogDetails {

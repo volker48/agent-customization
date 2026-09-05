@@ -6,7 +6,7 @@ import type { AssistantMessage, Api, Message, Model, ToolCall } from "@earendil-
 import { describe, expect, it, vi } from "vitest";
 
 import { loadFusionConfig, validateFusionConfig } from "../pi-extensions/fusion/config.js";
-import { createFusionDebugLogger } from "../pi-extensions/fusion/debug-log.js";
+import { createFusionDebugLogger, resultLogDetails } from "../pi-extensions/fusion/debug-log.js";
 import { parseModelRef, resolveModelRef } from "../pi-extensions/fusion/model-ref.js";
 import { completeWithTools } from "../pi-extensions/fusion/model-runner.js";
 import { parseJudgeOutput, runFusion } from "../pi-extensions/fusion/orchestrator.js";
@@ -18,7 +18,6 @@ import {
 import {
   buildJudgePrompt,
   buildMetaPrompt,
-  buildPanelPrompt,
   computeConfidence,
   JUDGE_SYSTEM_PROMPT,
   PANEL_SYSTEM_PROMPT,
@@ -276,7 +275,49 @@ describe("debug logging", () => {
         models: ["panel/model"],
         maxToolCalls: 4,
       });
-      logger.log("result", {
+      logger.log("progress", { phase: "judge-started", model: "judge/model" });
+      logger.log(
+        "result",
+        resultLogDetails({
+          prompt: "the raw prompt",
+          confidence: "high",
+          status: "ok",
+          judge: "judge/model",
+          elapsedMs: 100,
+          responses: [
+            {
+              model: "panel/model",
+              runId: "panel-1",
+              status: "ok",
+              content: "the raw response",
+              elapsedMs: 50,
+              toolCalls: [],
+            },
+          ],
+        }),
+      );
+      await logger.flush();
+
+      const lines = (await readFile(path, "utf8")).trim().split("\n");
+      expect(lines).toHaveLength(3);
+      expect(JSON.parse(lines[0])).toMatchObject({
+        runId: "run-1",
+        sequence: 0,
+        event: "command-started",
+        promptChars: 12,
+      });
+      expect(JSON.parse(lines[1])).toMatchObject({
+        runId: "run-1",
+        sequence: 1,
+        event: "progress",
+        phase: "judge-started",
+        model: "judge/model",
+      });
+      expect(JSON.parse(lines[2])).toEqual({
+        timestamp: expect.any(String),
+        runId: "run-1",
+        sequence: 2,
+        event: "result",
         confidence: "high",
         status: "ok",
         judge: "judge/model",
@@ -284,17 +325,8 @@ describe("debug logging", () => {
         responseCount: 1,
         successCount: 1,
       });
-      await logger.flush();
-
-      const lines = (await readFile(path, "utf8")).trim().split("\n");
-      expect(lines).toHaveLength(2);
-      expect(JSON.parse(lines[0])).toMatchObject({
-        runId: "run-1",
-        sequence: 0,
-        event: "command-started",
-        promptChars: 12,
-      });
       expect(lines.join("\n")).not.toContain("the raw prompt");
+      expect(lines.join("\n")).not.toContain("the raw response");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -512,11 +544,6 @@ describe("bounded tool loop", () => {
 });
 
 describe("prompt builders", () => {
-  it("panel prompt contains only the command args, no session context", () => {
-    expect(buildPanelPrompt("compare X and Y")).toBe("compare X and Y");
-    expect(PANEL_SYSTEM_PROMPT).toMatch(/Do not assume access to prior conversation/i);
-  });
-
   it("meta prompt includes the task, cap, and JSON shape", () => {
     const prompt = buildMetaPrompt("the task", 7);
     expect(prompt).toContain("the task");
@@ -624,10 +651,14 @@ describe("orchestrator", () => {
     return { client, judgeInputs };
   }
 
-  it("runs all panels, invokes the judge, and parses the judge output", async () => {
+  it("passes the task to each panel, invokes the judge, and parses its output", async () => {
+    const panelInputs: string[] = [];
     const { client, judgeInputs } = scriptedClient((systemPrompt, userPrompt) => {
       if (userPrompt.includes("Decompose")) return metaJson;
-      return systemPrompt === JUDGE_SYSTEM_PROMPT ? judgeJson : "panel response";
+      if (systemPrompt === JUDGE_SYSTEM_PROMPT) return judgeJson;
+      expect(systemPrompt).toBe(PANEL_SYSTEM_PROMPT);
+      panelInputs.push(userPrompt);
+      return "panel response";
     });
 
     const result = await runFusion({
@@ -644,6 +675,7 @@ describe("orchestrator", () => {
     expect(result.judgeOutput?.panelScores["openai/gpt-5"]?.Quality).toEqual([true, true]);
     expect(result.judgeOutput?.analysis.consensus).toContain("both agree");
     expect(result.responses).toHaveLength(2);
+    expect(panelInputs).toEqual(["task", "task"]);
     expect(judgeInputs[0]).toContain("panel response");
     expect(judgeInputs[0]).toContain("Is it correct?");
   });
