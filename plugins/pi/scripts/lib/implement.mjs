@@ -5,6 +5,9 @@ import { promisify } from "node:util";
 import {
   createContinuationJob,
   createImplementationJob,
+  completeJob,
+  failJob,
+  cancelJob,
   appendJobLog,
   findResumableImplementationJob,
   persistJob,
@@ -20,7 +23,6 @@ const DEFAULT_AGENT_END_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_TERMINATE_TIMEOUT_MS = 10_000;
 const DEFAULT_CANCEL_POLL_MS = 100;
 const THINKING_LEVEL_SUFFIX = /:(?:off|minimal|low|medium|high|xhigh|max)$/;
-const TERMINAL_STATUSES = new Set(["cancelled", "completed", "failed"]);
 const execFileAsync = promisify(execFile);
 
 export async function startBackgroundImplement(options = {}) {
@@ -53,7 +55,7 @@ export async function startBackgroundImplement(options = {}) {
     },
   );
   child.unref();
-  await updateJob(job, { workerPid: child.pid });
+  await updateJobRecord(job, { workerPid: child.pid });
   return { ok: true, jobFile: job.jobFile, jobId: job.id, report: renderBackgroundReport(job) };
 }
 
@@ -80,7 +82,7 @@ export async function runImplement(options = {}) {
 
 export async function runContinue(selector = "latest", options = {}) {
   const instruction = normalizeInstruction(options.instruction);
-  const parent = await resolveContinuationParent(selector, options);
+  const parent = await findResumableImplementationJob(selector, options);
   validateContinuationParent(parent.job, selector);
   const model = selectedModel({ ...options, parentJob: parent.job });
   const job = createContinuationJob(parent.job, {
@@ -113,7 +115,7 @@ async function runJobWithPi(job, brief, options) {
 
 async function startJob(job, brief, options) {
   const initialChanges = await detectChangedFiles(job.workspaceRoot);
-  await updateJob(job, {
+  await updateJobRecord(job, {
     status: "running",
     phase: "starting",
     initialChangedFiles: initialChanges.files,
@@ -138,8 +140,8 @@ async function executeImplementation(client, job, brief, options) {
     const agentEndEvent = await agentEndWaiter.promise;
     if (await jobIsCancelling(job)) await cancelJob(job, "Pi RPC abort completed");
     else {
-      finalText = await getFinalText(client, agentEndEvent);
-      await completeJob(job, finalText);
+      finalText = await client.getFinalText(agentEndEvent);
+      await completeJob(job, finalText, extractTestEvidence(finalText));
     }
   } catch (error) {
     agentEndWaiter?.cancel();
@@ -153,8 +155,8 @@ async function executeImplementation(client, job, brief, options) {
 }
 
 async function promptPi(client, job, brief, options) {
-  const state = await requestData(client, { type: "get_state" });
-  await updateJob(job, { piPid: client.process?.pid });
+  const state = await client.requestData({ type: "get_state" });
+  await updateJobRecord(job, { piPid: client.process?.pid });
   await updateJobFromState(job, state);
   await appendJobLog(job, "state", {
     model: job.model,
@@ -162,13 +164,13 @@ async function promptPi(client, job, brief, options) {
     piSessionFile: job.piSessionFile,
   });
   const agentEndWaiter = client.waitForEventHandle("agent_end", {
-    predicate: isFinalAgentEndEvent,
+    predicate: (event) => event?.willRetry !== true,
     timeoutMs: options.agentEndTimeoutMs ?? DEFAULT_AGENT_END_TIMEOUT_MS,
   });
   try {
-    await updateJob(job, { phase: "prompting" });
-    await requestOk(client, { type: "prompt", message: buildImplementationPrompt(brief) });
-    await updateJob(job, { phase: "running" });
+    await updateJobRecord(job, { phase: "prompting" });
+    await client.requestData({ type: "prompt", message: buildImplementationPrompt(brief) });
+    await updateJobRecord(job, { phase: "running" });
     return agentEndWaiter;
   } catch (error) {
     agentEndWaiter.cancel();
@@ -176,51 +178,9 @@ async function promptPi(client, job, brief, options) {
   }
 }
 
-async function completeJob(job, finalText) {
-  await updateJobRecord(job, (current) => {
-    if (current.status === "cancelling" || TERMINAL_STATUSES.has(current.status)) return null;
-    return {
-      status: "completed",
-      phase: "completed",
-      result: finalText,
-      summary: firstNonEmptyLine(finalText),
-      testsRun: extractTestEvidence(finalText),
-    };
-  });
-}
-
-async function failJob(job, errorMessage) {
-  await updateJobRecord(job, (current) => {
-    if (current.status === "cancelling") return cancellationChanges(errorMessage);
-    if (TERMINAL_STATUSES.has(current.status)) return null;
-    return {
-      status: "failed",
-      phase: "failed",
-      errorMessage,
-      summary: `Failed: ${errorMessage}`,
-    };
-  });
-}
-
-async function cancelJob(job, reason) {
-  await updateJobRecord(job, (current) =>
-    TERMINAL_STATUSES.has(current.status) ? null : cancellationChanges(reason),
-  );
-}
-
-function cancellationChanges(reason) {
-  return {
-    status: "cancelled",
-    phase: "cancelled",
-    cancelledAt: new Date().toISOString(),
-    summary: "Cancelled by Claude session request.",
-    errorMessage: reason,
-  };
-}
-
 async function finishJob(job, piTerminated) {
   const changedFiles = await detectChangedFiles(job.workspaceRoot);
-  await updateJob(job, {
+  await updateJobRecord(job, {
     changedFiles: changedFilesDelta(changedFiles.files, job.initialChangedFiles),
     completedAt: new Date().toISOString(),
   });
@@ -331,25 +291,17 @@ function buildPiArgs(job, options) {
     ...(options.piPrefixArgs ?? []),
     "--mode",
     "rpc",
-    ...modelArgs(model),
+    ...(model ? ["--model", model] : []),
     ...thinkingArgs(model, options),
     "--session-dir",
     job.sessionRoot,
-    ...sessionArgs(options.parentJob),
+    ...(options.parentJob ? ["--session", options.parentJob.piSessionFile] : []),
     "--no-extensions",
     "--no-prompt-templates",
     "--no-skills",
     "--tools",
     WRITE_CAPABLE_TOOLS,
   ];
-}
-
-function sessionArgs(parentJob) {
-  return parentJob ? ["--session", parentJob.piSessionFile] : [];
-}
-
-function modelArgs(model) {
-  return model ? ["--model", model] : [];
 }
 
 function thinkingArgs(model, options) {
@@ -359,28 +311,13 @@ function thinkingArgs(model, options) {
   return ["--thinking", DEFAULT_THINKING_LEVEL];
 }
 
-async function requestData(client, command) {
-  const response = await requestOk(client, command);
-  return response.data;
-}
-
-async function requestOk(client, command) {
-  const response = await client.request(command);
-  if (response.success) return response;
-  throw new Error(`Pi RPC ${command.type} failed: ${response.error ?? "unknown error"}`);
-}
-
 async function updateJobFromState(job, state) {
-  await updateJob(job, {
+  await updateJobRecord(job, {
     phase: "delegating",
     sessionId: state?.sessionId,
     piSessionFile: state?.sessionFile,
     model: modelRef(state?.model),
   });
-}
-
-function isFinalAgentEndEvent(event) {
-  return event?.willRetry !== true;
 }
 
 function buildImplementationPrompt(brief) {
@@ -392,10 +329,6 @@ function buildImplementationPrompt(brief) {
     "Implementation brief:",
     brief?.trim() ?? "",
   ].join("\n");
-}
-
-async function resolveContinuationParent(selector, options) {
-  return findResumableImplementationJob(selector, options);
 }
 
 function validateContinuationParent(job, selector) {
@@ -414,43 +347,6 @@ function normalizeInstruction(instruction) {
   return normalized;
 }
 
-async function getFinalText(client, agentEndEvent) {
-  const response = await requestData(client, { type: "get_last_assistant_text" });
-  if (typeof response?.text === "string" && response.text.trim()) return response.text;
-  const fallback = extractLastAssistantText(agentEndEvent?.messages ?? []);
-  if (fallback) return fallback;
-  throw new Error("Pi completed without a final assistant response");
-}
-
-function extractLastAssistantText(messages) {
-  for (const message of [...messages].reverse()) {
-    if (message?.role !== "assistant") continue;
-    const text = extractMessageContentText(message.content);
-    if (text) return text;
-  }
-  return null;
-}
-
-function extractMessageContentText(content) {
-  if (typeof content === "string") return content.trim() || null;
-  if (!Array.isArray(content)) return null;
-  const text = content
-    .filter((part) => part?.type === "text" && typeof part.text === "string")
-    .map((part) => part.text)
-    .join("\n")
-    .trim();
-  return text || null;
-}
-
-function firstNonEmptyLine(text) {
-  return (
-    text
-      .split("\n")
-      .find((line) => line.trim())
-      ?.trim() ?? ""
-  );
-}
-
 function extractTestEvidence(text) {
   const evidence = [];
   for (const line of text.split("\n")) {
@@ -466,10 +362,6 @@ function testEvidenceFromText(text) {
   if (/fail/i.test(command)) return { command, status: "failed" };
   if (/pass/i.test(command)) return { command, status: "passed" };
   return { command, status: "reported" };
-}
-
-async function updateJob(job, changes) {
-  await updateJobRecord(job, changes);
 }
 
 function errorMessage(error) {

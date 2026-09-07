@@ -104,6 +104,52 @@ export async function updateJobRecord(job, changes) {
   });
 }
 
+export async function completeJob(job, finalText, testsRun) {
+  await updateJobRecord(job, (current) => {
+    if (current.status === "cancelling" || isTerminalJob(current)) return null;
+    return {
+      status: "completed",
+      phase: "completed",
+      result: finalText,
+      summary:
+        finalText
+          .split("\n")
+          .find((line) => line.trim())
+          ?.trim() ?? "",
+      ...(testsRun === undefined ? {} : { testsRun }),
+    };
+  });
+}
+
+export async function failJob(job, errorMessage) {
+  await updateJobRecord(job, (current) => {
+    if (current.status === "cancelling") return cancellationChanges(errorMessage);
+    if (isTerminalJob(current)) return null;
+    return {
+      status: "failed",
+      phase: "failed",
+      errorMessage,
+      summary: `Failed: ${errorMessage}`,
+    };
+  });
+}
+
+export async function cancelJob(job, reason) {
+  await updateJobRecord(job, (current) =>
+    isTerminalJob(current) ? null : cancellationChanges(reason),
+  );
+}
+
+function cancellationChanges(reason) {
+  return {
+    status: "cancelled",
+    phase: "cancelled",
+    cancelledAt: new Date().toISOString(),
+    summary: "Cancelled by Claude session request.",
+    errorMessage: reason,
+  };
+}
+
 export async function appendJobLog(job, event, details = {}) {
   await mkdir(dirname(job.logFile), { recursive: true });
   const entry = {

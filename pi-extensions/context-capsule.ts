@@ -98,10 +98,6 @@ function currentPinState(context: CapsuleCommandContext): CapsulePinState {
   return readCapsulePinState(context.sessionManager.getBranch() as SessionEntryLike[]);
 }
 
-function pinError(result: CapsuleResult<unknown>): string {
-  return "error" in result ? `${result.error.code}: ${result.error.message}` : "";
-}
-
 function isCancelled(result: CapsuleResult<unknown>): boolean {
   return "error" in result && result.error.code === "cancelled";
 }
@@ -323,7 +319,7 @@ async function handlePinsCommand(
     }
     const proposed = pinCapsuleFacts(currentPinState(context), selected as CapsuleFact[]);
     if (!proposed.ok) {
-      context.ui.notify(`Pin confirmation failed: ${pinError(proposed)}`, "error");
+      context.ui.notify(`Pin confirmation failed: ${resultError(proposed)}`, "error");
       return;
     }
     const confirmed = await confirmSideEffect(
