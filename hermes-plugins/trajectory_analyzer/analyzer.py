@@ -45,6 +45,8 @@ class SessionRecord:
     title: str | None
     model: str | None
     parent_session_id: str | None
+    delegate_from: str | None
+    parent_model: str | None
     system_prompt: str | None
     api_calls: int
     input_tokens: int
@@ -77,11 +79,14 @@ class SqliteStore:
     """Two-query, bound-SQL reader for the persisted session schema."""
 
     _SESSION_FIELDS = (
-        "id", "source", "title", "model", "parent_session_id", "system_prompt", "api_calls",
-        "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens",
+        "id", "source", "title", "model", "parent_session_id", "model_config",
+        "parent_model", "system_prompt", "api_calls",
+        "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
+        "reasoning_tokens",
     )
     _SESSION_SELECT_FIELDS = (
-        "s.id", "s.source", "s.title", "s.model", "s.parent_session_id",
+        "s.id", "s.source", "s.title", "s.model", "s.parent_session_id", "s.model_config",
+        "parent.model AS parent_model",
         "COALESCE(sp.prompt, s.system_prompt) AS system_prompt",
         "s.api_call_count AS api_calls", "s.input_tokens", "s.output_tokens",
         "s.cache_read_tokens", "s.cache_write_tokens", "s.reasoning_tokens",
@@ -95,6 +100,7 @@ class SqliteStore:
         columns = ", ".join(self._SESSION_SELECT_FIELDS)
         query = (
             f"SELECT {columns} FROM sessions AS s "
+            "LEFT JOIN sessions AS parent ON parent.id = s.parent_session_id "
             "LEFT JOIN system_prompts AS sp ON sp.hash = s.system_prompt_hash "
             "WHERE s.started_at >= ?"
         )
@@ -207,14 +213,6 @@ def _tool_calls(row: Any):
             tool_calls = ()
     if isinstance(tool_calls, list):
         return tool_calls
-    content = _value(row, "content")
-    if isinstance(content, str):
-        try:
-            content = json.loads(content, object_pairs_hook=_unique_object)
-        except (json.JSONDecodeError, RecursionError, TypeError, ValueError):
-            return ()
-    if isinstance(content, dict):
-        return content.get("tool_calls", ())
     return ()
 
 
@@ -281,6 +279,8 @@ def _sessions(rows: Sequence[Any]) -> tuple[SessionRecord, ...]:
                     _optional_text(row, "title"),
                     _optional_text(row, "model"),
                     _optional_text(row, "parent_session_id"),
+                    _delegate_from(row),
+                    _optional_text(row, "parent_model"),
                     _optional_text(row, "system_prompt"),
                     _nonnegative_int(row, "api_calls"),
                     _nonnegative_int(row, "input_tokens"),
@@ -309,7 +309,9 @@ def _messages(rows: Sequence[Any], session_ids: set[str]) -> tuple[MessageRecord
             records.append(
                 MessageRecord(
                     session_id,
-                    message_id if isinstance(message_id, (str, int)) and not isinstance(message_id, bool) else None,
+                    message_id
+                    if isinstance(message_id, (str, int)) and not isinstance(message_id, bool)
+                    else None,
                     role,
                     tool_name if isinstance(tool_name, str) else None,
                     content if isinstance(content, str) else None,
@@ -353,33 +355,44 @@ def _large_tool_payload_findings(
         (turn.session_id, turn.turn_index): turn.user_message_id for turn in turns
     }
     turn_indices: dict[str, int] = {}
+    assistant_counts: dict[tuple[str, int], int] = {}
     candidates: list[dict[str, Any]] = []
     for message in messages:
         if message.role == "user":
-            turn_indices[message.session_id] = turn_indices.get(message.session_id, 0) + 1
-        elif message.role == "tool" and message.session_id in turn_indices and message.content is not None:
+            turn_index = turn_indices.get(message.session_id, 0) + 1
+            turn_indices[message.session_id] = turn_index
+            assistant_counts[(message.session_id, turn_index)] = 0
+        elif (
+            message.role == "tool"
+            and message.session_id in turn_indices
+            and message.content is not None
+        ):
             payload_bytes = len(message.content.encode("utf-8", "replace"))
             if payload_bytes > thresholds.large_tool_payload_bytes:
+                turn_index = turn_indices[message.session_id]
                 candidates.append(
                     {
                         "session_id": message.session_id,
-                        "turn_index": turn_indices[message.session_id],
+                        "turn_index": turn_index,
                         "turn_user_message_id": turn_user_message_ids[
-                            (message.session_id, turn_indices[message.session_id])
+                            (message.session_id, turn_index)
                         ],
                         "tool_message_id": message.id,
                         "tool_name": message.tool_name,
                         "payload_bytes": payload_bytes,
-                        "later_assistant_steps": 0,
+                        "assistant_steps_seen": assistant_counts[
+                            (message.session_id, turn_index)
+                        ],
                     }
                 )
-        elif message.role == "assistant":
-            for candidate in candidates:
-                if (
-                    candidate["session_id"] == message.session_id
-                    and candidate["turn_index"] == turn_indices.get(message.session_id)
-                ):
-                    candidate["later_assistant_steps"] += 1
+        elif message.role == "assistant" and message.session_id in turn_indices:
+            key = (message.session_id, turn_indices[message.session_id])
+            assistant_counts[key] += 1
+    for candidate in candidates:
+        key = (candidate["session_id"], candidate["turn_index"])
+        candidate["later_assistant_steps"] = (
+            assistant_counts[key] - candidate.pop("assistant_steps_seen")
+        )
     return [
         _large_tool_payload_finding(candidate)
         for candidate in candidates
@@ -490,8 +503,9 @@ def _large_initial_prompt_findings(
                     "impact": {
                         "kind": "measured_exposure",
                         "caveat": (
-                            "Estimated token workload uses UTF-8 bytes divided by four per API "
-                            "call; cache and context behavior may reduce repeated provider exposure."
+                            "Estimated token workload uses UTF-8 bytes divided by four per "
+                            "API call; cache and context behavior may reduce repeated provider "
+                            "exposure."
                         ),
                     },
                 }
@@ -535,10 +549,13 @@ def _same_model_child_findings(
         if child.parent_session_id is None:
             continue
         parent = by_id.get(child.parent_session_id)
+        parent_model = child.parent_model if child.parent_model is not None else (
+            parent.model if parent is not None else None
+        )
         if (
-            parent is None
+            child.delegate_from != child.parent_session_id
             or not child.model
-            or child.model != parent.model
+            or child.model != parent_model
             or child.api_calls < thresholds.same_model_child_min_api_calls
             or _has_cyclic_parent(child, by_id)
         ):
@@ -549,13 +566,15 @@ def _same_model_child_findings(
                 "code": "same_model_subagent_exposure",
                 "severity": "medium",
                 "session_id": child.id,
-                "parent_session_id": parent.id,
+                "parent_session_id": child.parent_session_id,
                 "model": child.model,
                 "api_calls": child.api_calls,
                 "child_workload_tokens": workload,
                 "impact": {
                     "kind": "benchmark_required",
-                    "caveat": "Model routing requires a benchmark; exposure is not automatic savings.",
+                    "caveat": (
+                        "Model routing requires a benchmark; exposure is not automatic savings."
+                    ),
                 },
             }
         )
@@ -605,6 +624,19 @@ def _value(row: Any, field: str):
 def _optional_text(row: Any, field: str) -> str | None:
     value = _value(row, field)
     return value if isinstance(value, str) else None
+
+
+def _delegate_from(row: Any) -> str | None:
+    value = _value(row, "model_config")
+    if isinstance(value, str):
+        try:
+            value = json.loads(value, object_pairs_hook=_unique_object)
+        except (json.JSONDecodeError, RecursionError, TypeError, ValueError):
+            return None
+    if not isinstance(value, dict):
+        return None
+    marker = value.get("_delegate_from")
+    return marker if isinstance(marker, str) and marker else None
 
 
 def _nonnegative_int(row: Any, field: str) -> int:

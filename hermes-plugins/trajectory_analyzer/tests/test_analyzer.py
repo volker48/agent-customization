@@ -201,6 +201,37 @@ class AnalyzerTests(unittest.TestCase):
 
         self.assertEqual([], report["findings"])
 
+    def test_assistant_json_content_is_not_interpreted_as_persisted_tool_calls(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        private_name = "PRIVATE_ASSISTANT_RESPONSE_FRAGMENT"
+        content = json.dumps(
+            {
+                "tool_calls": [
+                    {"name": private_name, "arguments": {"example": "value"}}
+                    for _ in range(13)
+                ]
+            }
+        )
+        report = analyze(
+            FakeStore(
+                sessions=[{"id": "s-1", "source": "telegram"}],
+                messages=[
+                    {"session_id": "s-1", "role": "user", "active": 1},
+                    {
+                        "session_id": "s-1",
+                        "role": "assistant",
+                        "active": 1,
+                        "content": content,
+                        "tool_calls": None,
+                    },
+                ],
+            )
+        )
+
+        self.assertEqual([], report["findings"])
+        self.assertNotIn(private_name, repr(report))
+
     def test_deeply_nested_content_embedded_tool_calls_fail_soft(self):
         from trajectory_analyzer.analyzer import analyze
 
@@ -429,6 +460,52 @@ class AnalyzerTests(unittest.TestCase):
 
         self.assertEqual([], report["findings"])
 
+    def test_large_payload_detection_does_not_rescan_prior_sessions(self):
+        from trajectory_analyzer.analyzer import (
+            AnalyzerThresholds,
+            MessageRecord,
+            TurnRecord,
+            _large_tool_payload_findings,
+        )
+
+        class CountingSessionId(str):
+            comparisons = 0
+
+            def __eq__(self, other):
+                type(self).comparisons += 1
+                return super().__eq__(other)
+
+            __hash__ = str.__hash__
+
+        payload = "x" * 40_001
+        messages = []
+        turns = []
+        for index in range(100):
+            session_id = CountingSessionId(f"session-{index}")
+            messages.extend(
+                [
+                    MessageRecord(session_id, f"user-{index}", "user", None, None, ()),
+                    MessageRecord(
+                        session_id,
+                        f"tool-{index}",
+                        "tool",
+                        "web_extract",
+                        payload,
+                        (),
+                    ),
+                    MessageRecord(session_id, None, "assistant", None, None, ()),
+                    MessageRecord(session_id, None, "assistant", None, None, ()),
+                ]
+            )
+            turns.append(TurnRecord(session_id, 1, f"user-{index}", 2, ()))
+
+        findings = _large_tool_payload_findings(
+            tuple(messages), tuple(turns), AnalyzerThresholds()
+        )
+
+        self.assertEqual(100, len(findings))
+        self.assertLess(CountingSessionId.comparisons, 1_000)
+
     def test_multibyte_tool_content_is_measured_in_utf8_bytes(self):
         from trajectory_analyzer.analyzer import analyze
 
@@ -513,7 +590,7 @@ class AnalyzerTests(unittest.TestCase):
             """
             CREATE TABLE sessions (
                 id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL, title TEXT, model TEXT,
-                parent_session_id TEXT, system_prompt TEXT, system_prompt_hash TEXT,
+                parent_session_id TEXT, model_config TEXT, system_prompt TEXT, system_prompt_hash TEXT,
                 api_call_count INTEGER NOT NULL DEFAULT 0,
                 input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
@@ -566,7 +643,7 @@ class AnalyzerTests(unittest.TestCase):
             """
             CREATE TABLE sessions (
                 id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL, title TEXT, model TEXT,
-                parent_session_id TEXT, system_prompt TEXT, system_prompt_hash TEXT,
+                parent_session_id TEXT, model_config TEXT, system_prompt TEXT, system_prompt_hash TEXT,
                 api_call_count INTEGER NOT NULL DEFAULT 0,
                 input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
@@ -625,7 +702,7 @@ class AnalyzerTests(unittest.TestCase):
             """
             CREATE TABLE sessions (
                 id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL, title TEXT, model TEXT,
-                parent_session_id TEXT, system_prompt TEXT, system_prompt_hash TEXT,
+                parent_session_id TEXT, model_config TEXT, system_prompt TEXT, system_prompt_hash TEXT,
                 api_call_count INTEGER NOT NULL DEFAULT 0,
                 input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
@@ -802,33 +879,44 @@ class AnalyzerTests(unittest.TestCase):
                     {"id": "parent", "model": "gpt-5.6-sol"},
                     {
                         "id": "child", "parent_session_id": "parent", "model": "gpt-5.6-sol",
+                        "model_config": json.dumps({"_delegate_from": "parent"}),
                         "api_calls": 10, "input_tokens": 100, "output_tokens": 20,
                         "cache_read_tokens": 30, "cache_write_tokens": 40, "reasoning_tokens": 50,
+                    },
+                    {
+                        "id": "reset-child", "parent_session_id": "parent",
+                        "model": "gpt-5.6-sol", "api_calls": 10, "input_tokens": 999,
                     },
                     {"id": "other-parent", "model": "gpt-5.6-sol"},
                     {
                         "id": "other-model", "parent_session_id": "other-parent", "model": "gpt-5.6-mini",
+                        "model_config": json.dumps({"_delegate_from": "other-parent"}),
                         "api_calls": 10, "input_tokens": 999,
                     },
                     {
                         "id": "under-calls", "parent_session_id": "parent", "model": "gpt-5.6-sol",
+                        "model_config": json.dumps({"_delegate_from": "parent"}),
                         "api_calls": 9, "input_tokens": 999,
                     },
                     {
                         "id": "missing-parent", "parent_session_id": "absent", "model": "gpt-5.6-sol",
+                        "model_config": json.dumps({"_delegate_from": "absent"}),
                         "api_calls": 10, "input_tokens": 999,
                     },
                     {
                         "id": "cycle-a", "parent_session_id": "cycle-b", "model": "gpt-5.6-sol",
+                        "model_config": json.dumps({"_delegate_from": "cycle-b"}),
                         "api_calls": 10, "input_tokens": 999,
                     },
                     {
                         "id": "cycle-b", "parent_session_id": "cycle-a", "model": "gpt-5.6-sol",
+                        "model_config": json.dumps({"_delegate_from": "cycle-a"}),
                         "api_calls": 10, "input_tokens": 999,
                     },
                     {"id": "no-model-parent"},
                     {
                         "id": "no-model", "parent_session_id": "no-model-parent", "api_calls": 10,
+                        "model_config": json.dumps({"_delegate_from": "no-model-parent"}),
                         "input_tokens": 999,
                     },
                 ]
@@ -849,6 +937,53 @@ class AnalyzerTests(unittest.TestCase):
         self.assertIn("benchmark", finding["impact"]["caveat"])
         self.assertNotIn("replacement", str(finding).lower())
 
+    def test_source_filtered_delegate_uses_parent_model_without_analyzing_parent(self):
+        from trajectory_analyzer.analyzer import SqliteStore, analyze
+
+        connection = sqlite3.connect(":memory:")
+        connection.executescript(
+            """
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL, title TEXT, model TEXT,
+                parent_session_id TEXT, model_config TEXT, system_prompt TEXT,
+                system_prompt_hash TEXT, api_call_count INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE system_prompts (hash TEXT PRIMARY KEY, prompt TEXT NOT NULL);
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, active INTEGER,
+                timestamp REAL NOT NULL, content TEXT, tool_name TEXT, tool_calls TEXT
+            );
+            INSERT INTO sessions (id, source, started_at, model)
+            VALUES ('parent', 'telegram', 1788048000.0, 'gpt-test');
+            INSERT INTO sessions (
+                id, source, started_at, model, parent_session_id, model_config,
+                api_call_count, input_tokens
+            ) VALUES (
+                'child', 'subagent', 1788048001.0, 'gpt-test', 'parent',
+                '{"_delegate_from":"parent"}', 10, 123
+            );
+            """
+        )
+
+        report = analyze(
+            SqliteStore(connection),
+            source="subagent",
+            now=datetime(2026, 8, 30, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(1, report["sessions_analyzed"])
+        findings = [
+            finding for finding in report["findings"]
+            if finding["code"] == "same_model_subagent_exposure"
+        ]
+        self.assertEqual(1, len(findings))
+        self.assertEqual("child", findings[0]["session_id"])
+        self.assertEqual("parent", findings[0]["parent_session_id"])
+
     def test_sqlite_store_reads_authoritative_api_call_count_schema(self):
         from trajectory_analyzer.analyzer import SqliteStore, analyze
 
@@ -857,7 +992,7 @@ class AnalyzerTests(unittest.TestCase):
             """
             CREATE TABLE sessions (
                 id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL, title TEXT, model TEXT,
-                parent_session_id TEXT, system_prompt TEXT, system_prompt_hash TEXT,
+                parent_session_id TEXT, model_config TEXT, system_prompt TEXT, system_prompt_hash TEXT,
                 api_call_count INTEGER NOT NULL DEFAULT 0,
                 input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
@@ -892,7 +1027,7 @@ class AnalyzerTests(unittest.TestCase):
             """
             CREATE TABLE sessions (
                 id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL, title TEXT, model TEXT,
-                parent_session_id TEXT, system_prompt TEXT, system_prompt_hash TEXT,
+                parent_session_id TEXT, model_config TEXT, system_prompt TEXT, system_prompt_hash TEXT,
                 api_call_count INTEGER NOT NULL DEFAULT 0,
                 input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,

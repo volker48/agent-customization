@@ -74,7 +74,8 @@ def _finding_measurement(finding):
         )
     if code == "large_initial_prompt":
         return (
-            f"system_prompt_bytes={finding['system_prompt_bytes']} api_calls={finding['api_calls']} "
+            f"system_prompt_bytes={finding['system_prompt_bytes']} "
+            f"api_calls={finding['api_calls']} "
             f"estimated_repeated_workload_tokens={finding['estimated_repeated_workload_tokens']} "
             f"workload_estimate_method={finding['workload_estimate_method']} "
             f"impact={finding['impact']['kind']} caveat={finding['impact']['caveat']}"
@@ -89,7 +90,8 @@ def _finding_measurement(finding):
     if code == "same_model_subagent_exposure":
         return (
             f"parent_session_id={finding['parent_session_id']} model={finding['model']} "
-            f"api_calls={finding['api_calls']} child_workload_tokens={finding['child_workload_tokens']} "
+            f"api_calls={finding['api_calls']} "
+            f"child_workload_tokens={finding['child_workload_tokens']} "
             f"impact={finding['impact']['kind']} caveat={finding['impact']['caveat']}"
         )
     raise ValueError(f"Unsupported finding code: {code}")

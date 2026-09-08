@@ -222,6 +222,7 @@ class CommandRegistrationTests(unittest.TestCase):
                         {
                             "id": "child",
                             "parent_session_id": "parent",
+                            "model_config": {"_delegate_from": "parent"},
                             "model": "gpt-test",
                             "api_calls": 10,
                             "input_tokens": 80_000,
