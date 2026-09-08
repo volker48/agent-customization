@@ -28,6 +28,7 @@ METHODOLOGY_WARNING = (
     "persisted session-level API call counts cannot be attributed to individual turns."
 )
 ESTIMATED_TOKEN_METHOD = "ceil(payload_bytes / 4) * later_assistant_steps"
+MAX_JSON_NESTING = 100
 
 
 class TrajectoryStore(Protocol):
@@ -218,7 +219,9 @@ def _canonical_arguments(arguments: Any):
             arguments = _strict_json_loads(arguments)
         except (json.JSONDecodeError, RecursionError, ValueError):
             return None
-    return arguments if isinstance(arguments, dict) else None
+    if not isinstance(arguments, dict) or not _is_within_json_depth(arguments):
+        return None
+    return arguments
 
 
 def _unique_object(pairs: list[tuple[Any, Any]]) -> dict[Any, Any]:
@@ -234,12 +237,28 @@ def _reject_json_constant(value: str):
     raise ValueError(f"non-standard JSON constant: {value}")
 
 
+def _is_within_json_depth(value: Any) -> bool:
+    pending = [(value, 0)]
+    while pending:
+        current, depth = pending.pop()
+        if depth > MAX_JSON_NESTING:
+            return False
+        if isinstance(current, dict):
+            pending.extend((child, depth + 1) for child in current.values())
+        elif isinstance(current, (list, tuple)):
+            pending.extend((child, depth + 1) for child in current)
+    return True
+
+
 def _strict_json_loads(value: str):
-    return json.loads(
+    parsed = json.loads(
         value,
         object_pairs_hook=_unique_object,
         parse_constant=_reject_json_constant,
     )
+    if not _is_within_json_depth(parsed):
+        raise ValueError(f"JSON exceeds maximum nesting depth of {MAX_JSON_NESTING}")
+    return parsed
 
 
 def _tool_calls(row: Any):
