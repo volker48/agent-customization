@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
+import json
 from typing import Any, Protocol, Sequence
 
 
@@ -43,6 +46,7 @@ class SessionRecord:
 class MessageRecord:
     session_id: str
     role: str
+    tool_fingerprints: tuple[tuple[str, str], ...]
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,7 @@ class TurnRecord:
     session_id: str
     turn_index: int
     assistant_steps: int
+    tool_fingerprints: tuple[tuple[str, str], ...]
 
 
 class SqliteStore:
@@ -74,7 +79,7 @@ class SqliteStore:
     def fetch_active_messages(self, days: int, source: str | None, now: datetime):
         cutoff = (now - timedelta(days=days)).timestamp()
         query = (
-            "SELECT m.session_id, m.role FROM messages AS m "
+            "SELECT m.session_id, m.role, m.content FROM messages AS m "
             "JOIN sessions AS s ON s.id = m.session_id "
             "WHERE m.active = 1 AND s.started_at >= ?"
         )
@@ -83,7 +88,7 @@ class SqliteStore:
             query += " AND s.source = ?"
             parameters = (cutoff, source)
         cursor = self._connection.execute(query + " ORDER BY m.session_id, m.id", parameters)
-        return [_row_dict(row, ("session_id", "role")) for row in cursor]
+        return [_row_dict(row, ("session_id", "role", "content")) for row in cursor]
 
 
 class RuntimeStore(SqliteStore):
@@ -114,6 +119,58 @@ def validate_days(days: int, now: datetime | None = None) -> int:
     return days
 
 
+def _tool_call_fingerprints(tool_calls: Any) -> tuple[tuple[str, str], ...]:
+    if not isinstance(tool_calls, list):
+        return ()
+    fingerprints = []
+    for tool_call in tool_calls:
+        name = _value(tool_call, "name")
+        arguments = _canonical_arguments(_value(tool_call, "arguments"))
+        if not isinstance(name, str) or not name or arguments is None:
+            continue
+        try:
+            canonical = json.dumps(
+                arguments, sort_keys=True, separators=(",", ":"), allow_nan=False
+            )
+        except (RecursionError, TypeError, ValueError):
+            continue
+        fingerprints.append((name, sha256(canonical.encode()).hexdigest()[:16]))
+    return tuple(fingerprints)
+
+
+def _canonical_arguments(arguments: Any):
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments, object_pairs_hook=_unique_object)
+        except (json.JSONDecodeError, RecursionError, ValueError):
+            return None
+    return arguments if isinstance(arguments, dict) else None
+
+
+def _unique_object(pairs: list[tuple[Any, Any]]) -> dict[Any, Any]:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _tool_calls(row: Any):
+    tool_calls = _value(row, "tool_calls")
+    if isinstance(tool_calls, list):
+        return tool_calls
+    content = _value(row, "content")
+    if isinstance(content, str):
+        try:
+            content = json.loads(content, object_pairs_hook=_unique_object)
+        except (json.JSONDecodeError, RecursionError, TypeError, ValueError):
+            return ()
+    if isinstance(content, dict):
+        return content.get("tool_calls", ())
+    return ()
+
+
 def analyze(
     store: TrajectoryStore,
     days: int = 30,
@@ -134,6 +191,8 @@ def analyze(
         for turn in turns
         if turn.assistant_steps > thresholds.assistant_steps_per_turn
     ]
+    findings.extend(_detect_high_tool_fanout(turns, thresholds))
+    findings.extend(_detect_repeated_exact_tool_calls(turns, thresholds))
     return {
         "schema_version": 1,
         "days": days,
@@ -174,7 +233,9 @@ def _messages(rows: Sequence[Any], session_ids: set[str]) -> tuple[MessageRecord
             and session_id in session_ids
             and role in {"user", "assistant"}
         ):
-            records.append(MessageRecord(session_id, role))
+            records.append(
+                MessageRecord(session_id, role, _tool_call_fingerprints(_tool_calls(row)))
+            )
     return tuple(records)
 
 
@@ -185,13 +246,18 @@ def _turns(messages: Sequence[MessageRecord], session_ids: Sequence[str]) -> tup
     for message in messages:
         if message.role == "user":
             counts[message.session_id] += 1
-            turns.append(TurnRecord(message.session_id, counts[message.session_id], 0))
+            turns.append(TurnRecord(message.session_id, counts[message.session_id], 0, ()))
             active[message.session_id] = len(turns) - 1
         elif active[message.session_id] is not None:
             index = active[message.session_id]
             assert index is not None
             turn = turns[index]
-            turns[index] = TurnRecord(turn.session_id, turn.turn_index, turn.assistant_steps + 1)
+            turns[index] = TurnRecord(
+                turn.session_id,
+                turn.turn_index,
+                turn.assistant_steps + 1,
+                turn.tool_fingerprints + message.tool_fingerprints,
+            )
     return tuple(turns)
 
 
@@ -204,6 +270,52 @@ def _finding(turn: TurnRecord) -> dict[str, Any]:
         "assistant_steps": turn.assistant_steps,
         "impact": {"kind": "measured_exposure", "assistant_steps": turn.assistant_steps},
     }
+
+
+def _detect_high_tool_fanout(
+    turns: Sequence[TurnRecord], thresholds: AnalyzerThresholds
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "code": "high_tool_fanout_per_turn",
+            "severity": "high",
+            "session_id": turn.session_id,
+            "turn_index": turn.turn_index,
+            "tool_calls": len(turn.tool_fingerprints),
+            "impact": {
+                "kind": "measured_exposure",
+                "tool_calls": len(turn.tool_fingerprints),
+            },
+        }
+        for turn in turns
+        if len(turn.tool_fingerprints) > thresholds.tool_calls_per_turn
+    ]
+
+
+def _detect_repeated_exact_tool_calls(
+    turns: Sequence[TurnRecord], thresholds: AnalyzerThresholds
+) -> list[dict[str, Any]]:
+    findings = []
+    for turn in turns:
+        counts = Counter(turn.tool_fingerprints)
+        for (tool_name, fingerprint), repeat_count in counts.items():
+            if repeat_count >= thresholds.repeated_exact_tool_call_count:
+                findings.append(
+                    {
+                        "code": "repeated_exact_tool_call",
+                        "severity": "medium",
+                        "session_id": turn.session_id,
+                        "turn_index": turn.turn_index,
+                        "tool_name": tool_name,
+                        "fingerprint": fingerprint,
+                        "repeat_count": repeat_count,
+                        "impact": {
+                            "kind": "benchmark_required",
+                            "repeat_count": repeat_count,
+                        },
+                    }
+                )
+    return findings
 
 
 def _counts(findings: Sequence[dict[str, Any]], field: str) -> dict[str, int]:

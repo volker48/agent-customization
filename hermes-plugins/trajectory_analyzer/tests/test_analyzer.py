@@ -11,6 +11,228 @@ from fakes import FakeStore
 
 
 class AnalyzerTests(unittest.TestCase):
+    def test_tool_call_fingerprints_canonicalize_arguments_without_exposure(self):
+        from trajectory_analyzer.analyzer import _tool_call_fingerprints
+
+        calls = [
+            {
+                "name": "read_file",
+                "arguments": '{"path":"private.txt","token":"SECRET_TOOL_ARG_456"}',
+            },
+            {
+                "name": "read_file",
+                "arguments": {"token": "SECRET_TOOL_ARG_456", "path": "private.txt"},
+            },
+        ]
+
+        fingerprints = _tool_call_fingerprints(calls)
+
+        self.assertEqual("read_file", fingerprints[0][0])
+        self.assertEqual("read_file", fingerprints[1][0])
+        self.assertEqual(fingerprints[0][1], fingerprints[1][1])
+        self.assertEqual(16, len(fingerprints[0][1]))
+        self.assertNotIn("SECRET_TOOL_ARG_456", repr(fingerprints))
+
+    def test_thirteen_tool_calls_produce_measured_high_fanout_finding(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        calls = [
+            {"name": "read_file", "arguments": {"path": f"private-{index}.txt"}}
+            for index in range(13)
+        ]
+        report = analyze(
+            FakeStore(
+                sessions=[{"id": "s-1", "source": "telegram"}],
+                messages=[
+                    {"session_id": "s-1", "role": "user", "active": 1},
+                    {"session_id": "s-1", "role": "assistant", "active": 1, "tool_calls": calls},
+                ],
+            )
+        )
+
+        self.assertEqual(1, len(report["findings"]))
+        finding = report["findings"][0]
+        self.assertEqual("high_tool_fanout_per_turn", finding["code"])
+        self.assertEqual(13, finding["tool_calls"])
+        self.assertEqual("measured_exposure", finding["impact"]["kind"])
+        self.assertNotIn("private-0.txt", repr(finding))
+
+    def test_twelve_tool_calls_are_silent(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        calls = [
+            {"name": "read_file", "arguments": {"path": f"private-{index}.txt"}}
+            for index in range(12)
+        ]
+        report = analyze(
+            FakeStore(
+                sessions=[{"id": "s-1", "source": "telegram"}],
+                messages=[
+                    {"session_id": "s-1", "role": "user", "active": 1},
+                    {"session_id": "s-1", "role": "assistant", "active": 1, "tool_calls": calls},
+                ],
+            )
+        )
+
+        self.assertEqual([], report["findings"])
+
+    def test_three_identical_tool_calls_produce_benchmark_required_repeat_finding(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        calls = [
+            {"name": "read_file", "arguments": {"path": "private.txt", "offset": 10}}
+            for _ in range(3)
+        ]
+        report = analyze(
+            FakeStore(
+                sessions=[{"id": "s-1", "source": "telegram"}],
+                messages=[
+                    {"session_id": "s-1", "role": "user", "active": 1},
+                    {"session_id": "s-1", "role": "assistant", "active": 1, "tool_calls": calls},
+                ],
+            )
+        )
+
+        self.assertEqual(1, len(report["findings"]))
+        finding = report["findings"][0]
+        self.assertEqual("repeated_exact_tool_call", finding["code"])
+        self.assertEqual("read_file", finding["tool_name"])
+        self.assertEqual(16, len(finding["fingerprint"]))
+        self.assertEqual(3, finding["repeat_count"])
+        self.assertEqual("benchmark_required", finding["impact"]["kind"])
+        self.assertNotIn("arguments", finding)
+        self.assertNotIn("private.txt", repr(finding))
+
+    def test_two_identical_tool_calls_are_silent(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        calls = [
+            {"name": "read_file", "arguments": {"path": "private.txt", "offset": 10}}
+            for _ in range(2)
+        ]
+        report = analyze(
+            FakeStore(
+                sessions=[{"id": "s-1", "source": "telegram"}],
+                messages=[
+                    {"session_id": "s-1", "role": "user", "active": 1},
+                    {"session_id": "s-1", "role": "assistant", "active": 1, "tool_calls": calls},
+                ],
+            )
+        )
+
+        self.assertEqual([], report["findings"])
+
+    def test_distinct_tool_arguments_do_not_collapse_into_repeats(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        calls = [
+            {"name": "read_file", "arguments": {"path": "private.txt", "offset": offset}}
+            for offset in (0, 10, 20)
+        ]
+        report = analyze(
+            FakeStore(
+                sessions=[{"id": "s-1", "source": "telegram"}],
+                messages=[
+                    {"session_id": "s-1", "role": "user", "active": 1},
+                    {"session_id": "s-1", "role": "assistant", "active": 1, "tool_calls": calls},
+                ],
+            )
+        )
+
+        self.assertEqual([], report["findings"])
+
+    def test_malformed_tool_call_data_is_skipped(self):
+        from trajectory_analyzer.analyzer import _tool_call_fingerprints
+
+        fingerprints = _tool_call_fingerprints(
+            [
+                {"name": "read_file", "arguments": "not JSON"},
+                {"name": "read_file", "arguments": []},
+                {"name": "read_file", "arguments": {"invalid": object()}},
+                None,
+            ]
+        )
+
+        self.assertEqual((), fingerprints)
+
+    def test_duplicate_json_argument_keys_are_skipped_without_false_repeat(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        calls = [
+            {"name": "read_file", "arguments": '{"path":"private.txt","path":"other.txt"}'},
+            {"name": "read_file", "arguments": {"path": "other.txt"}},
+            {"name": "read_file", "arguments": {"path": "other.txt"}},
+        ]
+
+        report = analyze(
+            FakeStore(
+                sessions=[{"id": "s-1", "source": "telegram"}],
+                messages=[
+                    {"session_id": "s-1", "role": "user", "active": 1},
+                    {"session_id": "s-1", "role": "assistant", "active": 1, "tool_calls": calls},
+                ],
+            )
+        )
+
+        self.assertEqual([], report["findings"])
+
+    def test_content_embedded_duplicate_json_argument_keys_are_skipped_without_false_repeat(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        content = (
+            '{"tool_calls":['
+            '{"name":"read_file","arguments":{"path":"private.txt","path":"other.txt"}},'
+            '{"name":"read_file","arguments":{"path":"other.txt"}},'
+            '{"name":"read_file","arguments":{"path":"other.txt"}}'
+            ']}'
+        )
+
+        report = analyze(
+            FakeStore(
+                sessions=[{"id": "s-1", "source": "telegram"}],
+                messages=[
+                    {"session_id": "s-1", "role": "user", "active": 1},
+                    {"session_id": "s-1", "role": "assistant", "active": 1, "content": content},
+                ],
+            )
+        )
+
+        self.assertEqual([], report["findings"])
+
+    def test_deeply_nested_content_embedded_tool_calls_fail_soft(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        content = '{"tool_calls":[],"nested":' + '[' * 1_500 + 'null' + ']' * 1_500 + '}'
+
+        report = analyze(
+            FakeStore(
+                sessions=[{"id": "s-1", "source": "telegram"}],
+                messages=[
+                    {"session_id": "s-1", "role": "user", "active": 1},
+                    {"session_id": "s-1", "role": "assistant", "active": 1, "content": content},
+                ],
+            )
+        )
+
+        self.assertEqual([], report["findings"])
+
+    def test_deeply_nested_tool_arguments_fail_soft(self):
+        from trajectory_analyzer.analyzer import _tool_call_fingerprints
+
+        deeply_nested_json = '{"nested":' * 1_000 + 'null' + '}' * 1_000
+        deeply_nested_dict = None
+        for _ in range(1_000):
+            deeply_nested_dict = {"nested": deeply_nested_dict}
+
+        fingerprints = _tool_call_fingerprints(
+            [
+                {"name": "read_file", "arguments": deeply_nested_json},
+                {"name": "read_file", "arguments": deeply_nested_dict},
+            ]
+        )
+
+        self.assertEqual((), fingerprints)
+
     def test_empty_store_returns_the_versioned_zero_report(self):
         from trajectory_analyzer.analyzer import analyze
 

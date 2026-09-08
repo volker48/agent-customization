@@ -72,6 +72,62 @@ class CommandRegistrationTests(unittest.TestCase):
         self.assertNotIn("private prompt", json.dumps(report))
         self.assertNotIn("secret response", json.dumps(report))
 
+    def test_analyze_recommends_batching_or_execute_code_for_tool_fanout(self):
+        from trajectory_analyzer.cli import handle_cli
+
+        calls = [
+            {"name": "read_file", "arguments": {"path": f"private-{index}.txt"}}
+            for index in range(13)
+        ]
+        store = FakeStore(
+            sessions=[{"id": "session-1", "source": "telegram"}],
+            messages=[
+                {"session_id": "session-1", "role": "user", "active": 1},
+                {"session_id": "session-1", "role": "assistant", "active": 1, "tool_calls": calls},
+            ],
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            handle_cli(
+                argparse.Namespace(trajectory_command="analyze", days=30, source=None),
+                store=store,
+            )
+
+        terminal = output.getvalue()
+        self.assertIn("high_tool_fanout_per_turn", terminal)
+        self.assertIn("tool_calls=13", terminal)
+        self.assertIn("batching", terminal)
+        self.assertIn("execute_code", terminal)
+        self.assertNotIn("private-0.txt", terminal)
+
+    def test_analyze_preserves_legitimate_retries_in_repeat_recommendation(self):
+        from trajectory_analyzer.cli import handle_cli
+
+        calls = [
+            {"name": "read_file", "arguments": {"path": "private.txt", "offset": 1}}
+            for _ in range(3)
+        ]
+        store = FakeStore(
+            sessions=[{"id": "session-1", "source": "telegram"}],
+            messages=[
+                {"session_id": "session-1", "role": "user", "active": 1},
+                {"session_id": "session-1", "role": "assistant", "active": 1, "tool_calls": calls},
+            ],
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            handle_cli(
+                argparse.Namespace(trajectory_command="analyze", days=30, source=None),
+                store=store,
+            )
+
+        terminal = output.getvalue()
+        self.assertIn("repeated_exact_tool_call", terminal)
+        self.assertIn("caching", terminal)
+        self.assertIn("execute_code", terminal)
+        self.assertIn("legitimate retries", terminal)
+        self.assertNotIn("private.txt", terminal)
+
     def test_analyze_rejects_an_extreme_positive_day_count(self):
         from trajectory_analyzer.cli import setup_cli
 
