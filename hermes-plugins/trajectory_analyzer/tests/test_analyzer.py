@@ -1033,6 +1033,50 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual("child", findings[0]["session_id"])
         self.assertEqual("parent", findings[0]["parent_session_id"])
 
+    def test_source_filter_still_excludes_cross_source_parent_cycles(self):
+        from trajectory_analyzer.analyzer import SqliteStore, analyze
+
+        connection = sqlite3.connect(":memory:")
+        connection.executescript(
+            """
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL, title TEXT, model TEXT,
+                parent_session_id TEXT, model_config TEXT, system_prompt TEXT,
+                system_prompt_hash TEXT, api_call_count INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE system_prompts (hash TEXT PRIMARY KEY, prompt TEXT NOT NULL);
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, active INTEGER,
+                timestamp REAL NOT NULL, content TEXT, tool_name TEXT, tool_calls TEXT
+            );
+            INSERT INTO sessions (
+                id, source, started_at, model, parent_session_id, model_config,
+                api_call_count, input_tokens
+            ) VALUES
+                (
+                    'child', 'subagent', 1788048001.0, 'gpt-test', 'parent',
+                    '{"_delegate_from":"parent"}', 10, 123
+                ),
+                (
+                    'parent', 'telegram', 1788048000.0, 'gpt-test', 'child',
+                    '{"_delegate_from":"child"}', 10, 456
+                );
+            """
+        )
+
+        report = analyze(
+            SqliteStore(connection),
+            source="subagent",
+            now=datetime(2026, 8, 30, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(1, report["sessions_analyzed"])
+        self.assertEqual([], report["findings"])
+
     def test_sqlite_store_reads_authoritative_api_call_count_schema(self):
         from trajectory_analyzer.analyzer import SqliteStore, analyze
 

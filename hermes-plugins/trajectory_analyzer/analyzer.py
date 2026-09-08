@@ -47,6 +47,7 @@ class SessionRecord:
     parent_session_id: str | None
     delegate_from: str | None
     parent_model: str | None
+    has_parent_cycle: bool
     system_prompt: str | None
     api_calls: int
     input_tokens: int
@@ -78,15 +79,40 @@ class TurnRecord:
 class SqliteStore:
     """Two-query, bound-SQL reader for the persisted session schema."""
 
+    _PARENT_CYCLE_SELECT = """
+        (
+            WITH RECURSIVE ancestry(id, parent_session_id, path, cycle) AS (
+                SELECT
+                    s.id,
+                    s.parent_session_id,
+                    ':' || hex(CAST(s.id AS BLOB)) || ':',
+                    0
+                UNION ALL
+                SELECT
+                    parent.id,
+                    parent.parent_session_id,
+                    ancestry.path || hex(CAST(parent.id AS BLOB)) || ':',
+                    instr(
+                        ancestry.path,
+                        ':' || hex(CAST(parent.id AS BLOB)) || ':'
+                    ) > 0
+                FROM ancestry
+                JOIN sessions AS parent ON parent.id = ancestry.parent_session_id
+                WHERE ancestry.cycle = 0
+            )
+            SELECT COALESCE(MAX(cycle), 0) FROM ancestry
+        ) AS has_parent_cycle
+    """.strip()
     _SESSION_FIELDS = (
         "id", "source", "title", "model", "parent_session_id", "model_config",
-        "parent_model", "system_prompt", "api_calls",
+        "parent_model", "has_parent_cycle", "system_prompt", "api_calls",
         "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
         "reasoning_tokens",
     )
     _SESSION_SELECT_FIELDS = (
         "s.id", "s.source", "s.title", "s.model", "s.parent_session_id", "s.model_config",
         "parent.model AS parent_model",
+        _PARENT_CYCLE_SELECT,
         "COALESCE(sp.prompt, s.system_prompt) AS system_prompt",
         "s.api_call_count AS api_calls", "s.input_tokens", "s.output_tokens",
         "s.cache_read_tokens", "s.cache_write_tokens", "s.reasoning_tokens",
@@ -293,6 +319,7 @@ def _sessions(rows: Sequence[Any]) -> tuple[SessionRecord, ...]:
                     _optional_text(row, "parent_session_id"),
                     _delegate_from(row),
                     _optional_text(row, "parent_model"),
+                    bool(_nonnegative_int(row, "has_parent_cycle")),
                     _optional_text(row, "system_prompt"),
                     _nonnegative_int(row, "api_calls"),
                     _nonnegative_int(row, "input_tokens"),
@@ -604,6 +631,8 @@ def _child_workload_tokens(session: SessionRecord) -> int:
 
 
 def _has_cyclic_parent(session: SessionRecord, by_id: dict[str, SessionRecord]) -> bool:
+    if session.has_parent_cycle:
+        return True
     visited = set()
     current = session
     while current.parent_session_id:
