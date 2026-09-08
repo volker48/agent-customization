@@ -128,6 +128,35 @@ class CommandRegistrationTests(unittest.TestCase):
         self.assertIn("legitimate retries", terminal)
         self.assertNotIn("private.txt", terminal)
 
+    def test_analyze_formats_large_tool_payload_without_exposing_payload_text(self):
+        from trajectory_analyzer.cli import handle_cli
+
+        store = FakeStore(
+            sessions=[{"id": "session-1", "source": "telegram"}],
+            messages=[
+                {"id": 13, "session_id": "session-1", "role": "user", "active": 1},
+                {"id": 17, "session_id": "session-1", "role": "tool", "tool_name": "web_extract", "content": "PAYLOAD_SENTINEL" + "x" * (40_001 - len("PAYLOAD_SENTINEL")), "active": 1},
+                {"session_id": "session-1", "role": "assistant", "active": 1},
+                {"session_id": "session-1", "role": "assistant", "active": 1},
+            ],
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            report = handle_cli(
+                argparse.Namespace(trajectory_command="analyze", days=30, source=None), store=store
+            )
+
+        terminal = output.getvalue()
+        self.assertEqual("large_tool_payload", report["findings"][0]["code"])
+        self.assertIn("turn_user_message_id=13", terminal)
+        self.assertIn("tool_message_id=17", terminal)
+        self.assertIn("tool_name=web_extract", terminal)
+        self.assertIn("payload_bytes=40001", terminal)
+        self.assertIn("later_assistant_steps=2", terminal)
+        self.assertIn("estimated_avoidable_workload", terminal)
+        self.assertNotIn("PAYLOAD_SENTINEL", terminal)
+        self.assertNotIn("PAYLOAD_SENTINEL", json.dumps(report))
+
     def test_analyze_rejects_an_extreme_positive_day_count(self):
         from trajectory_analyzer.cli import setup_cli
 

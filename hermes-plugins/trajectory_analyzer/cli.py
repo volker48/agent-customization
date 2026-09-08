@@ -38,12 +38,30 @@ def _print_report(report):
         f"turns={report['turns_analyzed']}"
     )
     for finding in report["findings"]:
+        code = finding["code"]
+        if code == "high_assistant_steps_per_turn":
+            measurement = _finding_measurement(finding)
+        elif code == "high_tool_fanout_per_turn":
+            measurement = _finding_measurement(finding)
+        elif code == "repeated_exact_tool_call":
+            measurement = _finding_measurement(finding)
+        elif code == "large_tool_payload":
+            measurement = (
+                f"turn_user_message_id={finding['turn_user_message_id']} "
+                f"tool_message_id={finding['tool_message_id']} tool_name={finding['tool_name']} "
+                f"payload_bytes={finding['observed']['payload_bytes']} "
+                f"later_assistant_steps={finding['observed']['later_assistant_steps']} "
+                f"impact={finding['impact']['kind']} "
+                f"estimated_tokens={finding['impact']['tokens']}"
+            )
+        else:
+            raise ValueError(f"Unsupported finding code: {code}")
         print(
-            f"{finding['code']} severity={finding['severity']} "
+            f"{code} severity={finding['severity']} "
             f"session_id={finding['session_id']} turn_index={finding['turn_index']} "
-            f"{_finding_measurement(finding)}"
+            f"{measurement}"
         )
-        recommendation = _recommendation(finding["code"])
+        recommendation = _recommendation(code)
         if recommendation:
             print(f"Recommendation: {recommendation}")
     print(f"Methodology: {METHODOLOGY_WARNING}")
