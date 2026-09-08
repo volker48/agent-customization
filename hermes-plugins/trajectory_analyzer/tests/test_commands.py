@@ -12,6 +12,7 @@ from fakes import FakeContext, FakeStore
 
 
 class CommandRegistrationTests(unittest.TestCase):
+
     def test_registers_exactly_the_trajectory_command(self):
         from trajectory_analyzer import register
 
@@ -182,3 +183,64 @@ class CommandRegistrationTests(unittest.TestCase):
                     self.assertEqual(2, raised.code)
                 else:
                     self.fail("Expected argparse to reject a non-positive day count")
+
+    def test_analyze_prints_large_prompt_finding_without_prompt_text(self):
+        from trajectory_analyzer.cli import handle_cli
+
+        prompt = "private system prompt" * 10_000
+        output = io.StringIO()
+        with redirect_stdout(output):
+            report = handle_cli(
+                argparse.Namespace(trajectory_command="analyze", days=30, source=None),
+                store=FakeStore(
+                    sessions=[{"id": "session-2", "system_prompt": prompt, "api_calls": 2}]
+                ),
+            )
+
+        terminal = output.getvalue()
+        self.assertEqual("large_initial_prompt", report["findings"][0]["code"])
+        self.assertIn("large_initial_prompt", terminal)
+        self.assertIn("system_prompt_bytes=210000", terminal)
+        self.assertIn("estimated_repeated_workload_tokens=105000", terminal)
+        self.assertIn("cache", terminal)
+        self.assertIn("context", terminal)
+        self.assertNotIn("private system prompt", terminal)
+
+    def test_analyze_explicitly_formats_cache_and_same_model_findings(self):
+        from trajectory_analyzer.cli import handle_cli
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            report = handle_cli(
+                argparse.Namespace(trajectory_command="analyze", days=30, source=None),
+                store=FakeStore(
+                    sessions=[
+                        {
+                            "id": "parent",
+                            "model": "gpt-test",
+                        },
+                        {
+                            "id": "child",
+                            "parent_session_id": "parent",
+                            "model": "gpt-test",
+                            "api_calls": 10,
+                            "input_tokens": 80_000,
+                            "output_tokens": 2_000,
+                            "cache_read_tokens": 20_000,
+                            "cache_write_tokens": 3_000,
+                            "reasoning_tokens": 4_000,
+                        },
+                    ]
+                ),
+            )
+
+        terminal = output.getvalue()
+        self.assertEqual(
+            ["low_cache_reuse", "same_model_subagent_exposure"],
+            [finding["code"] for finding in report["findings"]],
+        )
+        self.assertIn("relevant_workload_tokens=100000", terminal)
+        self.assertIn("observed_cache_reuse_ratio=0.2", terminal)
+        self.assertIn("parent_session_id=parent", terminal)
+        self.assertIn("child_workload_tokens=109000", terminal)
+        self.assertIn("benchmark", terminal)

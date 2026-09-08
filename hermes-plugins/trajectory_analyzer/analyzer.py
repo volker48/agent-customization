@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
+import math
 from typing import Any, Protocol, Sequence
 
 
@@ -41,6 +42,16 @@ class TrajectoryStore(Protocol):
 class SessionRecord:
     id: str
     source: str | None
+    title: str | None
+    model: str | None
+    parent_session_id: str | None
+    system_prompt: str | None
+    api_calls: int
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    reasoning_tokens: int
 
 
 @dataclass(frozen=True)
@@ -65,21 +76,34 @@ class TurnRecord:
 class SqliteStore:
     """Two-query, bound-SQL reader for the persisted session schema."""
 
+    _SESSION_FIELDS = (
+        "id", "source", "title", "model", "parent_session_id", "system_prompt", "api_calls",
+        "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens",
+    )
+    _SESSION_SELECT_FIELDS = (
+        "s.id", "s.source", "s.title", "s.model", "s.parent_session_id",
+        "COALESCE(sp.prompt, s.system_prompt) AS system_prompt",
+        "s.api_call_count AS api_calls", "s.input_tokens", "s.output_tokens",
+        "s.cache_read_tokens", "s.cache_write_tokens", "s.reasoning_tokens",
+    )
+
     def __init__(self, connection):
         self._connection = connection
 
     def fetch_sessions(self, days: int, source: str | None, now: datetime):
         cutoff = (now - timedelta(days=days)).timestamp()
-        if source is None:
-            cursor = self._connection.execute(
-                "SELECT id, source FROM sessions WHERE started_at >= ?", (cutoff,)
-            )
-        else:
-            cursor = self._connection.execute(
-                "SELECT id, source FROM sessions WHERE started_at >= ? AND source = ?",
-                (cutoff, source),
-            )
-        return [_row_dict(row, ("id", "source")) for row in cursor]
+        columns = ", ".join(self._SESSION_SELECT_FIELDS)
+        query = (
+            f"SELECT {columns} FROM sessions AS s "
+            "LEFT JOIN system_prompts AS sp ON sp.hash = s.system_prompt_hash "
+            "WHERE s.started_at >= ?"
+        )
+        parameters: tuple[float, ...] | tuple[float, str] = (cutoff,)
+        if source is not None:
+            query += " AND s.source = ?"
+            parameters = (cutoff, source)
+        cursor = self._connection.execute(query, parameters)
+        return [_row_dict(row, self._SESSION_FIELDS) for row in cursor]
 
     def fetch_active_messages(self, days: int, source: str | None, now: datetime):
         cutoff = (now - timedelta(days=days)).timestamp()
@@ -217,6 +241,9 @@ def analyze(
     findings.extend(_detect_high_tool_fanout(turns, thresholds))
     findings.extend(_detect_repeated_exact_tool_calls(turns, thresholds))
     findings.extend(_large_tool_payload_findings(messages, turns, thresholds))
+    findings.extend(_large_initial_prompt_findings(sessions, thresholds))
+    findings.extend(_low_cache_reuse_findings(sessions, thresholds))
+    findings.extend(_same_model_child_findings(sessions, thresholds))
     return {
         "schema_version": 1,
         "days": days,
@@ -247,7 +274,22 @@ def _sessions(rows: Sequence[Any]) -> tuple[SessionRecord, ...]:
         session_id = _value(row, "id")
         if isinstance(session_id, str) and session_id:
             source = _value(row, "source")
-            records.append(SessionRecord(session_id, source if isinstance(source, str) else None))
+            records.append(
+                SessionRecord(
+                    session_id,
+                    source if isinstance(source, str) else None,
+                    _optional_text(row, "title"),
+                    _optional_text(row, "model"),
+                    _optional_text(row, "parent_session_id"),
+                    _optional_text(row, "system_prompt"),
+                    _nonnegative_int(row, "api_calls"),
+                    _nonnegative_int(row, "input_tokens"),
+                    _nonnegative_int(row, "output_tokens"),
+                    _nonnegative_int(row, "cache_read_tokens"),
+                    _nonnegative_int(row, "cache_write_tokens"),
+                    _nonnegative_int(row, "reasoning_tokens"),
+                )
+            )
     return tuple(records)
 
 
@@ -424,6 +466,125 @@ def _detect_repeated_exact_tool_calls(
     return findings
 
 
+def _large_initial_prompt_findings(
+    sessions: Sequence[SessionRecord], thresholds: AnalyzerThresholds
+) -> list[dict[str, Any]]:
+    findings = []
+    for session in sessions:
+        if session.system_prompt is None:
+            continue
+        prompt_bytes = len(session.system_prompt.encode("utf-8", errors="replace"))
+        if prompt_bytes > thresholds.large_system_prompt_bytes:
+            findings.append(
+                {
+                    "code": "large_initial_prompt",
+                    "severity": "high",
+                    "session_id": session.id,
+                    "system_prompt_bytes": prompt_bytes,
+                    "api_calls": session.api_calls,
+                    "estimated_repeated_workload_tokens": math.ceil(prompt_bytes / 4)
+                    * session.api_calls,
+                    "workload_estimate_method": (
+                        "ceil(system_prompt_utf8_bytes / 4) * api_call_count"
+                    ),
+                    "impact": {
+                        "kind": "measured_exposure",
+                        "caveat": (
+                            "Estimated token workload uses UTF-8 bytes divided by four per API "
+                            "call; cache and context behavior may reduce repeated provider exposure."
+                        ),
+                    },
+                }
+            )
+    return findings
+
+
+def _low_cache_reuse_findings(
+    sessions: Sequence[SessionRecord], thresholds: AnalyzerThresholds
+) -> list[dict[str, Any]]:
+    findings = []
+    for session in sessions:
+        relevant_workload = session.input_tokens + session.cache_read_tokens
+        if (
+            session.api_calls > 1
+            and relevant_workload >= thresholds.low_cache_reuse_min_workload_tokens
+            and relevant_workload > 0
+        ):
+            ratio = session.cache_read_tokens / relevant_workload
+            if ratio < thresholds.low_cache_reuse_ratio:
+                findings.append(
+                    {
+                        "code": "low_cache_reuse",
+                        "severity": "medium",
+                        "session_id": session.id,
+                        "api_calls": session.api_calls,
+                        "relevant_workload_tokens": relevant_workload,
+                        "observed_cache_reuse_ratio": ratio,
+                        "impact": {"kind": "measured_exposure"},
+                    }
+                )
+    return findings
+
+
+def _same_model_child_findings(
+    sessions: Sequence[SessionRecord], thresholds: AnalyzerThresholds
+) -> list[dict[str, Any]]:
+    by_id = {session.id: session for session in sessions}
+    findings = []
+    for child in sessions:
+        if child.parent_session_id is None:
+            continue
+        parent = by_id.get(child.parent_session_id)
+        if (
+            parent is None
+            or not child.model
+            or child.model != parent.model
+            or child.api_calls < thresholds.same_model_child_min_api_calls
+            or _has_cyclic_parent(child, by_id)
+        ):
+            continue
+        workload = _child_workload_tokens(child)
+        findings.append(
+            {
+                "code": "same_model_subagent_exposure",
+                "severity": "medium",
+                "session_id": child.id,
+                "parent_session_id": parent.id,
+                "model": child.model,
+                "api_calls": child.api_calls,
+                "child_workload_tokens": workload,
+                "impact": {
+                    "kind": "benchmark_required",
+                    "caveat": "Model routing requires a benchmark; exposure is not automatic savings.",
+                },
+            }
+        )
+    return findings
+
+
+def _child_workload_tokens(session: SessionRecord) -> int:
+    return (
+        session.input_tokens
+        + session.output_tokens
+        + session.cache_read_tokens
+        + session.cache_write_tokens
+        + session.reasoning_tokens
+    )
+
+
+def _has_cyclic_parent(session: SessionRecord, by_id: dict[str, SessionRecord]) -> bool:
+    visited = set()
+    current = session
+    while current.parent_session_id:
+        if current.id in visited:
+            return True
+        visited.add(current.id)
+        parent = by_id.get(current.parent_session_id)
+        if parent is None:
+            return False
+        current = parent
+    return False
+
 def _counts(findings: Sequence[dict[str, Any]], field: str) -> dict[str, int]:
     counts: dict[str, int] = {}
     for finding in findings:
@@ -439,6 +600,16 @@ def _value(row: Any, field: str):
         return row[field]
     except (KeyError, TypeError, IndexError):
         return getattr(row, field, None)
+
+
+def _optional_text(row: Any, field: str) -> str | None:
+    value = _value(row, field)
+    return value if isinstance(value, str) else None
+
+
+def _nonnegative_int(row: Any, field: str) -> int:
+    value = _value(row, field)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
 def _row_dict(row: Any, fields: tuple[str, ...]) -> dict[str, Any]:

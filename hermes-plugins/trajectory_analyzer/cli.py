@@ -39,26 +39,10 @@ def _print_report(report):
     )
     for finding in report["findings"]:
         code = finding["code"]
-        if code == "high_assistant_steps_per_turn":
-            measurement = _finding_measurement(finding)
-        elif code == "high_tool_fanout_per_turn":
-            measurement = _finding_measurement(finding)
-        elif code == "repeated_exact_tool_call":
-            measurement = _finding_measurement(finding)
-        elif code == "large_tool_payload":
-            measurement = (
-                f"turn_user_message_id={finding['turn_user_message_id']} "
-                f"tool_message_id={finding['tool_message_id']} tool_name={finding['tool_name']} "
-                f"payload_bytes={finding['observed']['payload_bytes']} "
-                f"later_assistant_steps={finding['observed']['later_assistant_steps']} "
-                f"impact={finding['impact']['kind']} "
-                f"estimated_tokens={finding['impact']['tokens']}"
-            )
-        else:
-            raise ValueError(f"Unsupported finding code: {code}")
+        measurement = _finding_measurement(finding)
         print(
             f"{code} severity={finding['severity']} "
-            f"session_id={finding['session_id']} turn_index={finding['turn_index']} "
+            f"session_id={finding['session_id']} "
             f"{measurement}"
         )
         recommendation = _recommendation(code)
@@ -68,14 +52,47 @@ def _print_report(report):
 
 
 def _finding_measurement(finding):
-    if finding["code"] == "high_assistant_steps_per_turn":
-        return f"assistant_steps={finding['assistant_steps']}"
-    if finding["code"] == "high_tool_fanout_per_turn":
-        return f"tool_calls={finding['tool_calls']}"
-    return (
-        f"tool_name={finding['tool_name']} fingerprint={finding['fingerprint']} "
-        f"repeat_count={finding['repeat_count']}"
-    )
+    code = finding["code"]
+    if code == "high_assistant_steps_per_turn":
+        return f"turn_index={finding['turn_index']} assistant_steps={finding['assistant_steps']}"
+    if code == "high_tool_fanout_per_turn":
+        return f"turn_index={finding['turn_index']} tool_calls={finding['tool_calls']}"
+    if code == "repeated_exact_tool_call":
+        return (
+            f"turn_index={finding['turn_index']} tool_name={finding['tool_name']} "
+            f"fingerprint={finding['fingerprint']} repeat_count={finding['repeat_count']}"
+        )
+    if code == "large_tool_payload":
+        return (
+            f"turn_index={finding['turn_index']} "
+            f"turn_user_message_id={finding['turn_user_message_id']} "
+            f"tool_message_id={finding['tool_message_id']} tool_name={finding['tool_name']} "
+            f"payload_bytes={finding['observed']['payload_bytes']} "
+            f"later_assistant_steps={finding['observed']['later_assistant_steps']} "
+            f"impact={finding['impact']['kind']} "
+            f"estimated_tokens={finding['impact']['tokens']}"
+        )
+    if code == "large_initial_prompt":
+        return (
+            f"system_prompt_bytes={finding['system_prompt_bytes']} api_calls={finding['api_calls']} "
+            f"estimated_repeated_workload_tokens={finding['estimated_repeated_workload_tokens']} "
+            f"workload_estimate_method={finding['workload_estimate_method']} "
+            f"impact={finding['impact']['kind']} caveat={finding['impact']['caveat']}"
+        )
+    if code == "low_cache_reuse":
+        return (
+            f"api_calls={finding['api_calls']} "
+            f"relevant_workload_tokens={finding['relevant_workload_tokens']} "
+            f"observed_cache_reuse_ratio={finding['observed_cache_reuse_ratio']} "
+            f"impact={finding['impact']['kind']}"
+        )
+    if code == "same_model_subagent_exposure":
+        return (
+            f"parent_session_id={finding['parent_session_id']} model={finding['model']} "
+            f"api_calls={finding['api_calls']} child_workload_tokens={finding['child_workload_tokens']} "
+            f"impact={finding['impact']['kind']} caveat={finding['impact']['caveat']}"
+        )
+    raise ValueError(f"Unsupported finding code: {code}")
 
 
 def _recommendation(code):

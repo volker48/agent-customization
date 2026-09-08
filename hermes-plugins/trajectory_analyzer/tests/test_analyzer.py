@@ -12,6 +12,7 @@ from fakes import FakeStore
 
 
 class AnalyzerTests(unittest.TestCase):
+
     def test_tool_call_fingerprints_canonicalize_arguments_without_exposure(self):
         from trajectory_analyzer.analyzer import _tool_call_fingerprints
 
@@ -510,12 +511,20 @@ class AnalyzerTests(unittest.TestCase):
         connection = sqlite3.connect(":memory:")
         connection.executescript(
             """
-            CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL);
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL, title TEXT, model TEXT,
+                parent_session_id TEXT, system_prompt TEXT, system_prompt_hash TEXT,
+                api_call_count INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0, reasoning_tokens INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE system_prompts (hash TEXT PRIMARY KEY, prompt TEXT NOT NULL);
             CREATE TABLE messages (
                 id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, active INTEGER,
                 timestamp REAL NOT NULL, content TEXT, tool_name TEXT, tool_calls TEXT
             );
-            INSERT INTO sessions VALUES ('persisted-session', 'telegram', 1788048000.0);
+            INSERT INTO sessions (id, source, started_at) VALUES ('persisted-session', 'telegram', 1788048000.0);
             """
         )
         calls = [
@@ -555,13 +564,21 @@ class AnalyzerTests(unittest.TestCase):
         connection = sqlite3.connect(":memory:")
         connection.executescript(
             """
-            CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL);
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL, title TEXT, model TEXT,
+                parent_session_id TEXT, system_prompt TEXT, system_prompt_hash TEXT,
+                api_call_count INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0, reasoning_tokens INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE system_prompts (hash TEXT PRIMARY KEY, prompt TEXT NOT NULL);
             CREATE TABLE messages (
                 id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, active INTEGER,
                 timestamp REAL NOT NULL, content TEXT, tool_name TEXT, tool_calls TEXT
             );
-            INSERT INTO sessions VALUES ('telegram-session', 'telegram', 1788048000.0);
-            INSERT INTO sessions VALUES ('other-session', 'discord', 1788048000.0);
+            INSERT INTO sessions (id, source, started_at) VALUES ('telegram-session', 'telegram', 1788048000.0);
+            INSERT INTO sessions (id, source, started_at) VALUES ('other-session', 'discord', 1788048000.0);
             INSERT INTO messages VALUES
                 (1, 'telegram-session', 'user', 1, 1788048001.0, 'private prompt', NULL, NULL);
             INSERT INTO messages VALUES
@@ -606,7 +623,15 @@ class AnalyzerTests(unittest.TestCase):
         connection = sqlite3.connect(":memory:")
         connection.executescript(
             """
-            CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL);
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL, title TEXT, model TEXT,
+                parent_session_id TEXT, system_prompt TEXT, system_prompt_hash TEXT,
+                api_call_count INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0, reasoning_tokens INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE system_prompts (hash TEXT PRIMARY KEY, prompt TEXT NOT NULL);
             CREATE TABLE messages (
                 id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, active INTEGER,
                 timestamp REAL NOT NULL, content TEXT, tool_name TEXT, tool_calls TEXT
@@ -614,7 +639,7 @@ class AnalyzerTests(unittest.TestCase):
             """
         )
         connection.executemany(
-            "INSERT INTO sessions VALUES (?, 'telegram', 1788048000.0)",
+            "INSERT INTO sessions (id, source, started_at) VALUES (?, 'telegram', 1788048000.0)",
             [(f"session-{index}",) for index in range(1_001)],
         )
         recorded = RecordingConnection(connection)
@@ -631,3 +656,280 @@ class AnalyzerTests(unittest.TestCase):
         self.assertIn("s.started_at >= ?", message_query)
         self.assertIn("s.source = ?", message_query)
         self.assertEqual(2, len(message_parameters))
+
+    def test_large_initial_prompt_reports_token_estimate_method_and_cache_context_caveat(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        prompt = "x" * 100_001
+        report = analyze(
+            FakeStore(
+                sessions=[
+                    {
+                        "id": "large-prompt",
+                        "source": "telegram",
+                        "title": "Private title",
+                        "system_prompt": prompt,
+                        "api_calls": 2,
+                    },
+                    {
+                        "id": "prompt-boundary",
+                        "source": "telegram",
+                        "system_prompt": "x" * 100_000,
+                        "api_calls": 2,
+                    },
+                ]
+            )
+        )
+
+        findings = report["findings"]
+        self.assertEqual(1, len(findings))
+        finding = findings[0]
+        self.assertEqual("large_initial_prompt", finding["code"])
+        self.assertEqual("large-prompt", finding["session_id"])
+        self.assertEqual(100_001, finding["system_prompt_bytes"])
+        self.assertEqual(2, finding["api_calls"])
+        self.assertEqual(50_002, finding["estimated_repeated_workload_tokens"])
+        self.assertEqual(
+            "ceil(system_prompt_utf8_bytes / 4) * api_call_count",
+            finding["workload_estimate_method"],
+        )
+        self.assertEqual("measured_exposure", finding["impact"]["kind"])
+        self.assertIn("cache", finding["impact"]["caveat"])
+        self.assertIn("context", finding["impact"]["caveat"])
+        self.assertNotIn("estimated_repeated_workload_bytes", finding)
+        serialized = str(report)
+        self.assertNotIn(prompt, serialized)
+        self.assertNotIn("Private title", serialized)
+
+    def test_large_initial_prompt_reports_at_byte_threshold_even_with_zero_api_calls(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        report = analyze(
+            FakeStore(
+                sessions=[
+                    {
+                        "id": "zero-api-calls",
+                        "system_prompt": "x" * 100_001,
+                        "api_calls": 0,
+                    }
+                ]
+            )
+        )
+
+        findings = [
+            finding for finding in report["findings"] if finding["code"] == "large_initial_prompt"
+        ]
+        self.assertEqual(1, len(findings))
+        self.assertEqual("zero-api-calls", findings[0]["session_id"])
+        self.assertEqual(0, findings[0]["api_calls"])
+        self.assertEqual(0, findings[0]["estimated_repeated_workload_tokens"])
+
+    def test_large_initial_prompt_with_lone_surrogate_uses_utf8_replacement_without_content(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        malformed_prompt = "x" * 100_000 + "\ud800"
+        report = analyze(
+            FakeStore(
+                sessions=[
+                    {
+                        "id": "malformed-prompt",
+                        "system_prompt": malformed_prompt,
+                        "api_calls": 0,
+                    }
+                ]
+            )
+        )
+
+        findings = [
+            finding for finding in report["findings"] if finding["code"] == "large_initial_prompt"
+        ]
+        self.assertEqual(1, len(findings))
+        self.assertEqual("malformed-prompt", findings[0]["session_id"])
+        self.assertEqual(100_001, findings[0]["system_prompt_bytes"])
+        self.assertEqual(0, findings[0]["estimated_repeated_workload_tokens"])
+        self.assertNotIn(malformed_prompt, str(report))
+
+    def test_low_cache_reuse_reports_observed_ratio_after_workload_and_call_gates(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        report = analyze(
+            FakeStore(
+                sessions=[
+                    {
+                        "id": "low-cache",
+                        "source": "telegram",
+                        "input_tokens": 80_000,
+                        "cache_read_tokens": 20_000,
+                        "api_calls": 3,
+                    },
+                    {
+                        "id": "below-workload",
+                        "input_tokens": 79_999,
+                        "cache_read_tokens": 20_000,
+                        "api_calls": 3,
+                    },
+                    {
+                        "id": "ratio-boundary",
+                        "input_tokens": 50_000,
+                        "cache_read_tokens": 50_000,
+                        "api_calls": 3,
+                    },
+                    {
+                        "id": "one-call",
+                        "input_tokens": 80_000,
+                        "cache_read_tokens": 20_000,
+                        "api_calls": 1,
+                    },
+                ]
+            )
+        )
+
+        findings = [finding for finding in report["findings"] if finding["code"] == "low_cache_reuse"]
+        self.assertEqual(1, len(findings))
+        finding = findings[0]
+        self.assertEqual("low-cache", finding["session_id"])
+        self.assertEqual(100_000, finding["relevant_workload_tokens"])
+        self.assertEqual(0.20, finding["observed_cache_reuse_ratio"])
+        self.assertEqual("measured_exposure", finding["impact"]["kind"])
+        self.assertNotIn("TTL", str(finding))
+
+    def test_same_model_child_exposure_requires_benchmark_and_skips_invalid_links(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        report = analyze(
+            FakeStore(
+                sessions=[
+                    {"id": "parent", "model": "gpt-5.6-sol"},
+                    {
+                        "id": "child", "parent_session_id": "parent", "model": "gpt-5.6-sol",
+                        "api_calls": 10, "input_tokens": 100, "output_tokens": 20,
+                        "cache_read_tokens": 30, "cache_write_tokens": 40, "reasoning_tokens": 50,
+                    },
+                    {"id": "other-parent", "model": "gpt-5.6-sol"},
+                    {
+                        "id": "other-model", "parent_session_id": "other-parent", "model": "gpt-5.6-mini",
+                        "api_calls": 10, "input_tokens": 999,
+                    },
+                    {
+                        "id": "under-calls", "parent_session_id": "parent", "model": "gpt-5.6-sol",
+                        "api_calls": 9, "input_tokens": 999,
+                    },
+                    {
+                        "id": "missing-parent", "parent_session_id": "absent", "model": "gpt-5.6-sol",
+                        "api_calls": 10, "input_tokens": 999,
+                    },
+                    {
+                        "id": "cycle-a", "parent_session_id": "cycle-b", "model": "gpt-5.6-sol",
+                        "api_calls": 10, "input_tokens": 999,
+                    },
+                    {
+                        "id": "cycle-b", "parent_session_id": "cycle-a", "model": "gpt-5.6-sol",
+                        "api_calls": 10, "input_tokens": 999,
+                    },
+                    {"id": "no-model-parent"},
+                    {
+                        "id": "no-model", "parent_session_id": "no-model-parent", "api_calls": 10,
+                        "input_tokens": 999,
+                    },
+                ]
+            )
+        )
+
+        findings = [
+            finding for finding in report["findings"]
+            if finding["code"] == "same_model_subagent_exposure"
+        ]
+        self.assertEqual(1, len(findings))
+        finding = findings[0]
+        self.assertEqual("child", finding["session_id"])
+        self.assertEqual("parent", finding["parent_session_id"])
+        self.assertEqual("gpt-5.6-sol", finding["model"])
+        self.assertEqual(240, finding["child_workload_tokens"])
+        self.assertEqual("benchmark_required", finding["impact"]["kind"])
+        self.assertIn("benchmark", finding["impact"]["caveat"])
+        self.assertNotIn("replacement", str(finding).lower())
+
+    def test_sqlite_store_reads_authoritative_api_call_count_schema(self):
+        from trajectory_analyzer.analyzer import SqliteStore, analyze
+
+        connection = sqlite3.connect(":memory:")
+        connection.executescript(
+            """
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL, title TEXT, model TEXT,
+                parent_session_id TEXT, system_prompt TEXT, system_prompt_hash TEXT,
+                api_call_count INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0, reasoning_tokens INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE system_prompts (hash TEXT PRIMARY KEY, prompt TEXT NOT NULL);
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, active INTEGER,
+                timestamp REAL NOT NULL, content TEXT, tool_name TEXT, tool_calls TEXT
+            );
+            INSERT INTO sessions (
+                id, source, started_at, system_prompt, api_call_count
+            ) VALUES ('authoritative-schema', 'telegram', 1788048000.0, 'x', 2);
+            """
+        )
+
+        now = datetime(2026, 8, 30, tzinfo=timezone.utc)
+        store = SqliteStore(connection)
+
+        sessions = store.fetch_sessions(days=30, source="telegram", now=now)
+        report = analyze(store, source="telegram", now=now)
+
+        self.assertEqual(2, sessions[0]["api_calls"])
+        self.assertEqual(1, report["sessions_analyzed"])
+        self.assertEqual([], report["findings"])
+
+    def test_sqlite_store_reads_deduplicated_system_prompt_with_one_bounded_join(self):
+        from trajectory_analyzer.analyzer import SqliteStore, analyze
+
+        connection = sqlite3.connect(":memory:")
+        connection.executescript(
+            """
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL, title TEXT, model TEXT,
+                parent_session_id TEXT, system_prompt TEXT, system_prompt_hash TEXT,
+                api_call_count INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0, reasoning_tokens INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE system_prompts (hash TEXT PRIMARY KEY, prompt TEXT NOT NULL);
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, active INTEGER,
+                timestamp REAL NOT NULL, content TEXT, tool_name TEXT, tool_calls TEXT
+            );
+            INSERT INTO system_prompts (hash, prompt) VALUES ('prompt-hash', 'x');
+            INSERT INTO sessions (
+                id, source, started_at, system_prompt, system_prompt_hash, api_call_count
+            ) VALUES ('deduplicated-prompt', 'telegram', 1788048000.0, NULL, 'prompt-hash', 0);
+            """
+        )
+        connection.execute(
+            "UPDATE system_prompts SET prompt = ? WHERE hash = 'prompt-hash'", ("x" * 100_001,)
+        )
+        statements = []
+        connection.set_trace_callback(statements.append)
+
+        report = analyze(
+            SqliteStore(connection), source="telegram", now=datetime(2026, 8, 30, tzinfo=timezone.utc)
+        )
+
+        selects = [
+            statement for statement in statements if statement.lstrip().upper().startswith("SELECT")
+        ]
+        findings = [
+            finding for finding in report["findings"] if finding["code"] == "large_initial_prompt"
+        ]
+        self.assertEqual(2, len(selects))
+        self.assertIn("LEFT JOIN system_prompts", selects[0])
+        self.assertIn("COALESCE(sp.prompt, s.system_prompt) AS system_prompt", selects[0])
+        self.assertEqual(1, len(findings))
+        self.assertEqual("deduplicated-prompt", findings[0]["session_id"])
+        self.assertEqual(0, findings[0]["api_calls"])
+        self.assertEqual(0, findings[0]["estimated_repeated_workload_tokens"])
+        self.assertNotIn("x" * 100_001, str(report))
