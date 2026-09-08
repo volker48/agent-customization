@@ -1,37 +1,26 @@
-import { execFile, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 
 import { exitedProcessPid } from "./helpers/process.js";
+import { runCompanion } from "./helpers/pi-companion.js";
 import { runImplement } from "../plugins/pi/scripts/lib/implement.mjs";
 import { runResult, runStatus } from "../plugins/pi/scripts/lib/inspect.mjs";
 import {
+  cancelJob,
+  completeJob,
   createImplementationJob,
+  failJob,
   listJobs,
+  readJob,
   persistJob,
   updateJobRecord,
 } from "../plugins/pi/scripts/lib/jobs.mjs";
 
-const COMPANION = join(process.cwd(), "plugins/pi/scripts/pi-companion.mjs");
 const execFileAsync = promisify(execFile);
-
-async function runCompanion(args: string[], input: string, env: NodeJS.ProcessEnv, cwd: string) {
-  const child = spawn(process.execPath, [COMPANION, ...args], {
-    cwd,
-    env,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  let stdout = "";
-  child.stdout.on("data", (chunk) => {
-    stdout += chunk.toString();
-  });
-  child.stdin.end(input);
-  const status = await new Promise<number | null>((resolve) => child.on("exit", resolve));
-  return { status, stdout };
-}
 
 async function writeFakePi(script: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "fake-pi-jobs-"));
@@ -257,6 +246,44 @@ describe("Pi implementation job audit ledger", () => {
     expect(status.report).toContain("Warning: Skipped unreadable job record broken.json");
     expect(missing.ok).toBe(false);
     expect(missing.report).toContain("Job not found: does-not-exist");
+  });
+
+  it.each(["completed", "failed", "cancelled"])(
+    "preserves a persisted %s result when stale workers try to finalize it",
+    async (status) => {
+      const dataDir = await mkdtemp(join(tmpdir(), "pi-terminal-job-"));
+      try {
+        const staleJob = createImplementationJob({ dataDir });
+        const persisted = { ...staleJob, status, phase: status, result: "original result" };
+        await persistJob(persisted);
+
+        await completeJob({ ...staleJob }, "late completion", []);
+        expect(await readJob(staleJob.jobFile)).toEqual(persisted);
+        await failJob({ ...staleJob }, "late failure");
+        expect(await readJob(staleJob.jobFile)).toEqual(persisted);
+        await cancelJob({ ...staleJob }, "late cancellation");
+        expect(await readJob(staleJob.jobFile)).toEqual(persisted);
+      } finally {
+        await rm(dataDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("treats a failure during cancellation as cancelled, not failed", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "pi-cancelling-job-"));
+    try {
+      const staleJob = createImplementationJob({ dataDir });
+      await persistJob({ ...staleJob, status: "cancelling" });
+      await failJob(staleJob, "RPC stopped");
+      expect(await readJob(staleJob.jobFile)).toMatchObject({
+        status: "cancelled",
+        phase: "cancelled",
+        errorMessage: "RPC stopped",
+        cancelledAt: expect.any(String),
+      });
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
   });
 
   it("recovers stale job locks before updating records", async () => {

@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { access, chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,23 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { runImplement } from "../plugins/pi/scripts/lib/implement.mjs";
 
-async function runCompanion(args: string[], input: string, env: NodeJS.ProcessEnv) {
-  const child = spawn(process.execPath, ["plugins/pi/scripts/pi-companion.mjs", ...args], {
-    env,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  let stdout = "";
-  let stderr = "";
-  child.stdout.on("data", (chunk) => {
-    stdout += chunk.toString();
-  });
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk.toString();
-  });
-  child.stdin.end(input);
-  const status = await new Promise<number | null>((resolve) => child.on("exit", resolve));
-  return { status, stderr, stdout };
-}
+import { runCompanion } from "./helpers/pi-companion.js";
 
 async function writeFakePi(script: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "fake-pi-impl-"));
@@ -177,7 +160,15 @@ function finalTextFallbackFakePi(logPath: string): string {
     `    if (command.type === "prompt") {
       emit({ id: command.id, type: "response", command: "prompt", success: true });
       emit({ type: "agent_end", messages: [
-        { role: "assistant", content: [{ type: "text", text: "Fallback implementation report." }] }
+        { role: "assistant", content: "Earlier response, not the final report." },
+        { role: "assistant", content: [
+          { type: "thinking", thinking: "Private reasoning, not the report." },
+          { type: "text", text: "  Fallback implementation report.  " },
+          { type: "text", text: 42 }
+        ] },
+        { role: "toolResult", content: "Tool output, not the report." },
+        { role: "user", content: "User input, not the report." },
+        { role: "assistant", content: [] }
       ] });
     }
     if (command.type === "get_last_assistant_text") {

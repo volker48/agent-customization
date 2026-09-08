@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +5,7 @@ import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
+import { runCompanion } from "./helpers/pi-companion.js";
 import { findJob } from "../plugins/pi/scripts/lib/jobs.mjs";
 import {
   buildReviewPiArgs,
@@ -126,31 +126,6 @@ process.stdin.on("data", (chunk) => {
 });
 process.on("SIGTERM", () => process.exit(0));
 `;
-}
-
-async function runCompanion(
-  args: string[],
-  input: string,
-  env: NodeJS.ProcessEnv,
-  cwd = process.cwd(),
-) {
-  const script = join(process.cwd(), "plugins/pi/scripts/pi-companion.mjs");
-  const child = spawn(process.execPath, [script, ...args], {
-    cwd,
-    env,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  let stdout = "";
-  let stderr = "";
-  child.stdout.on("data", (chunk) => {
-    stdout += chunk.toString();
-  });
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk.toString();
-  });
-  child.stdin.end(input);
-  const status = await new Promise<number | null>((resolve) => child.on("exit", resolve));
-  return { status, stderr, stdout };
 }
 
 describe("Claude Code Pi read-only review delegation", () => {
