@@ -1,3 +1,4 @@
+import json
 import pathlib
 import sqlite3
 import sys
@@ -334,6 +335,51 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(0, report["turns_analyzed"])
         self.assertEqual([], report["findings"])
 
+    def test_sqlite_persisted_standard_tool_calls_produce_fanout_and_repeat_findings(self):
+        from trajectory_analyzer.analyzer import SqliteStore, analyze
+
+        connection = sqlite3.connect(":memory:")
+        connection.executescript(
+            """
+            CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL);
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, active INTEGER,
+                timestamp REAL NOT NULL, content TEXT, tool_calls TEXT
+            );
+            INSERT INTO sessions VALUES ('persisted-session', 'telegram', 1788048000.0);
+            """
+        )
+        calls = [
+            {
+                "id": f"call-{index}",
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "arguments": json.dumps({"path": "private-repeat.txt" if index < 3 else f"private-{index}.txt"}),
+                },
+            }
+            for index in range(13)
+        ]
+        connection.execute(
+            "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (1, "persisted-session", "user", 1, 1788048001.0, "private prompt", None),
+        )
+        connection.execute(
+            "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (2, "persisted-session", "assistant", 1, 1788048002.0, None, json.dumps(calls)),
+        )
+
+        report = analyze(
+            SqliteStore(connection), now=datetime(2026, 8, 30, tzinfo=timezone.utc)
+        )
+
+        findings = {finding["code"]: finding for finding in report["findings"]}
+        self.assertEqual(13, findings["high_tool_fanout_per_turn"]["tool_calls"])
+        self.assertEqual(3, findings["repeated_exact_tool_call"]["repeat_count"])
+        self.assertEqual("read_file", findings["repeated_exact_tool_call"]["tool_name"])
+        self.assertNotIn("private-repeat.txt", repr(report))
+        self.assertNotIn("private prompt", repr(report))
+
     def test_sqlite_store_filters_source_and_inactive_rows_in_its_two_queries(self):
         from trajectory_analyzer.analyzer import SqliteStore, analyze
 
@@ -343,18 +389,18 @@ class AnalyzerTests(unittest.TestCase):
             CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL);
             CREATE TABLE messages (
                 id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, active INTEGER,
-                timestamp REAL NOT NULL, content TEXT
+                timestamp REAL NOT NULL, content TEXT, tool_calls TEXT
             );
             INSERT INTO sessions VALUES ('telegram-session', 'telegram', 1788048000.0);
             INSERT INTO sessions VALUES ('other-session', 'discord', 1788048000.0);
             INSERT INTO messages VALUES
-                (1, 'telegram-session', 'user', 1, 1788048001.0, 'private prompt');
+                (1, 'telegram-session', 'user', 1, 1788048001.0, 'private prompt', NULL);
             INSERT INTO messages VALUES
-                (2, 'telegram-session', 'assistant', 1, 1788048002.0, 'private response');
+                (2, 'telegram-session', 'assistant', 1, 1788048002.0, 'private response', NULL);
             INSERT INTO messages VALUES
-                (3, 'telegram-session', 'assistant', 0, 1788048003.0, 'inactive response');
+                (3, 'telegram-session', 'assistant', 0, 1788048003.0, 'inactive response', NULL);
             INSERT INTO messages VALUES
-                (4, 'other-session', 'user', 1, 1788048004.0, 'other prompt');
+                (4, 'other-session', 'user', 1, 1788048004.0, 'other prompt', NULL);
             """
         )
         statements = []
@@ -394,7 +440,7 @@ class AnalyzerTests(unittest.TestCase):
             CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, started_at REAL NOT NULL);
             CREATE TABLE messages (
                 id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, active INTEGER,
-                timestamp REAL NOT NULL, content TEXT
+                timestamp REAL NOT NULL, content TEXT, tool_calls TEXT
             );
             """
         )
@@ -412,6 +458,7 @@ class AnalyzerTests(unittest.TestCase):
         message_query, message_parameters = selects[1]
         self.assertIn("JOIN sessions AS s", message_query)
         self.assertIn("m.active = 1", message_query)
+        self.assertIn("m.tool_calls", message_query)
         self.assertIn("s.started_at >= ?", message_query)
         self.assertIn("s.source = ?", message_query)
         self.assertEqual(2, len(message_parameters))

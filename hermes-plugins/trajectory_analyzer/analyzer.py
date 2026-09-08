@@ -79,7 +79,7 @@ class SqliteStore:
     def fetch_active_messages(self, days: int, source: str | None, now: datetime):
         cutoff = (now - timedelta(days=days)).timestamp()
         query = (
-            "SELECT m.session_id, m.role, m.content FROM messages AS m "
+            "SELECT m.session_id, m.role, m.content, m.tool_calls FROM messages AS m "
             "JOIN sessions AS s ON s.id = m.session_id "
             "WHERE m.active = 1 AND s.started_at >= ?"
         )
@@ -88,7 +88,10 @@ class SqliteStore:
             query += " AND s.source = ?"
             parameters = (cutoff, source)
         cursor = self._connection.execute(query + " ORDER BY m.session_id, m.id", parameters)
-        return [_row_dict(row, ("session_id", "role", "content")) for row in cursor]
+        return [
+            _row_dict(row, ("session_id", "role", "content", "tool_calls"))
+            for row in cursor
+        ]
 
 
 class RuntimeStore(SqliteStore):
@@ -124,8 +127,14 @@ def _tool_call_fingerprints(tool_calls: Any) -> tuple[tuple[str, str], ...]:
         return ()
     fingerprints = []
     for tool_call in tool_calls:
-        name = _value(tool_call, "name")
-        arguments = _canonical_arguments(_value(tool_call, "arguments"))
+        function = _value(tool_call, "function")
+        name = _value(function, "name") if function is not None else _value(tool_call, "name")
+        raw_arguments = (
+            _value(function, "arguments")
+            if function is not None
+            else _value(tool_call, "arguments")
+        )
+        arguments = _canonical_arguments(raw_arguments)
         if not isinstance(name, str) or not name or arguments is None:
             continue
         try:
@@ -158,6 +167,11 @@ def _unique_object(pairs: list[tuple[Any, Any]]) -> dict[Any, Any]:
 
 def _tool_calls(row: Any):
     tool_calls = _value(row, "tool_calls")
+    if isinstance(tool_calls, str):
+        try:
+            tool_calls = json.loads(tool_calls, object_pairs_hook=_unique_object)
+        except (json.JSONDecodeError, RecursionError, TypeError, ValueError):
+            tool_calls = ()
     if isinstance(tool_calls, list):
         return tool_calls
     content = _value(row, "content")
