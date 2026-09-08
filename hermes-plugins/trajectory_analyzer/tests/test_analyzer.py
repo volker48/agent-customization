@@ -178,6 +178,29 @@ class AnalyzerTests(unittest.TestCase):
 
         self.assertEqual([], report["findings"])
 
+    def test_nonstandard_json_constants_in_tool_calls_fail_soft(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        valid_call = '{"name":"read_file","arguments":{"path":"private.txt"}}'
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(constant=constant):
+                report = analyze(
+                    FakeStore(
+                        sessions=[{"id": "s-1", "source": "telegram"}],
+                        messages=[
+                            {"session_id": "s-1", "role": "user", "active": 1},
+                            {
+                                "session_id": "s-1",
+                                "role": "assistant",
+                                "active": 1,
+                                "tool_calls": f"[{valid_call},{valid_call},{valid_call},{constant}]",
+                            },
+                        ],
+                    )
+                )
+
+                self.assertEqual([], report["findings"])
+
     def test_content_embedded_duplicate_json_argument_keys_are_skipped_without_false_repeat(self):
         from trajectory_analyzer.analyzer import analyze
 
@@ -936,6 +959,32 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual("benchmark_required", finding["impact"]["kind"])
         self.assertIn("benchmark", finding["impact"]["caveat"])
         self.assertNotIn("replacement", str(finding).lower())
+
+    def test_nonstandard_json_constants_in_model_config_fail_soft(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(constant=constant):
+                report = analyze(
+                    FakeStore(
+                        sessions=[
+                            {"id": "parent", "model": "gpt-test"},
+                            {
+                                "id": "child",
+                                "parent_session_id": "parent",
+                                "model": "gpt-test",
+                                "model_config": (
+                                    '{"_delegate_from":"parent","noise":'
+                                    f"{constant}}}"
+                                ),
+                                "api_calls": 10,
+                                "input_tokens": 123,
+                            },
+                        ]
+                    )
+                )
+
+                self.assertEqual([], report["findings"])
 
     def test_source_filtered_delegate_uses_parent_model_without_analyzing_parent(self):
         from trajectory_analyzer.analyzer import SqliteStore, analyze

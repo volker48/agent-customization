@@ -189,7 +189,7 @@ def _tool_call_fingerprints(tool_calls: Any) -> tuple[tuple[str, str], ...]:
 def _canonical_arguments(arguments: Any):
     if isinstance(arguments, str):
         try:
-            arguments = json.loads(arguments, object_pairs_hook=_unique_object)
+            arguments = _strict_json_loads(arguments)
         except (json.JSONDecodeError, RecursionError, ValueError):
             return None
     return arguments if isinstance(arguments, dict) else None
@@ -204,11 +204,23 @@ def _unique_object(pairs: list[tuple[Any, Any]]) -> dict[Any, Any]:
     return result
 
 
+def _reject_json_constant(value: str):
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
+def _strict_json_loads(value: str):
+    return json.loads(
+        value,
+        object_pairs_hook=_unique_object,
+        parse_constant=_reject_json_constant,
+    )
+
+
 def _tool_calls(row: Any):
     tool_calls = _value(row, "tool_calls")
     if isinstance(tool_calls, str):
         try:
-            tool_calls = json.loads(tool_calls, object_pairs_hook=_unique_object)
+            tool_calls = _strict_json_loads(tool_calls)
         except (json.JSONDecodeError, RecursionError, TypeError, ValueError):
             tool_calls = ()
     if isinstance(tool_calls, list):
@@ -630,7 +642,7 @@ def _delegate_from(row: Any) -> str | None:
     value = _value(row, "model_config")
     if isinstance(value, str):
         try:
-            value = json.loads(value, object_pairs_hook=_unique_object)
+            value = _strict_json_loads(value)
         except (json.JSONDecodeError, RecursionError, TypeError, ValueError):
             return None
     if not isinstance(value, dict):
