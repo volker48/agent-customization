@@ -127,6 +127,7 @@ class CommandRegistrationTests(unittest.TestCase):
         self.assertIn("caching", terminal)
         self.assertIn("execute_code", terminal)
         self.assertIn("legitimate retries", terminal)
+        self.assertNotIn("fingerprint", terminal)
         self.assertNotIn("private.txt", terminal)
 
     def test_analyze_formats_large_tool_payload_without_exposing_payload_text(self):

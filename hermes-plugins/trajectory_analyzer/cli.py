@@ -60,7 +60,7 @@ def _finding_measurement(finding):
     if code == "repeated_exact_tool_call":
         return (
             f"turn_index={finding['turn_index']} tool_name={finding['tool_name']} "
-            f"fingerprint={finding['fingerprint']} repeat_count={finding['repeat_count']}"
+            f"repeat_count={finding['repeat_count']}"
         )
     if code == "large_tool_payload":
         return (

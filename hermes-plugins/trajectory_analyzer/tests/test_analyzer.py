@@ -99,7 +99,7 @@ class AnalyzerTests(unittest.TestCase):
         finding = report["findings"][0]
         self.assertEqual("repeated_exact_tool_call", finding["code"])
         self.assertEqual("read_file", finding["tool_name"])
-        self.assertEqual(16, len(finding["fingerprint"]))
+        self.assertNotIn("fingerprint", finding)
         self.assertEqual(3, finding["repeat_count"])
         self.assertEqual("benchmark_required", finding["impact"]["kind"])
         self.assertNotIn("arguments", finding)

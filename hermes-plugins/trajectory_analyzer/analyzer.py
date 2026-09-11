@@ -526,7 +526,6 @@ def _detect_repeated_exact_tool_calls(
                         "session_id": turn.session_id,
                         "turn_index": turn.turn_index,
                         "tool_name": tool_name,
-                        "fingerprint": fingerprint,
                         "repeat_count": repeat_count,
                         "impact": {
                             "kind": "benchmark_required",
