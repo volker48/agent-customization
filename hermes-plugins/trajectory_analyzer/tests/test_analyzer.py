@@ -960,6 +960,37 @@ class AnalyzerTests(unittest.TestCase):
         self.assertIn("benchmark", finding["impact"]["caveat"])
         self.assertNotIn("replacement", str(finding).lower())
 
+    def test_benchmark_required_summary_totals_same_model_child_workload(self):
+        from trajectory_analyzer.analyzer import analyze
+
+        report = analyze(
+            FakeStore(
+                sessions=[
+                    {"id": "parent", "model": "gpt-test"},
+                    {
+                        "id": "child-a",
+                        "parent_session_id": "parent",
+                        "model": "gpt-test",
+                        "model_config": json.dumps({"_delegate_from": "parent"}),
+                        "api_calls": 10,
+                        "input_tokens": 100,
+                        "output_tokens": 20,
+                    },
+                    {
+                        "id": "child-b",
+                        "parent_session_id": "parent",
+                        "model": "gpt-test",
+                        "model_config": json.dumps({"_delegate_from": "parent"}),
+                        "api_calls": 10,
+                        "cache_read_tokens": 30,
+                        "reasoning_tokens": 40,
+                    },
+                ]
+            )
+        )
+
+        self.assertEqual(190, report["summary"]["benchmark_required_tokens"])
+
     def test_nonstandard_json_constants_in_model_config_fail_soft(self):
         from trajectory_analyzer.analyzer import analyze
 

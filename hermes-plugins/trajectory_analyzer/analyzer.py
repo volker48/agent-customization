@@ -280,6 +280,18 @@ def analyze(
     now: datetime | None = None,
     thresholds: AnalyzerThresholds = DEFAULT_THRESHOLDS,
 ):
+    """Analyze persisted trajectories and return a versioned optimization report.
+
+    Args:
+        store: Source for persisted session and message records.
+        days: Number of recent days to analyze.
+        source: Optional session-source filter.
+        now: Timestamp used to anchor the analysis window.
+        thresholds: Detection thresholds for report findings.
+
+    Returns:
+        A report containing measured findings and aggregate token exposure.
+    """
     generated_at = now or datetime.now(timezone.utc)
     validated_days = validate_days(days, generated_at)
     sessions = _sessions(store.fetch_sessions(validated_days, source, generated_at))
@@ -316,7 +328,11 @@ def analyze(
                 for finding in findings
                 if finding["impact"]["kind"] == "estimated_avoidable_workload"
             ),
-            "benchmark_required_tokens": 0,
+            "benchmark_required_tokens": sum(
+                finding.get("child_workload_tokens", 0)
+                for finding in findings
+                if finding["impact"]["kind"] == "benchmark_required"
+            ),
             "methodology_note": METHODOLOGY_WARNING,
         },
         "findings": findings,
