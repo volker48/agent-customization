@@ -12,6 +12,7 @@ from fakes import FakeContext, FakeStore
 
 
 class CommandRegistrationTests(unittest.TestCase):
+
     def test_registers_exactly_the_trajectory_command(self):
         from trajectory_analyzer import register
 
@@ -72,6 +73,92 @@ class CommandRegistrationTests(unittest.TestCase):
         self.assertNotIn("private prompt", json.dumps(report))
         self.assertNotIn("secret response", json.dumps(report))
 
+    def test_analyze_recommends_batching_or_execute_code_for_tool_fanout(self):
+        from trajectory_analyzer.cli import handle_cli
+
+        calls = [
+            {"name": "read_file", "arguments": {"path": f"private-{index}.txt"}}
+            for index in range(13)
+        ]
+        store = FakeStore(
+            sessions=[{"id": "session-1", "source": "telegram"}],
+            messages=[
+                {"session_id": "session-1", "role": "user", "active": 1},
+                {"session_id": "session-1", "role": "assistant", "active": 1, "tool_calls": calls},
+            ],
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            handle_cli(
+                argparse.Namespace(trajectory_command="analyze", days=30, source=None),
+                store=store,
+            )
+
+        terminal = output.getvalue()
+        self.assertIn("high_tool_fanout_per_turn", terminal)
+        self.assertIn("tool_calls=13", terminal)
+        self.assertIn("batching", terminal)
+        self.assertIn("execute_code", terminal)
+        self.assertNotIn("private-0.txt", terminal)
+
+    def test_analyze_preserves_legitimate_retries_in_repeat_recommendation(self):
+        from trajectory_analyzer.cli import handle_cli
+
+        calls = [
+            {"name": "read_file", "arguments": {"path": "private.txt", "offset": 1}}
+            for _ in range(3)
+        ]
+        store = FakeStore(
+            sessions=[{"id": "session-1", "source": "telegram"}],
+            messages=[
+                {"session_id": "session-1", "role": "user", "active": 1},
+                {"session_id": "session-1", "role": "assistant", "active": 1, "tool_calls": calls},
+            ],
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            handle_cli(
+                argparse.Namespace(trajectory_command="analyze", days=30, source=None),
+                store=store,
+            )
+
+        terminal = output.getvalue()
+        self.assertIn("repeated_exact_tool_call", terminal)
+        self.assertIn("caching", terminal)
+        self.assertIn("execute_code", terminal)
+        self.assertIn("legitimate retries", terminal)
+        self.assertNotIn("fingerprint", terminal)
+        self.assertNotIn("private.txt", terminal)
+
+    def test_analyze_formats_large_tool_payload_without_exposing_payload_text(self):
+        from trajectory_analyzer.cli import handle_cli
+
+        store = FakeStore(
+            sessions=[{"id": "session-1", "source": "telegram"}],
+            messages=[
+                {"id": 13, "session_id": "session-1", "role": "user", "active": 1},
+                {"id": 17, "session_id": "session-1", "role": "tool", "tool_name": "web_extract", "content": "PAYLOAD_SENTINEL" + "x" * (40_001 - len("PAYLOAD_SENTINEL")), "active": 1},
+                {"session_id": "session-1", "role": "assistant", "active": 1},
+                {"session_id": "session-1", "role": "assistant", "active": 1},
+            ],
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            report = handle_cli(
+                argparse.Namespace(trajectory_command="analyze", days=30, source=None), store=store
+            )
+
+        terminal = output.getvalue()
+        self.assertEqual("large_tool_payload", report["findings"][0]["code"])
+        self.assertIn("turn_user_message_id=13", terminal)
+        self.assertIn("tool_message_id=17", terminal)
+        self.assertIn("tool_name=web_extract", terminal)
+        self.assertIn("payload_bytes=40001", terminal)
+        self.assertIn("later_assistant_steps=2", terminal)
+        self.assertIn("estimated_avoidable_workload", terminal)
+        self.assertNotIn("PAYLOAD_SENTINEL", terminal)
+        self.assertNotIn("PAYLOAD_SENTINEL", json.dumps(report))
+
     def test_analyze_rejects_an_extreme_positive_day_count(self):
         from trajectory_analyzer.cli import setup_cli
 
@@ -97,3 +184,65 @@ class CommandRegistrationTests(unittest.TestCase):
                     self.assertEqual(2, raised.code)
                 else:
                     self.fail("Expected argparse to reject a non-positive day count")
+
+    def test_analyze_prints_large_prompt_finding_without_prompt_text(self):
+        from trajectory_analyzer.cli import handle_cli
+
+        prompt = "private system prompt" * 10_000
+        output = io.StringIO()
+        with redirect_stdout(output):
+            report = handle_cli(
+                argparse.Namespace(trajectory_command="analyze", days=30, source=None),
+                store=FakeStore(
+                    sessions=[{"id": "session-2", "system_prompt": prompt, "api_calls": 2}]
+                ),
+            )
+
+        terminal = output.getvalue()
+        self.assertEqual("large_initial_prompt", report["findings"][0]["code"])
+        self.assertIn("large_initial_prompt", terminal)
+        self.assertIn("system_prompt_bytes=210000", terminal)
+        self.assertIn("estimated_repeated_workload_tokens=105000", terminal)
+        self.assertIn("cache", terminal)
+        self.assertIn("context", terminal)
+        self.assertNotIn("private system prompt", terminal)
+
+    def test_analyze_explicitly_formats_cache_and_same_model_findings(self):
+        from trajectory_analyzer.cli import handle_cli
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            report = handle_cli(
+                argparse.Namespace(trajectory_command="analyze", days=30, source=None),
+                store=FakeStore(
+                    sessions=[
+                        {
+                            "id": "parent",
+                            "model": "gpt-test",
+                        },
+                        {
+                            "id": "child",
+                            "parent_session_id": "parent",
+                            "model_config": {"_delegate_from": "parent"},
+                            "model": "gpt-test",
+                            "api_calls": 10,
+                            "input_tokens": 80_000,
+                            "output_tokens": 2_000,
+                            "cache_read_tokens": 20_000,
+                            "cache_write_tokens": 3_000,
+                            "reasoning_tokens": 4_000,
+                        },
+                    ]
+                ),
+            )
+
+        terminal = output.getvalue()
+        self.assertEqual(
+            ["low_cache_reuse", "same_model_subagent_exposure"],
+            [finding["code"] for finding in report["findings"]],
+        )
+        self.assertIn("relevant_workload_tokens=100000", terminal)
+        self.assertIn("observed_cache_reuse_ratio=0.2", terminal)
+        self.assertIn("parent_session_id=parent", terminal)
+        self.assertIn("child_workload_tokens=109000", terminal)
+        self.assertIn("benchmark", terminal)
