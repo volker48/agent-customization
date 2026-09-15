@@ -1,6 +1,6 @@
 ---
 name: claude-review
-description: Runs an independent Claude Code /code-review from the current repository and turns findings into actionable fixes. Use when the user asks for a Claude review, second-opinion review, /code-review, or after non-trivial code changes where an external review could catch correctness, security, or integration issues.
+description: Runs an independent Claude Code review from the current repository and turns findings into actionable fixes. Use when the user asks for a Claude review, second-opinion review, /code-review, or after non-trivial code changes where an external review could catch correctness, security, or integration issues.
 disable-model-invocation: true
 ---
 
@@ -8,31 +8,27 @@ disable-model-invocation: true
 
 ## Quick start
 
-From this skill directory, run:
+Keep the process working directory at the target repository root. Never `cd` to this skill's directory. If the Pi `claude_review` tool is available, use it to start and manage a durable background review:
 
-```bash
-./scripts/run-claude-review.sh medium "review the current diff for correctness bugs"
+```json
+{"action":"start","level":"high","context":"review the current branch"}
+{"action":"status"}
+{"action":"result","autoFix":false}
 ```
 
-From this repository checkout, humans can run:
+If the tool is unavailable, resolve this skill's loaded absolute directory and execute its helper while remaining in the target repository:
+
+```bash
+/path/to/loaded/claude-review/scripts/run-claude-review.sh medium "review the current diff for correctness bugs"
+```
+
+From this customization checkout, the equivalent human command is:
 
 ```bash
 skills/claude-review/scripts/run-claude-review.sh high "review the current branch"
 ```
 
-If the Pi `claude-review` extension is installed, prefer a durable background review:
-
-```text
-/claude-review high review the current branch
-/claude-review-status
-/claude-review-result --no-fix
-```
-
-Use the legacy blocking path only when the caller explicitly wants to wait in-place:
-
-```text
-/claude-review --wait high review the current branch
-```
+Use `mode: "wait"` only when the caller explicitly wants to block until the review finishes.
 
 ## Workflow
 
@@ -44,42 +40,26 @@ Use the legacy blocking path only when the caller explicitly wants to wait in-pl
    - `high`: bug fixes, security-sensitive code, or cross-file behavior changes.
    - `max`: substantial or high-risk changes where extra review cost is justified.
    - Do not use `ultra`; headless Claude review runs do not support it.
-3. If the Pi extension is installed, start the review in the background so Pi/Codex does not
-   wait on a long-running subprocess:
-
-```text
-/claude-review high review the current diff for correctness and edge cases
-```
-
-Then retrieve it later:
-
-```text
-/claude-review-status
-/claude-review-result --no-fix
-```
-
-4. If the extension is not available, run Claude Code from the target repository root with
-   focused context:
-
-```bash
-claude --permission-mode auto \
-  --tools "Bash,Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill" \
-  --allowed-tools "Bash,Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill" \
-  -p "/code-review high review the current diff for correctness and edge cases"
-```
-
-Headless Claude review can take several minutes to complete. Do not treat a quiet run as
-failed unless the process exits with an error or clearly hangs beyond a reasonable timeout.
+3. If the Pi extension is installed, call `claude_review` with `action: "start"`. Use the
+   returned job id with `action: "status"` and `action: "result"`. Tool operations execute
+   directly and sequentially; writing slash-command text in an agent response does not execute it.
+4. If the extension is unavailable, run the bundled helper from the target repository root.
+   The helper supplies the explicit review contract, effort, available tool set, and permission
+   allowlist. Headless review can take several minutes; a quiet process is not a failure unless
+   it exits unsuccessfully or exceeds a reasonable timeout.
 
 5. Read the review and act only on high-confidence, actionable findings.
 6. Ignore speculative, stylistic, or out-of-scope suggestions unless the user asked for them.
 7. After making fixes, run the relevant formatter, type checker, and focused tests.
 8. Report what Claude found, what you changed, and what verification passed.
 
-## Pi extension commands
+## Pi extension interface
+
+Agents use the `claude_review` tool with actions `start`, `status`, `result`, `logs`, `cancel`,
+or `list`. Humans may use the matching slash commands:
 
 - `/claude-review [--background|--wait] [--fix|--no-fix] [low|medium|high|max] [context]`
-  starts a durable background job by default. `--wait` keeps the old blocking `claude -p` path.
+  starts a durable background job by default. `--wait` uses blocking `claude -p`.
 - `/claude-review-status [job-id]` refreshes job state from `claude agents --json --all`.
 - `/claude-review-result [job-id] [--fix|--no-fix]` fetches `claude logs <id>` output. If
   neither flag is provided, it uses the job's stored auto-fix preference.

@@ -52,10 +52,9 @@ The Claude Code review effort selected for a Claude review run. Supported script
 _Avoid_: effort (unless quoting Claude Code), depth
 
 **Review context message**:
-Optional free-form text appended after the review level in Claude Code's `/code-review`
-invocation. It tells Claude Code what task or issue the diff is meant to implement, but a
-Claude review run may omit it and let Claude Code review the branch or unstaged changes
-without extra task context.
+Optional free-form text included in the explicit Claude Code review contract. It tells Claude
+Code what task or issue the diff is meant to implement, but a Claude review run may omit it
+and let Claude Code review the branch or unstaged changes without extra task context.
 _Avoid_: implementer message (confuses who consumes it)
 
 **Auto-fix**:

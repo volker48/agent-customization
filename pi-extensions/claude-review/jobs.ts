@@ -32,6 +32,7 @@ export type ClaudeReviewJobStatus =
   | "unknown";
 
 export type ClaudeReviewSource = "marked-output";
+export type ClaudeReviewManagementOperation = "status" | "logs" | "cancel";
 
 export interface ClaudeReviewJob {
   id: string;
@@ -55,6 +56,8 @@ export interface ClaudeReviewJob {
   hasFindings?: boolean | null;
   reviewSource?: ClaudeReviewSource | null;
   errorMessage?: string | null;
+  managementError?: string | null;
+  managementErrorSource?: ClaudeReviewManagementOperation | null;
   rawStartOutput?: string;
   rawAgentsEntry?: unknown;
 }
@@ -160,6 +163,8 @@ export async function createJob(input: CreateClaudeReviewJobInput): Promise<Clau
     hasFindings: null,
     reviewSource: null,
     errorMessage: null,
+    managementError: null,
+    managementErrorSource: null,
   };
   await writeJob(job);
   return job;

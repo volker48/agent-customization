@@ -25,6 +25,7 @@ export interface ClaudeReviewDetails {
   updatedAt?: string;
   completedAt?: string | null;
   errorMessage?: string | null;
+  managementError?: string | null;
 }
 
 function statusTitle(status: ClaudeReviewDetailsStatus): string {
@@ -111,6 +112,9 @@ function renderSafeClaudeReviewMarkdown(safeDetails: ClaudeReviewDetails): strin
   if (safeDetails.errorMessage) {
     lines.push(`- Error: ${safeDetails.errorMessage}`);
   }
+  if (safeDetails.managementError) {
+    lines.push(`- Management error: ${safeDetails.managementError}`);
+  }
 
   if (["blocked", "running", "queued", "starting"].includes(safeDetails.status)) {
     lines.push(
@@ -171,6 +175,7 @@ export function jobToClaudeReviewDetails(
     updatedAt: job.updatedAt,
     completedAt: job.completedAt,
     errorMessage: job.errorMessage,
+    managementError: job.managementError,
   };
 }
 
@@ -207,7 +212,8 @@ export function buildAutoFixPrompt(details: ClaudeReviewDetails): string {
     ? `\nContext Capsule: ${details.capsuleProvenance.capsuleId}@${details.capsuleProvenance.revision} (${details.capsuleProvenance.source})`
     : "";
   const job = details.jobId ? `\nClaude review job: ${details.jobId}` : "";
-  const header = `Claude Code review completed.\n\nReview level: ${details.level}${context}${capsule}${job}`;
+  const cwd = details.cwd ? `\nReviewed working directory: ${details.cwd}` : "";
+  const header = `Claude Code review completed.\n\nReview level: ${details.level}${context}${capsule}${job}${cwd}`;
 
   return [
     header,

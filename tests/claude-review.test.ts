@@ -1,6 +1,19 @@
-import { chmod, mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -32,7 +45,19 @@ import type { ClaudeReviewJob } from "../pi-extensions/claude-review/jobs.js";
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
   BorderedLoader: class {
+    private readonly controller = new AbortController();
     onAbort?: () => void;
+
+    get signal(): AbortSignal {
+      return this.controller.signal;
+    }
+
+    handleInput(data: string): void {
+      if (data === "\u001b") {
+        this.controller.abort();
+        this.onAbort?.();
+      }
+    }
   },
   getMarkdownTheme: () => ({}),
 }));
@@ -52,8 +77,34 @@ type RegisteredCommand = {
   handler: (args: string, ctx: MockCommandContext) => Promise<void>;
 };
 
+type MockClaudeReviewToolInput = {
+  action: "start" | "status" | "result" | "logs" | "cancel" | "list";
+  level?: "low" | "medium" | "high" | "max";
+  context?: string;
+  mode?: "background" | "wait";
+  autoFix?: boolean;
+  jobId?: string;
+  all?: boolean;
+};
+
+type RegisteredTool = {
+  name: string;
+  executionMode?: "sequential" | "parallel";
+  execute: (
+    toolCallId: string,
+    params: MockClaudeReviewToolInput,
+    signal: AbortSignal,
+    onUpdate: undefined,
+    ctx: MockCommandContext,
+  ) => Promise<{
+    content: Array<{ type: "text"; text: string }>;
+    details: { jobId?: string; status: string; autoFix: boolean; contextMessage: string };
+  }>;
+};
+
 type MockCommandContext = {
   cwd: string;
+  mode?: "tui" | "rpc" | "json" | "print";
   hasUI?: boolean;
   waitForIdle: () => Promise<void>;
   sessionManager?: {
@@ -65,9 +116,19 @@ type MockCommandContext = {
     notify: (message: string, type?: "info" | "warning" | "error") => void;
     setStatus: (key: string, value: string | undefined) => void;
     setWidget: (key: string, value: unknown) => void;
+    custom?: <T>(
+      factory: (
+        tui: unknown,
+        theme: unknown,
+        keybindings: unknown,
+        done: (result: T) => void,
+      ) => { handleInput?: (data: string) => void },
+    ) => Promise<T>;
     confirm?: (title: string, message: string) => Promise<boolean>;
   };
 };
+
+const execFileAsync = promisify(execFile);
 
 function testCapsule(): Capsule {
   return {
@@ -92,11 +153,15 @@ function testCapsule(): Capsule {
 
 function createMockPi(execResult = { stdout: "review", stderr: "", code: 0, killed: false }) {
   const commands = new Map<string, RegisteredCommand>();
+  const tools = new Map<string, RegisteredTool>();
   return {
     pi: {
       registerMessageRenderer: vi.fn(),
       registerCommand: vi.fn((_name: string, registered: RegisteredCommand) => {
         commands.set(_name, registered);
+      }),
+      registerTool: vi.fn((tool: RegisteredTool) => {
+        tools.set(tool.name, tool);
       }),
       exec: vi.fn(async (_bin?: string, _args?: string[]) => execResult),
       sendUserMessage: vi.fn(),
@@ -106,6 +171,11 @@ function createMockPi(execResult = { stdout: "review", stderr: "", code: 0, kill
       const command = commands.get(name);
       if (!command) throw new Error("missing command");
       return command;
+    },
+    tool(name = "claude_review") {
+      const tool = tools.get(name);
+      if (!tool) throw new Error("missing tool");
+      return tool;
     },
   };
 }
@@ -150,8 +220,18 @@ function markedReviewOutput(review: string, hasFindings: boolean): string {
   ].join("\n");
 }
 
-function createTranscriptLine(review: string, hasFindings = true): string {
-  return `${JSON.stringify({ text: markedReviewOutput(review, hasFindings) })}\n`;
+function createTranscriptLine(
+  review: string,
+  hasFindings = true,
+  role: "assistant" | "user" = "assistant",
+): string {
+  return `${JSON.stringify({
+    type: role,
+    message: {
+      role,
+      content: [{ type: "text", text: markedReviewOutput(review, hasFindings) }],
+    },
+  })}\n`;
 }
 
 function createBackgroundJob(overrides: Partial<ClaudeReviewJob> = {}): ClaudeReviewJob {
@@ -224,9 +304,14 @@ describe("claude review arguments", () => {
     expect(() => parseClaudeReviewArgs("ultra review deeply")).toThrow(/ultra/);
   });
 
-  it("builds the Claude Code slash-command prompt", () => {
+  it("builds a self-contained review contract without relying on a local slash command", () => {
     const options = parseClaudeReviewArgs("max inspect the current branch");
-    expect(buildCodeReviewPrompt(options)).toBe("/code-review max inspect the current branch");
+    const prompt = buildCodeReviewPrompt(options);
+
+    expect(prompt).toContain("Perform an independent code review");
+    expect(prompt).toContain("Review context from the caller:\ninspect the current branch");
+    expect(prompt).toContain("Do not modify files");
+    expect(prompt).not.toContain("/code-review");
   });
 
   it("renders compact capsule provenance without dumping capsule contents", () => {
@@ -268,23 +353,25 @@ describe("claude review arguments", () => {
     expect(prompt).toContain(CLAUDE_REVIEW_RESULT_START);
   });
 
-  it("pins wait-mode reviews to the current Opus model", () => {
-    expect(claudeArgs("/code-review medium")).toEqual([
+  it("pins wait-mode reviews to the current Opus model and requested effort", () => {
+    expect(claudeArgs("review prompt", "high", "Read")).toEqual([
       "--permission-mode",
       "auto",
       "--model",
       "opus",
+      "--effort",
+      "high",
       "--tools",
-      "Bash,Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill",
+      "Read",
       "--allowed-tools",
-      "Bash,Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill",
+      "Read",
       "-p",
-      "/code-review medium",
+      "review prompt",
     ]);
   });
 
   it("separates the background prompt from variadic Claude tool options", () => {
-    expect(claudeBackgroundArgs("/code-review high", "review-session", "Read")).toEqual([
+    expect(claudeBackgroundArgs("review prompt", "review-session", "Read", "max")).toEqual([
       "--bg",
       "--name",
       "review-session",
@@ -292,13 +379,64 @@ describe("claude review arguments", () => {
       "auto",
       "--model",
       "opus",
+      "--effort",
+      "max",
       "--tools",
       "Read",
       "--allowed-tools",
       "Read",
       "--",
-      "/code-review high",
+      "review prompt",
     ]);
+  });
+});
+
+describe("Claude review shell helper", () => {
+  it("runs from the caller's repository with an explicit tool set and effort", async () => {
+    const root = await mkdtemp(join(tmpdir(), "claude-review-script-"));
+    const targetRepo = join(root, "target-repo");
+    const argsPath = join(root, "args.txt");
+    const cwdPath = join(root, "cwd.txt");
+    const claudeStub = join(root, "claude-stub.sh");
+    await mkdir(targetRepo);
+    await writeFile(
+      claudeStub,
+      `#!/bin/bash\nset -euo pipefail\nprintf '%s\\n' "$PWD" > "$CAPTURE_CWD"\nprintf '%s\\n' "$@" > "$CAPTURE_ARGS"\n`,
+      { encoding: "utf8", mode: 0o700 },
+    );
+
+    try {
+      await execFileAsync(
+        resolve("skills/claude-review/scripts/run-claude-review.sh"),
+        ["high", "focus on correctness"],
+        {
+          cwd: targetRepo,
+          env: {
+            ...process.env,
+            PI_CLAUDE_REVIEW_BIN: claudeStub,
+            CAPTURE_ARGS: argsPath,
+            CAPTURE_CWD: cwdPath,
+          },
+        },
+      );
+
+      const capturedArgs = (await readFile(argsPath, "utf8")).trim().split("\n");
+      expect((await readFile(cwdPath, "utf8")).trim()).toBe(await realpath(targetRepo));
+      expect(capturedArgs).toEqual(
+        expect.arrayContaining([
+          "--effort",
+          "high",
+          "--tools",
+          "Bash,Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill",
+          "--allowed-tools",
+          "Bash,Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill",
+        ]),
+      );
+      expect(capturedArgs.join("\n")).toContain("Perform an independent code review");
+      expect(capturedArgs.join("\n")).not.toContain("/code-review");
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
   });
 });
 
@@ -353,11 +491,13 @@ describe("claude review command", () => {
         buildCodeReviewPrompt(parseClaudeReviewArgs("high read issue #23"), {
           resultMarkers: true,
         }),
+        "high",
       ),
       expect.objectContaining({ cwd: "/repo", timeout: 20 * 60 * 1000 }),
     );
     expect(pi.sendUserMessage).toHaveBeenCalledWith(
       expect.stringContaining("Finding: fix the edge case"),
+      { deliverAs: "followUp" },
     );
     expect(pi.sendMessage).not.toHaveBeenCalled();
   });
@@ -441,6 +581,30 @@ describe("claude review command", () => {
     );
   });
 
+  it("rejects a wait-mode placeholder instead of storing it as a review", async () => {
+    const { pi, command } = createMockPi({
+      stdout: markedReviewOutput("<your concise, actionable review or no-findings summary>", true),
+      stderr: "",
+      code: 0,
+      killed: false,
+    });
+    claudeReviewExtension(pi as never);
+    const ctx = createContext();
+
+    await command().handler("--wait medium", ctx);
+
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(pi.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        details: expect.objectContaining({
+          status: "failed",
+          stdout: "",
+          errorMessage: "Claude returned an invalid or placeholder review result",
+        }),
+      }),
+    );
+  });
+
   it("surfaces non-zero review output without triggering Pi", async () => {
     const { pi, command } = createMockPi({
       stdout: "partial output",
@@ -502,11 +666,13 @@ describe("claude review command", () => {
       expect.anything(),
     );
     const foregroundArgs = pi.exec.mock.calls[0][1] as string[];
-    expect(foregroundArgs.slice(0, 8)).toEqual([
+    expect(foregroundArgs.slice(0, 10)).toEqual([
       "--permission-mode",
       "auto",
       "--model",
       "opus",
+      "--effort",
+      "medium",
       "--tools",
       "Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill",
       "--allowed-tools",
@@ -541,9 +707,11 @@ describe("claude review command", () => {
     expect(pi.sendMessage).not.toHaveBeenCalled();
     expect(pi.sendUserMessage).toHaveBeenCalledWith(
       expect.stringContaining("Fix the grounded edge case"),
+      { deliverAs: "followUp" },
     );
     expect(pi.sendUserMessage).toHaveBeenCalledWith(
       expect.stringMatching(/Context Capsule: .+@1 \(current-session\)/),
+      { deliverAs: "followUp" },
     );
   });
 
@@ -630,7 +798,12 @@ describe("claude review command", () => {
     await expect(readdir(jobDir)).resolves.toHaveLength(1);
     expect(pi.exec).toHaveBeenCalledWith(
       "fake-claude",
-      expect.arrayContaining(["--", expect.stringContaining("/code-review low")]),
+      expect.arrayContaining([
+        "--effort",
+        "low",
+        "--",
+        expect.stringContaining("Review level: low"),
+      ]),
       expect.objectContaining({ cwd: "/repo" }),
     );
   });
@@ -677,25 +850,41 @@ describe("claude review command", () => {
     );
   });
 
-  it("cancels capsule preparation before creating a job or subprocess", async () => {
+  it("lets Escape cancel a pending idle wait before creating a job or subprocess", async () => {
     const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
     tempDirs.push(jobDir);
     process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
     const { pi, command } = createMockPi();
     claudeReviewExtension(pi as never);
     const ctx = createCurrentCapsuleContext();
-    ctx.waitForIdle = vi.fn(async () => {
-      const widgetFactory = vi.mocked(ctx.ui.setWidget).mock.calls.at(-1)?.[1] as
-        | ((tui: unknown, theme: unknown) => { onAbort?: () => void })
-        | undefined;
-      widgetFactory?.({}, {}).onAbort?.();
-    });
+    let releaseIdle: (() => void) | undefined;
+    ctx.waitForIdle = vi.fn(
+      () =>
+        new Promise<void>((resolveIdle) => {
+          releaseIdle = resolveIdle;
+        }),
+    );
+    ctx.mode = "tui";
+    ctx.ui.custom = vi.fn(
+      async (factory) =>
+        new Promise((done) => {
+          const component = factory({}, {}, {}, done);
+          component.handleInput?.("\u001b");
+        }),
+    ) as MockCommandContext["ui"]["custom"];
 
     await command().handler("--capsule=current", ctx);
 
+    expect(ctx.ui.custom).toHaveBeenCalledOnce();
+    expect(ctx.ui.setWidget).not.toHaveBeenCalled();
     expect(pi.exec).not.toHaveBeenCalled();
     await expect(readdir(jobDir)).resolves.toEqual([]);
     expect(ctx.ui.notify).toHaveBeenCalledWith("Claude review cancelled", "info");
+
+    releaseIdle?.();
+    await Promise.resolve();
+    expect(pi.exec).not.toHaveBeenCalled();
+    await expect(readdir(jobDir)).resolves.toEqual([]);
   });
 
   it("fails background starts that do not report a session id", async () => {
@@ -818,6 +1007,40 @@ describe("claude review command", () => {
     expect(pi.exec).not.toHaveBeenCalled();
   });
 
+  it("keeps stop-command failures retryable and treats killed stops as timeouts", async () => {
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(jobDir);
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    const { pi } = createMockPi();
+    const job = createBackgroundJob({ status: "running" });
+    pi.exec
+      .mockResolvedValueOnce({
+        stdout: "",
+        stderr: "temporary supervisor failure",
+        code: 1,
+        killed: false,
+      })
+      .mockResolvedValueOnce({ stdout: "", stderr: "", code: 0, killed: true })
+      .mockResolvedValueOnce({ stdout: "stopped", stderr: "", code: 0, killed: false });
+
+    const failedStop = await cancelClaudeBackgroundJob(pi as never, job, "fake-claude");
+    expect(failedStop.status).toBe("running");
+    expect(failedStop.completedAt).toBeNull();
+    expect(failedStop.managementError).toBe(
+      "Failed to stop Claude background session with exit code 1",
+    );
+    expect(failedStop.managementErrorSource).toBe("cancel");
+
+    const timedOutStop = await cancelClaudeBackgroundJob(pi as never, failedStop, "fake-claude");
+    expect(timedOutStop.status).toBe("running");
+    expect(timedOutStop.managementError).toBe("Timed out while stopping Claude background session");
+
+    const cancelled = await cancelClaudeBackgroundJob(pi as never, timedOutStop, "fake-claude");
+    expect(cancelled.status).toBe("cancelled");
+    expect(cancelled.managementError).toBeNull();
+    expect(pi.exec).toHaveBeenCalledTimes(3);
+  });
+
   it("does not treat unmarked Claude logs as review output", async () => {
     const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
     tempDirs.push(jobDir);
@@ -837,11 +1060,11 @@ describe("claude review command", () => {
 
     const withLogs = await readClaudeBackgroundLogs(pi as never, job, "fake-claude");
 
-    expect(withLogs.status).toBe("failed");
+    expect(withLogs.status).toBe("review");
     expect(withLogs.stdout).toBe("");
-    expect(withLogs.completedAt).toEqual(expect.any(String));
     expect(withLogs.lastLog).not.toContain("\u001b");
-    expect(withLogs.errorMessage).toMatch(/did not contain review result markers/);
+    expect(withLogs.errorMessage).toBeNull();
+    expect(withLogs.managementError).toMatch(/did not contain review result markers/);
   });
 
   it("uses Claude's persisted transcript instead of terminal logs for results", async () => {
@@ -889,8 +1112,186 @@ describe("claude review command", () => {
     const stored = await readJob(job.id);
     expect(stored.stdout).toBe(cleanReview);
     expect(stored.hasFindings).toBe(true);
-    expect(pi.sendUserMessage).toHaveBeenCalledWith(expect.stringContaining(cleanReview));
-    expect(pi.sendUserMessage).toHaveBeenCalledWith(expect.not.stringContaining("fixand"));
+    expect(pi.sendUserMessage).toHaveBeenCalledWith(
+      expect.stringContaining("Reviewed working directory: /repo"),
+      { deliverAs: "followUp" },
+    );
+    expect(pi.sendUserMessage).toHaveBeenCalledWith(expect.stringContaining(cleanReview), {
+      deliverAs: "followUp",
+    });
+    expect(pi.sendUserMessage).toHaveBeenCalledWith(expect.not.stringContaining("fixand"), {
+      deliverAs: "followUp",
+    });
+  });
+
+  it("ignores user-authored and placeholder transcript results until an assistant responds", async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), "claude-home-"));
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(homeDir, jobDir);
+    process.env.HOME = homeDir;
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    const transcriptDir = join(homeDir, ".claude", "jobs", "session-123");
+    const transcriptPath = join(transcriptDir, "timeline.jsonl");
+    await mkdir(transcriptDir, { recursive: true });
+    await writeFile(
+      transcriptPath,
+      [
+        createTranscriptLine("user-authored finding", true, "user"),
+        createTranscriptLine("<your concise, actionable review or no-findings summary>"),
+      ].join(""),
+      "utf8",
+    );
+    const { pi } = createMockPi({
+      stdout: "temporary log lookup failure",
+      stderr: "",
+      code: 1,
+      killed: false,
+    });
+    const job = createBackgroundJob({ status: "running" });
+
+    const beforeAssistant = await readClaudeBackgroundLogs(pi as never, job, "fake-claude");
+    expect(beforeAssistant.status).toBe("running");
+    expect(beforeAssistant.stdout).toBe("");
+    expect(beforeAssistant.reviewSource).not.toBe("marked-output");
+    expect(beforeAssistant.managementError).toBe("Failed to read Claude logs with exit code 1");
+
+    await writeFile(transcriptPath, createTranscriptLine("assistant finding", true), {
+      encoding: "utf8",
+      flag: "a",
+    });
+    const afterAssistant = await readClaudeBackgroundLogs(
+      pi as never,
+      beforeAssistant,
+      "fake-claude",
+    );
+    expect(afterAssistant.status).toBe("review");
+    expect(afterAssistant.stdout).toBe("assistant finding");
+    expect(afterAssistant.hasFindings).toBe(true);
+    expect(afterAssistant.managementError).toBeNull();
+  });
+
+  it("inspects cross-workspace jobs but refuses to auto-fix them", async () => {
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(jobDir);
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    const job = await writeJob(
+      createBackgroundJob({
+        cwd: "/other-repo",
+        status: "review",
+        stdout: "Finding in the other repository",
+        hasFindings: true,
+        reviewSource: "marked-output",
+        completedAt: "2026-01-01T00:05:00.000Z",
+      }),
+    );
+    const { pi, command } = createMockPi({
+      stdout: JSON.stringify([{ id: "session-123", status: "completed", exitCode: 0 }]),
+      stderr: "",
+      code: 0,
+      killed: false,
+    });
+    claudeReviewExtension(pi as never);
+    const ctx = createContext();
+
+    await command("claude-review-result").handler(job.id, ctx);
+
+    expect(pi.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        details: expect.objectContaining({ cwd: "/other-repo", stdout: expect.any(String) }),
+      }),
+    );
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("refused for job from /other-repo"),
+      "error",
+    );
+  });
+
+  it("executes structured tool starts directly without reparsing context as options", async () => {
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(jobDir);
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    const { pi, tool } = createMockPi({
+      stdout: "backgrounded · session-tool-123",
+      stderr: "",
+      code: 0,
+      killed: false,
+    });
+    claudeReviewExtension(pi as never);
+    const ctx = createContext();
+
+    const result = await tool().execute(
+      "call-1",
+      {
+        action: "start",
+        level: "high",
+        context: "Review --fix and --tools behavior",
+        autoFix: false,
+      },
+      new AbortController().signal,
+      undefined,
+      ctx,
+    );
+
+    expect(tool().executionMode).toBe("sequential");
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(pi.exec).toHaveBeenCalledOnce();
+    expect(result.details).toMatchObject({
+      status: "running",
+      autoFix: false,
+      contextMessage: "Review --fix and --tools behavior",
+    });
+    const stored = await readJob(result.details.jobId as string);
+    expect(stored.autoFix).toBe(false);
+    expect(stored.contextMessage).toBe("Review --fix and --tools behavior");
+    expect(stored.prompt).toContain(
+      "Review context from the caller:\nReview --fix and --tools behavior",
+    );
+  });
+
+  it("completes a tool start before a later status operation resolves the latest job", async () => {
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(jobDir);
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    const { pi, tool } = createMockPi();
+    pi.exec
+      .mockResolvedValueOnce({
+        stdout: "backgrounded · session-tool-123",
+        stderr: "",
+        code: 0,
+        killed: false,
+      })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify([{ id: "session-tool-123", status: "running" }]),
+        stderr: "",
+        code: 0,
+        killed: false,
+      });
+    claudeReviewExtension(pi as never);
+    const ctx = createContext();
+    const signal = new AbortController().signal;
+
+    const started = await tool().execute(
+      "call-start",
+      { action: "start", autoFix: false },
+      signal,
+      undefined,
+      ctx,
+    );
+    const status = await tool().execute(
+      "call-status",
+      { action: "status" },
+      signal,
+      undefined,
+      ctx,
+    );
+
+    expect(started.details.jobId).toBeTruthy();
+    expect(status.details).toMatchObject({
+      jobId: started.details.jobId,
+      status: "running",
+    });
+    expect(pi.exec).toHaveBeenCalledTimes(2);
   });
 
   it.each(["(none)", "No findings reported.", "Nothing actionable here."])(
@@ -981,13 +1382,18 @@ describe("claude review command", () => {
     await command("claude-review-result").handler(job.id, ctx);
     const stored = await readJob(job.id);
 
-    expect(stored.status).toBe("failed");
+    expect(stored.status).toBe("review");
     expect(stored.stdout).toBe("");
-    expect(stored.errorMessage).toMatch(/did not contain review result markers/);
+    expect(stored.errorMessage).toBeNull();
+    expect(stored.managementError).toMatch(/did not contain review result markers/);
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
     expect(pi.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
-        details: expect.objectContaining({ status: "failed", stdout: "" }),
+        details: expect.objectContaining({
+          status: "review",
+          stdout: "",
+          managementError: expect.stringMatching(/did not contain review result markers/),
+        }),
       }),
     );
   });
@@ -1031,13 +1437,14 @@ describe("claude review command", () => {
     await command("claude-review-result").handler(job.id, ctx);
     const stored = await readJob(job.id);
 
-    expect(stored.status).toBe("failed");
+    expect(stored.status).toBe("review");
     expect(stored.stdout).toBe("");
-    expect(stored.errorMessage).toMatch(/did not contain review result markers/);
+    expect(stored.errorMessage).toBeNull();
+    expect(stored.managementError).toMatch(/did not contain review result markers/);
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
     expect(pi.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
-        details: expect.objectContaining({ status: "failed", stdout: "" }),
+        details: expect.objectContaining({ status: "review", stdout: "" }),
       }),
     );
   });
@@ -1077,7 +1484,11 @@ describe("claude review command", () => {
     expect(pi.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.not.stringContaining("full raw history"),
-        details: expect.objectContaining({ status: "failed", stdout: "" }),
+        details: expect.objectContaining({
+          status: "review",
+          stdout: "",
+          managementError: expect.stringMatching(/did not contain review result markers/),
+        }),
       }),
     );
   });
@@ -1087,10 +1498,12 @@ describe("claude review command", () => {
     const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
     tempDirs.push(jobDir);
     process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    const startupOutput = "backgrounded · session-123";
     const job = await writeJob(
       createBackgroundJob({
         status: "running",
-        stdout: "",
+        stdout: startupOutput,
+        rawStartOutput: startupOutput,
         lastLog: "",
         autoFix: true,
       }),
@@ -1099,7 +1512,7 @@ describe("claude review command", () => {
     pi.exec.mockImplementation(async (_bin: string, args: string[]) => {
       if (args[0] === "agents") {
         return {
-          stdout: JSON.stringify([{ id: "session-123", status: "running", exitCode: 0 }]),
+          stdout: JSON.stringify([{ id: "session-123", status: "completed", exitCode: 0 }]),
           stderr: "",
           code: 0,
           killed: false,
@@ -1115,7 +1528,11 @@ describe("claude review command", () => {
     expect(pi.sendMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringContaining("session not found"),
-        details: expect.objectContaining({ status: "failed", stdout: "session not found" }),
+        details: expect.objectContaining({
+          status: "review",
+          stdout: "session not found",
+          managementError: "Failed to read Claude logs with exit code 1",
+        }),
       }),
     );
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
@@ -1142,7 +1559,8 @@ describe("claude review command", () => {
 
     expect(withLogs.status).toBe("failed");
     expect(withLogs.exitCode).toBe(1);
-    expect(withLogs.stdout).toBe("partial review");
+    expect(withLogs.stdout).toBe("");
+    expect(withLogs.lastLog).toContain("partial review");
     expect(withLogs.errorMessage).toBe("Claude background session failed");
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
   });
@@ -1176,7 +1594,7 @@ describe("claude review command", () => {
     expect(pi.exec).not.toHaveBeenCalled();
   });
 
-  it("marks running background jobs as reviewed when logs contain review markers", async () => {
+  it("does not trust marked terminal logs without an assistant transcript record", async () => {
     const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
     tempDirs.push(jobDir);
     process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
@@ -1194,9 +1612,10 @@ describe("claude review command", () => {
 
     const withLogs = await readClaudeBackgroundLogs(pi as never, job, "fake-claude");
 
-    expect(withLogs.status).toBe("review");
-    expect(withLogs.stdout).toBe("final review");
-    expect(withLogs.completedAt).toEqual(expect.any(String));
+    expect(withLogs.status).toBe("running");
+    expect(withLogs.stdout).toBe("");
+    expect(withLogs.reviewSource).not.toBe("marked-output");
+    expect(withLogs.lastLog).toContain("final review");
   });
 
   it("preserves completed background reviews when later successful log reads lack markers", async () => {
@@ -1284,12 +1703,74 @@ describe("claude review command", () => {
     const withLogs = await readClaudeBackgroundLogs(pi as never, job, "fake-claude");
     const stored = await readJob(job.id);
 
-    expect(withLogs).toEqual(job);
+    expect(withLogs.status).toBe("review");
+    expect(withLogs.stdout).toBe("final review");
+    expect(withLogs.managementError).toBe("Failed to read Claude logs with exit code 1");
     expect(stored.status).toBe("review");
     expect(stored.stdout).toBe("final review");
     expect(stored.completedAt).toBe("2026-01-01T00:05:00.000Z");
     expect(stored.exitCode).toBe(0);
     expect(stored.errorMessage).toBeNull();
+  });
+
+  it("keeps status polling failures retryable and clears diagnostics after recovery", async () => {
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(jobDir);
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    const { pi } = createMockPi();
+    pi.exec
+      .mockResolvedValueOnce({ stdout: "", stderr: "timeout", code: 0, killed: true })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify([{ id: "session-123", status: "running" }]),
+        stderr: "",
+        code: 0,
+        killed: false,
+      });
+    const job = createBackgroundJob({ status: "running" });
+
+    const unavailable = await refreshClaudeBackgroundJob(pi as never, job, "fake-claude");
+    expect(unavailable.status).toBe("running");
+    expect(unavailable.managementError).toBe("Timed out while checking Claude background agents");
+    expect(unavailable.managementErrorSource).toBe("status");
+    expect(unavailable.stderr).toBe("timeout");
+
+    const recovered = await refreshClaudeBackgroundJob(pi as never, unavailable, "fake-claude");
+    expect(recovered.status).toBe("running");
+    expect(recovered.managementError).toBeNull();
+    expect(recovered.managementErrorSource).toBeNull();
+    expect(recovered.stderr).toBe("");
+  });
+
+  it("preserves a failed status diagnostic when log retrieval succeeds", async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), "claude-home-"));
+    const jobDir = await mkdtemp(join(tmpdir(), "claude-review-jobs-"));
+    tempDirs.push(homeDir, jobDir);
+    process.env.HOME = homeDir;
+    process.env.PI_CLAUDE_REVIEW_JOB_DIR = jobDir;
+    const transcriptDir = join(homeDir, ".claude", "jobs", "session-123");
+    await mkdir(transcriptDir, { recursive: true });
+    await writeFile(
+      join(transcriptDir, "timeline.jsonl"),
+      createTranscriptLine("assistant finding", true),
+      "utf8",
+    );
+    const { pi } = createMockPi({
+      stdout: "",
+      stderr: "status supervisor unavailable",
+      code: 1,
+      killed: false,
+    });
+    const job = createBackgroundJob({ status: "running" });
+
+    const unavailable = await refreshClaudeBackgroundJob(pi as never, job, "fake-claude");
+    const withLogs = await readClaudeBackgroundLogs(pi as never, unavailable, "fake-claude");
+
+    expect(withLogs.stdout).toBe("assistant finding");
+    expect(withLogs.managementError).toBe(
+      "Failed to check Claude background agents with exit code 1",
+    );
+    expect(withLogs.managementErrorSource).toBe("status");
+    expect(withLogs.stderr).toBe("status supervisor unavailable");
   });
 
   it("keeps terminal background jobs terminal when refreshing agent status", async () => {
@@ -1328,6 +1809,16 @@ ${CLAUDE_REVIEW_RESULT_END}`;
     expect(
       extractMarkedReview(`user prompt:\n${promptedPlaceholder}\nassistant:\n${realReview}`),
     ).toBe("Finding: fix the edge case");
+  });
+
+  it("rejects prompt placeholders as marked review results", () => {
+    const placeholder = markedReviewOutput(
+      "<your concise, actionable review or no-findings summary>",
+      true,
+    );
+
+    expect(extractMarkedReview(placeholder)).toBeUndefined();
+    expect(extractMarkedReviewResult(placeholder)).toBeUndefined();
   });
 
   it("extracts machine-readable findings markers", () => {

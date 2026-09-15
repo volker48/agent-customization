@@ -262,10 +262,10 @@ PR/MR watcher development, GitLab CI, releases, and installation docs.
 
 ### Skill: Claude Review (`skills/claude-review/`)
 
-Adds a shared Agent Skill for running Claude Code's `/code-review` from the target
-repository. Agents can load it automatically for independent review workflows, and humans
-can invoke it with `/skill:claude-review` or the bundled `scripts/run-claude-review.sh`
-helper. This does not replace the Pi `/claude-review` extension command.
+Adds a shared Agent Skill for running an independent Claude Code review from the target
+repository. Pi agents use the extension's `claude_review` tool when available; humans can
+invoke `/skill:claude-review` or the bundled `scripts/run-claude-review.sh` helper. This does
+not replace the Pi `/claude-review` extension command.
 
 ### Pi: Themes (`pi-themes/`)
 

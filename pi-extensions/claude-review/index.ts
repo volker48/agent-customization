@@ -1,19 +1,28 @@
+import { resolve } from "node:path";
+
+import { StringEnum, Type, type Static } from "@earendil-works/pi-ai";
 import {
   BorderedLoader,
   getMarkdownTheme,
   type ExecResult,
   type ExtensionAPI,
   type ExtensionCommandContext,
+  type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Markdown } from "@earendil-works/pi-tui";
 
 import {
   buildCodeReviewPrompt,
+  CLAUDE_REVIEW_RESULT_END,
+  CLAUDE_REVIEW_RESULT_START,
   DEFAULT_CLAUDE_MODEL,
+  DEFAULT_REVIEW_LEVEL,
   parseClaudeReviewArgs,
   parseClaudeReviewJobArgs,
   parseClaudeReviewResultArgs,
+  REVIEW_LEVELS,
   type ClaudeReviewOptions,
+  type ReviewLevel,
 } from "./args.js";
 import {
   cancelClaudeBackgroundJob,
@@ -50,17 +59,36 @@ const LOADER_KEY = "claude-review";
 const REVIEW_TIMEOUT_MS = 20 * 60 * 1000;
 const REVIEW_TOOLS = "Bash,Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill";
 const CAPSULE_REVIEW_TOOLS = "Read,Glob,Grep,LSP,WebFetch,WebSearch,Skill";
+const CLAUDE_REVIEW_TOOL_ACTIONS = ["start", "status", "result", "logs", "cancel", "list"] as const;
+
+const ClaudeReviewToolParams = Type.Object({
+  action: StringEnum(CLAUDE_REVIEW_TOOL_ACTIONS, {
+    description: "Claude review workflow operation",
+  }),
+  level: Type.Optional(StringEnum(REVIEW_LEVELS)),
+  context: Type.Optional(Type.String({ description: "Review context for a new job" })),
+  mode: Type.Optional(StringEnum(["background", "wait"] as const)),
+  autoFix: Type.Optional(Type.Boolean()),
+  jobId: Type.Optional(Type.String({ description: "Explicit Claude review job id" })),
+  all: Type.Optional(Type.Boolean({ description: "List jobs from every working directory" })),
+});
 
 function claudeBinary(): string {
   return process.env[CLAUDE_BIN_ENV]?.trim() || DEFAULT_CLAUDE_BIN;
 }
 
-function claudeArgs(prompt: string, reviewTools = REVIEW_TOOLS): string[] {
+function claudeArgs(
+  prompt: string,
+  effort: ReviewLevel = DEFAULT_REVIEW_LEVEL,
+  reviewTools = REVIEW_TOOLS,
+): string[] {
   return [
     "--permission-mode",
     "auto",
     "--model",
     DEFAULT_CLAUDE_MODEL,
+    "--effort",
+    effort,
     "--tools",
     reviewTools,
     "--allowed-tools",
@@ -70,18 +98,70 @@ function claudeArgs(prompt: string, reviewTools = REVIEW_TOOLS): string[] {
   ];
 }
 
-function updateLoader(ctx: ExtensionCommandContext, message: string, controller: AbortController) {
-  ctx.ui.setStatus(LOADER_KEY, message.replace(/\n/g, " · "));
-  ctx.ui.setWidget(LOADER_KEY, (tui, theme) => {
-    const loader = new BorderedLoader(tui, theme, message, { cancellable: true });
-    loader.onAbort = () => controller.abort();
-    return loader;
+type LoaderOperation = (
+  controller: AbortController,
+  updateStatus: (message: string) => void,
+) => Promise<void>;
+
+async function waitForIdleUnlessAborted(
+  ctx: ExtensionCommandContext,
+  signal: AbortSignal,
+): Promise<boolean> {
+  if (signal.aborted) return false;
+
+  return new Promise<boolean>((resolveIdle, rejectIdle) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      resolveIdle(false);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void ctx.waitForIdle().then(
+      () => {
+        signal.removeEventListener("abort", onAbort);
+        resolveIdle(!signal.aborted);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        rejectIdle(error);
+      },
+    );
   });
 }
 
-function clearLoader(ctx: ExtensionCommandContext) {
-  ctx.ui.setStatus(LOADER_KEY, undefined);
-  ctx.ui.setWidget(LOADER_KEY, undefined);
+async function runWithCancellableLoader(
+  ctx: ExtensionCommandContext,
+  initialMessage: string,
+  operation: LoaderOperation,
+): Promise<void> {
+  const controller = new AbortController();
+  const updateStatus = (message: string) => {
+    ctx.ui.setStatus(LOADER_KEY, message.replace(/\n/g, " · "));
+  };
+  updateStatus(initialMessage);
+
+  try {
+    if (ctx.mode !== "tui") {
+      await operation(controller, updateStatus);
+      return;
+    }
+
+    let operationError: unknown;
+    await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+      const loader = new BorderedLoader(tui, theme, initialMessage, { cancellable: true });
+      loader.onAbort = () => controller.abort();
+      void operation(controller, updateStatus)
+        .catch((error: unknown) => {
+          operationError = error;
+        })
+        .finally(() => done());
+      return loader;
+    });
+    if (operationError !== undefined) {
+      throw operationError;
+    }
+  } finally {
+    ctx.ui.setStatus(LOADER_KEY, undefined);
+  }
 }
 
 type CapsuleSessionContext = {
@@ -171,18 +251,35 @@ function sendReviewOnly(pi: ExtensionAPI, details: ClaudeReviewDetails): void {
   pi.sendMessage(toClaudeReviewMessage(details));
 }
 
-function toReviewDetails(result: ExecResult, options: ClaudeReviewOptions): ClaudeReviewDetails {
+function toReviewDetails(
+  result: ExecResult,
+  options: ClaudeReviewOptions,
+  cwd: string,
+): ClaudeReviewDetails {
   const markedResult = extractMarkedReviewResult(result.stdout);
+  const invalidMarkedResult =
+    result.code === 0 &&
+    result.stdout.includes(CLAUDE_REVIEW_RESULT_START) &&
+    result.stdout.includes(CLAUDE_REVIEW_RESULT_END) &&
+    !markedResult;
   return {
-    status: result.killed ? "timeout" : result.code === 0 ? "review" : "failed",
+    status: result.killed
+      ? "timeout"
+      : result.code !== 0 || invalidMarkedResult
+        ? "failed"
+        : "review",
     level: options.level,
     contextMessage: options.contextMessage,
     autoFix: options.autoFix,
     capsuleProvenance: options.capsuleProvenance,
-    stdout: markedResult?.review ?? result.stdout,
+    stdout: invalidMarkedResult ? "" : (markedResult?.review ?? result.stdout),
     stderr: result.stderr,
     exitCode: result.code,
     hasFindings: markedResult?.hasFindings,
+    cwd,
+    errorMessage: invalidMarkedResult
+      ? "Claude returned an invalid or placeholder review result"
+      : undefined,
   };
 }
 
@@ -202,7 +299,14 @@ function maybeNotifyNoFindings(ctx: ExtensionCommandContext, details: ClaudeRevi
 }
 
 function logReadFailureOutput(job: ClaudeReviewJob): string {
-  return job.errorMessage?.startsWith("Failed to read Claude logs") ? job.lastLog : "";
+  return job.managementError?.startsWith("Failed to read Claude logs") ||
+    job.managementError === "Timed out while reading Claude logs"
+    ? job.lastLog
+    : "";
+}
+
+function queueAutoFix(pi: ExtensionAPI, details: ClaudeReviewDetails): void {
+  pi.sendUserMessage(buildAutoFixPrompt(details), { deliverAs: "followUp" });
 }
 
 function handleReviewResult(
@@ -212,14 +316,17 @@ function handleReviewResult(
   details: ClaudeReviewDetails,
   autoFix: boolean,
 ): void {
-  if (result.killed) {
+  if (details.status === "timeout") {
     sendReviewOnly(pi, details);
     ctx.ui.notify("Claude review timed out after 20 minutes", "error");
-  } else if (result.code !== 0) {
+  } else if (details.status === "failed") {
     sendReviewOnly(pi, details);
-    ctx.ui.notify(`Claude review failed with exit code ${result.code}`, "error");
+    ctx.ui.notify(
+      details.errorMessage ?? `Claude review failed with exit code ${result.code}`,
+      "error",
+    );
   } else if (autoFix && reviewHasFindings(details)) {
-    pi.sendUserMessage(buildAutoFixPrompt(details));
+    queueAutoFix(pi, details);
   } else {
     sendReviewOnly(pi, details);
     if (autoFix) {
@@ -233,38 +340,51 @@ async function handleWaitClaudeReviewCommand(
   options: ClaudeReviewOptions,
   ctx: ExtensionCommandContext,
 ): Promise<void> {
-  const controller = new AbortController();
+  await runWithCancellableLoader(
+    ctx,
+    "Claude review: waiting for Pi to become idle…",
+    async (controller, updateStatus) => {
+      try {
+        if (!(await waitForIdleUnlessAborted(ctx, controller.signal))) {
+          ctx.ui.notify("Claude review cancelled", "info");
+          return;
+        }
+        const capsule = await prepareCapsule(options, ctx, controller.signal);
+        if (capsule === null) return;
+        if (controller.signal.aborted) {
+          ctx.ui.notify("Claude review cancelled", "info");
+          return;
+        }
+        const reviewPrompt = buildCodeReviewPrompt(options, { resultMarkers: true, capsule });
+        updateStatus(`Claude review: running at ${options.level} effort…`);
+        const reviewTools = capsule ? CAPSULE_REVIEW_TOOLS : REVIEW_TOOLS;
+        controller.signal.throwIfAborted();
+        const result = await pi.exec(
+          claudeBinary(),
+          claudeArgs(reviewPrompt, options.level, reviewTools),
+          {
+            cwd: ctx.cwd,
+            signal: controller.signal,
+            timeout: REVIEW_TIMEOUT_MS,
+          },
+        );
 
-  updateLoader(ctx, "Claude review: waiting for Pi to become idle…", controller);
-  try {
-    await ctx.waitForIdle();
-    const capsule = await prepareCapsule(options, ctx, controller.signal);
-    if (capsule === null) return;
-    const reviewPrompt = buildCodeReviewPrompt(options, { resultMarkers: true, capsule });
-    updateLoader(ctx, `Claude review: running /code-review ${options.level}…`, controller);
-    const reviewTools = capsule ? CAPSULE_REVIEW_TOOLS : REVIEW_TOOLS;
-    const result = await pi.exec(claudeBinary(), claudeArgs(reviewPrompt, reviewTools), {
-      cwd: ctx.cwd,
-      signal: controller.signal,
-      timeout: REVIEW_TIMEOUT_MS,
-    });
-
-    const details = toReviewDetails(result, options);
-    if (controller.signal.aborted) {
-      ctx.ui.notify("Claude review cancelled", "info");
-    } else {
-      handleReviewResult(pi, ctx, result, details, options.autoFix);
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (controller.signal.aborted) {
-      ctx.ui.notify("Claude review cancelled", "info");
-    } else {
-      ctx.ui.notify(`Claude review failed: ${message}`, "error");
-    }
-  } finally {
-    clearLoader(ctx);
-  }
+        const details = toReviewDetails(result, options, ctx.cwd);
+        if (controller.signal.aborted) {
+          ctx.ui.notify("Claude review cancelled", "info");
+        } else {
+          handleReviewResult(pi, ctx, result, details, options.autoFix);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (controller.signal.aborted) {
+          ctx.ui.notify("Claude review cancelled", "info");
+        } else {
+          ctx.ui.notify(`Claude review failed: ${message}`, "error");
+        }
+      }
+    },
+  );
 }
 
 async function handleBackgroundClaudeReviewCommand(
@@ -272,49 +392,61 @@ async function handleBackgroundClaudeReviewCommand(
   options: ClaudeReviewOptions,
   ctx: ExtensionCommandContext,
 ): Promise<void> {
-  const controller = new AbortController();
   let job: ClaudeReviewJob | undefined;
 
-  updateLoader(ctx, "Claude review: waiting for Pi to become idle…", controller);
-  try {
-    await ctx.waitForIdle();
-    const capsule = await prepareCapsule(options, ctx, controller.signal);
-    if (capsule === null) return;
-    const prompt = buildCodeReviewPrompt(options, { resultMarkers: true, capsule });
-    job = await createJob({ cwd: ctx.cwd, options, prompt });
-    updateLoader(ctx, `Claude review: starting background job ${job.id}…`, controller);
-    job = await startClaudeBackgroundReview(
-      pi,
-      job,
-      claudeBinary(),
-      capsule ? CAPSULE_REVIEW_TOOLS : REVIEW_TOOLS,
-      controller.signal,
-    );
-    sendReviewOnly(pi, jobToClaudeReviewDetails(job));
+  await runWithCancellableLoader(
+    ctx,
+    "Claude review: waiting for Pi to become idle…",
+    async (controller, updateStatus) => {
+      try {
+        if (!(await waitForIdleUnlessAborted(ctx, controller.signal))) {
+          ctx.ui.notify("Claude review cancelled", "info");
+          return;
+        }
+        const capsule = await prepareCapsule(options, ctx, controller.signal);
+        if (capsule === null) return;
+        if (controller.signal.aborted) {
+          ctx.ui.notify("Claude review cancelled", "info");
+          return;
+        }
+        const prompt = buildCodeReviewPrompt(options, { resultMarkers: true, capsule });
+        job = await createJob({ cwd: ctx.cwd, options, prompt });
+        updateStatus(`Claude review: starting background job ${job.id}…`);
+        controller.signal.throwIfAborted();
+        job = await startClaudeBackgroundReview(
+          pi,
+          job,
+          claudeBinary(),
+          capsule ? CAPSULE_REVIEW_TOOLS : REVIEW_TOOLS,
+          controller.signal,
+        );
+        sendReviewOnly(pi, jobToClaudeReviewDetails(job));
 
-    if (job.status === "running") {
-      ctx.ui.notify(`Claude review started: ${job.id}`, "info");
-    } else if (job.status === "failed" || job.status === "timeout") {
-      ctx.ui.notify(`Claude review did not start: ${job.errorMessage ?? job.status}`, "error");
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (job) {
-      job = await writeJob({
-        ...job,
-        status: controller.signal.aborted ? "cancelled" : "failed",
-        completedAt: new Date().toISOString(),
-        errorMessage: message,
-      });
-      sendReviewOnly(pi, jobToClaudeReviewDetails(job));
-    }
-    ctx.ui.notify(
-      controller.signal.aborted ? "Claude review cancelled" : `Claude review failed: ${message}`,
-      "error",
-    );
-  } finally {
-    clearLoader(ctx);
-  }
+        if (job.status === "running") {
+          ctx.ui.notify(`Claude review started: ${job.id}`, "info");
+        } else if (job.status === "failed" || job.status === "timeout") {
+          ctx.ui.notify(`Claude review did not start: ${job.errorMessage ?? job.status}`, "error");
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (job) {
+          job = await writeJob({
+            ...job,
+            status: controller.signal.aborted ? "cancelled" : "failed",
+            completedAt: new Date().toISOString(),
+            errorMessage: message,
+          });
+          sendReviewOnly(pi, jobToClaudeReviewDetails(job));
+        }
+        ctx.ui.notify(
+          controller.signal.aborted
+            ? "Claude review cancelled"
+            : `Claude review failed: ${message}`,
+          controller.signal.aborted ? "info" : "error",
+        );
+      }
+    },
+  );
 }
 
 async function handleClaudeReviewCommand(
@@ -369,11 +501,18 @@ async function handleClaudeReviewResultCommand(
     const output = withLogs.stdout || logReadFailureOutput(withLogs);
     const details = jobToClaudeReviewDetails(withLogs, output);
     const autoFix = options.fix ?? withLogs.autoFix;
-    const shouldFix = details.status === "review" && autoFix && reviewHasFindings(details);
+    const sameWorkspace = resolve(withLogs.cwd) === resolve(ctx.cwd);
+    const hasActionableReview = details.status === "review" && reviewHasFindings(details);
+    const shouldFix = autoFix && sameWorkspace && hasActionableReview;
 
     sendReviewOnly(pi, details);
     if (shouldFix) {
-      pi.sendUserMessage(buildAutoFixPrompt(details));
+      queueAutoFix(pi, details);
+    } else if (autoFix && !sameWorkspace && hasActionableReview) {
+      ctx.ui.notify(
+        `Claude review auto-fix refused for job from ${withLogs.cwd}; current workspace is ${ctx.cwd}`,
+        "error",
+      );
     } else if (details.status === "review" && autoFix) {
       maybeNotifyNoFindings(ctx, details);
     } else if (!isTerminalJobStatus(withLogs.status)) {
@@ -448,14 +587,168 @@ async function handleClaudeReviewListCommand(
   }
 }
 
+type ClaudeReviewToolInput = Static<typeof ClaudeReviewToolParams>;
+
+type ClaudeReviewToolResult = {
+  content: Array<{ type: "text"; text: string }>;
+  details: ClaudeReviewDetails;
+};
+
+function assertValidToolInput(input: ClaudeReviewToolInput): void {
+  switch (input.action) {
+    case "start":
+      if (input.jobId || input.all) {
+        throw new Error("claude_review start does not accept jobId or all");
+      }
+      return;
+    case "status":
+    case "logs":
+    case "cancel":
+      if (input.level || input.context || input.mode || input.autoFix !== undefined || input.all) {
+        throw new Error(`claude_review ${input.action} accepts only jobId`);
+      }
+      return;
+    case "result":
+      if (input.level || input.context || input.mode || input.all) {
+        throw new Error("claude_review result accepts only jobId and autoFix");
+      }
+      return;
+    case "list":
+      if (
+        input.level ||
+        input.context ||
+        input.mode ||
+        input.autoFix !== undefined ||
+        input.jobId
+      ) {
+        throw new Error("claude_review list accepts only all");
+      }
+  }
+}
+
+function toToolResult(details: ClaudeReviewDetails, prefix?: string): ClaudeReviewToolResult {
+  const rendered = renderClaudeReviewMarkdown(details);
+  return {
+    content: [{ type: "text", text: prefix ? `${prefix}\n\n${rendered}` : rendered }],
+    details,
+  };
+}
+
+async function startClaudeReviewFromTool(
+  pi: ExtensionAPI,
+  input: ClaudeReviewToolInput,
+  signal: AbortSignal,
+  ctx: ExtensionContext,
+): Promise<ClaudeReviewToolResult> {
+  const options: ClaudeReviewOptions = {
+    autoFix: input.autoFix ?? true,
+    level: input.level ?? DEFAULT_REVIEW_LEVEL,
+    contextMessage: input.context?.trim() ?? "",
+    mode: input.mode ?? "background",
+  };
+  const prompt = buildCodeReviewPrompt(options, { resultMarkers: true });
+
+  if (options.mode === "wait") {
+    const result = await pi.exec(claudeBinary(), claudeArgs(prompt, options.level), {
+      cwd: ctx.cwd,
+      signal,
+      timeout: REVIEW_TIMEOUT_MS,
+    });
+    signal.throwIfAborted();
+    const details = toReviewDetails(result, options, ctx.cwd);
+    if (options.autoFix && details.status === "review" && reviewHasFindings(details)) {
+      queueAutoFix(pi, details);
+    }
+    return toToolResult(details);
+  }
+
+  signal.throwIfAborted();
+  let job = await createJob({ cwd: ctx.cwd, options, prompt });
+  try {
+    signal.throwIfAborted();
+    job = await startClaudeBackgroundReview(pi, job, claudeBinary(), REVIEW_TOOLS, signal);
+  } catch (error) {
+    if (!signal.aborted) throw error;
+    job = await writeJob({
+      ...job,
+      status: "cancelled",
+      completedAt: new Date().toISOString(),
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return toToolResult(jobToClaudeReviewDetails(job), `Claude review job: ${job.id}`);
+}
+
+async function executeClaudeReviewTool(
+  pi: ExtensionAPI,
+  input: ClaudeReviewToolInput,
+  signal: AbortSignal | undefined,
+  ctx: ExtensionContext,
+): Promise<ClaudeReviewToolResult> {
+  assertValidToolInput(input);
+  const operationSignal = signal ?? new AbortController().signal;
+  operationSignal.throwIfAborted();
+
+  if (input.action === "start") {
+    return startClaudeReviewFromTool(pi, input, operationSignal, ctx);
+  }
+
+  if (input.action === "list") {
+    const jobs = await listJobs(input.all ? {} : { cwd: ctx.cwd });
+    return toToolResult(buildJobsListDetails(jobs, ctx.cwd, input.all ?? false));
+  }
+
+  const job = await resolveJob(input.jobId, ctx.cwd);
+  if (input.action === "cancel") {
+    const cancelled = await cancelClaudeBackgroundJob(pi, job, claudeBinary());
+    return toToolResult(jobToClaudeReviewDetails(cancelled));
+  }
+
+  const refreshed = await refreshClaudeBackgroundJob(pi, job, claudeBinary());
+  if (input.action === "status") {
+    return toToolResult(jobToClaudeReviewDetails(refreshed, refreshed.lastLog || refreshed.stdout));
+  }
+
+  const withLogs = refreshed.claudeSessionId
+    ? await readClaudeBackgroundLogs(pi, refreshed, claudeBinary())
+    : refreshed;
+  if (input.action === "logs") {
+    return toToolResult(jobToClaudeReviewDetails(withLogs, withLogs.lastLog || withLogs.stdout));
+  }
+
+  const output = withLogs.stdout || logReadFailureOutput(withLogs);
+  const details = jobToClaudeReviewDetails(withLogs, output);
+  const autoFix = input.autoFix ?? withLogs.autoFix;
+  const sameWorkspace = resolve(withLogs.cwd) === resolve(ctx.cwd);
+  const hasActionableReview = details.status === "review" && reviewHasFindings(details);
+  if (autoFix && sameWorkspace && hasActionableReview) {
+    queueAutoFix(pi, details);
+  }
+  const refusal =
+    autoFix && !sameWorkspace && hasActionableReview
+      ? `Auto-fix refused: job workspace ${withLogs.cwd} differs from current workspace ${ctx.cwd}.`
+      : undefined;
+  return toToolResult(details, refusal);
+}
+
 export default function claudeReviewExtension(pi: ExtensionAPI) {
   pi.registerMessageRenderer<ClaudeReviewDetails>(CLAUDE_REVIEW_MESSAGE_TYPE, (message) => {
     return new Markdown(renderClaudeReviewMarkdown(message.details), 1, 0, getMarkdownTheme());
   });
 
-  pi.registerCommand("claude-review", {
+  pi.registerTool({
+    name: "claude_review",
+    label: "Claude Review",
     description:
-      "Start a durable Claude Code /code-review job; use --wait for legacy blocking mode",
+      "Start and manage independent Claude Code reviews. Operations execute directly and sequentially, so a completed start returns the job id needed by later operations.",
+    parameters: ClaudeReviewToolParams,
+    executionMode: "sequential",
+    execute: (_toolCallId, params, signal, _onUpdate, ctx) =>
+      executeClaudeReviewTool(pi, params, signal, ctx),
+  });
+
+  pi.registerCommand("claude-review", {
+    description: "Start a durable independent Claude Code review; use --wait for blocking mode",
     handler: (args, ctx) => handleClaudeReviewCommand(pi, args, ctx),
   });
   pi.registerCommand("claude-review-status", {
