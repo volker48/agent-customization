@@ -1,5 +1,3 @@
-import { resolve } from "node:path";
-
 import { StringEnum, Type, type Static } from "@earendil-works/pi-ai";
 import {
   BorderedLoader,
@@ -32,7 +30,14 @@ import {
   refreshClaudeBackgroundJob,
   startClaudeBackgroundReview,
 } from "./claude-bg.js";
-import { createJob, isTerminalJobStatus, listJobs, resolveJob, writeJob } from "./jobs.js";
+import {
+  createJob,
+  isSameWorkspace,
+  isTerminalJobStatus,
+  listJobs,
+  resolveJob,
+  writeJob,
+} from "./jobs.js";
 import type { ClaudeReviewJob } from "./jobs.js";
 import type { ClaudeReviewDetails } from "./render.js";
 import {
@@ -134,8 +139,10 @@ async function runWithCancellableLoader(
   operation: LoaderOperation,
 ): Promise<void> {
   const controller = new AbortController();
+  let updateVisibleLoader: ((message: string) => void) | undefined;
   const updateStatus = (message: string) => {
     ctx.ui.setStatus(LOADER_KEY, message.replace(/\n/g, " · "));
+    updateVisibleLoader?.(message);
   };
   updateStatus(initialMessage);
 
@@ -147,19 +154,34 @@ async function runWithCancellableLoader(
 
     let operationError: unknown;
     await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-      const loader = new BorderedLoader(tui, theme, initialMessage, { cancellable: true });
-      loader.onAbort = () => controller.abort();
+      const createLoader = (message: string) => {
+        const next = new BorderedLoader(tui, theme, message, { cancellable: true });
+        next.onAbort = () => controller.abort();
+        return next;
+      };
+      let loader = createLoader(initialMessage);
+      updateVisibleLoader = (message) => {
+        loader.dispose();
+        loader = createLoader(message);
+        tui.requestRender();
+      };
       void operation(controller, updateStatus)
         .catch((error: unknown) => {
           operationError = error;
         })
         .finally(() => done());
-      return loader;
+      return {
+        render: (width: number) => loader.render(width),
+        invalidate: () => loader.invalidate(),
+        handleInput: (data: string) => loader.handleInput(data),
+        dispose: () => loader.dispose(),
+      };
     });
     if (operationError !== undefined) {
       throw operationError;
     }
   } finally {
+    updateVisibleLoader = undefined;
     ctx.ui.setStatus(LOADER_KEY, undefined);
   }
 }
@@ -251,17 +273,38 @@ function sendReviewOnly(pi: ExtensionAPI, details: ClaudeReviewDetails): void {
   pi.sendMessage(toClaudeReviewMessage(details));
 }
 
+function hasUnpairedResultMarker(output: string): boolean {
+  let cursor = 0;
+  let open = false;
+  while (cursor < output.length) {
+    const start = output.indexOf(CLAUDE_REVIEW_RESULT_START, cursor);
+    const end = output.indexOf(CLAUDE_REVIEW_RESULT_END, cursor);
+    if (start === -1 && end === -1) return open;
+    if (end !== -1 && (start === -1 || end < start)) {
+      if (!open) return true;
+      open = false;
+      cursor = end + CLAUDE_REVIEW_RESULT_END.length;
+    } else {
+      if (open) return true;
+      open = true;
+      cursor = start + CLAUDE_REVIEW_RESULT_START.length;
+    }
+  }
+  return open;
+}
+
 function toReviewDetails(
   result: ExecResult,
   options: ClaudeReviewOptions,
   cwd: string,
 ): ClaudeReviewDetails {
   const markedResult = extractMarkedReviewResult(result.stdout);
+  const hasResultMarker =
+    result.stdout.includes(CLAUDE_REVIEW_RESULT_START) ||
+    result.stdout.includes(CLAUDE_REVIEW_RESULT_END);
   const invalidMarkedResult =
     result.code === 0 &&
-    result.stdout.includes(CLAUDE_REVIEW_RESULT_START) &&
-    result.stdout.includes(CLAUDE_REVIEW_RESULT_END) &&
-    !markedResult;
+    (hasUnpairedResultMarker(result.stdout) || (hasResultMarker && !markedResult));
   return {
     status: result.killed
       ? "timeout"
@@ -501,7 +544,7 @@ async function handleClaudeReviewResultCommand(
     const output = withLogs.stdout || logReadFailureOutput(withLogs);
     const details = jobToClaudeReviewDetails(withLogs, output);
     const autoFix = options.fix ?? withLogs.autoFix;
-    const sameWorkspace = resolve(withLogs.cwd) === resolve(ctx.cwd);
+    const sameWorkspace = await isSameWorkspace(withLogs.cwd, ctx.cwd);
     const hasActionableReview = details.status === "review" && reviewHasFindings(details);
     const shouldFix = autoFix && sameWorkspace && hasActionableReview;
 
@@ -668,10 +711,9 @@ async function startClaudeReviewFromTool(
     signal.throwIfAborted();
     job = await startClaudeBackgroundReview(pi, job, claudeBinary(), REVIEW_TOOLS, signal);
   } catch (error) {
-    if (!signal.aborted) throw error;
     job = await writeJob({
       ...job,
-      status: "cancelled",
+      status: signal.aborted ? "cancelled" : "failed",
       completedAt: new Date().toISOString(),
       errorMessage: error instanceof Error ? error.message : String(error),
     });
@@ -695,23 +737,28 @@ async function executeClaudeReviewTool(
 
   if (input.action === "list") {
     const jobs = await listJobs(input.all ? {} : { cwd: ctx.cwd });
+    operationSignal.throwIfAborted();
     return toToolResult(buildJobsListDetails(jobs, ctx.cwd, input.all ?? false));
   }
 
   const job = await resolveJob(input.jobId, ctx.cwd);
+  operationSignal.throwIfAborted();
   if (input.action === "cancel") {
-    const cancelled = await cancelClaudeBackgroundJob(pi, job, claudeBinary());
+    const cancelled = await cancelClaudeBackgroundJob(pi, job, claudeBinary(), operationSignal);
+    operationSignal.throwIfAborted();
     return toToolResult(jobToClaudeReviewDetails(cancelled));
   }
 
-  const refreshed = await refreshClaudeBackgroundJob(pi, job, claudeBinary());
+  const refreshed = await refreshClaudeBackgroundJob(pi, job, claudeBinary(), operationSignal);
+  operationSignal.throwIfAborted();
   if (input.action === "status") {
     return toToolResult(jobToClaudeReviewDetails(refreshed, refreshed.lastLog || refreshed.stdout));
   }
 
   const withLogs = refreshed.claudeSessionId
-    ? await readClaudeBackgroundLogs(pi, refreshed, claudeBinary())
+    ? await readClaudeBackgroundLogs(pi, refreshed, claudeBinary(), operationSignal)
     : refreshed;
+  operationSignal.throwIfAborted();
   if (input.action === "logs") {
     return toToolResult(jobToClaudeReviewDetails(withLogs, withLogs.lastLog || withLogs.stdout));
   }
@@ -719,7 +766,8 @@ async function executeClaudeReviewTool(
   const output = withLogs.stdout || logReadFailureOutput(withLogs);
   const details = jobToClaudeReviewDetails(withLogs, output);
   const autoFix = input.autoFix ?? withLogs.autoFix;
-  const sameWorkspace = resolve(withLogs.cwd) === resolve(ctx.cwd);
+  const sameWorkspace = await isSameWorkspace(withLogs.cwd, ctx.cwd);
+  operationSignal.throwIfAborted();
   const hasActionableReview = details.status === "review" && reviewHasFindings(details);
   if (autoFix && sameWorkspace && hasActionableReview) {
     queueAutoFix(pi, details);

@@ -188,7 +188,13 @@ export function buildCodeReviewPrompt(
     `Review level: ${options.level}`,
     "",
     "Review contract:",
-    "- Inspect the working tree, index, and branch changes with git. Determine the appropriate merge base when the branch contains commits not present upstream.",
+    ...(format.capsule
+      ? [
+          "- Use the bounded Context Capsule as task grounding and inspect referenced repository files with the available read-only tools.",
+        ]
+      : [
+          "- Inspect the working tree, index, and branch changes with git. Determine the appropriate merge base when the branch contains commits not present upstream.",
+        ]),
     "- Focus on correctness, security, integration regressions, edge cases, and missing tests. Do not report purely stylistic preferences.",
     "- Return concise, actionable findings ordered by severity. Include file and line references when available. If there are no findings, say so explicitly.",
     "- Do not modify files, create tasks, spawn agents, or start remote or orchestration workflows.",

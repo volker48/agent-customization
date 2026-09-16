@@ -130,6 +130,7 @@ export async function startClaudeBackgroundReview(
   signal?: AbortSignal,
 ): Promise<ClaudeReviewJob> {
   let next = await writeJob({ ...job, status: "starting", errorMessage: null });
+  signal?.throwIfAborted();
   const result = await pi.exec(
     claudeBinary,
     claudeBackgroundArgs(next.prompt, next.claudeSessionName, reviewTools, next.level),
@@ -142,12 +143,30 @@ export async function startClaudeBackgroundReview(
 
   const rawStartOutput = joinOutput(result);
   const claudeSessionId = parseBackgroundSessionId(rawStartOutput);
+  const runningJob = claudeSessionId
+    ? {
+        ...next,
+        status: "running" as const,
+        claudeSessionId,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exitCode: result.code,
+        rawStartOutput,
+      }
+    : undefined;
+  if (signal?.aborted) {
+    if (runningJob) {
+      next = await writeJob(runningJob);
+      return cancelClaudeBackgroundJob(pi, next, claudeBinary);
+    }
+    signal.throwIfAborted();
+  }
 
-  const writeStartFailure = (
+  const writeStartFailure = async (
     status: Extract<ClaudeReviewJobStatus, "failed" | "timeout">,
     errorMessage: string,
-  ): Promise<ClaudeReviewJob> =>
-    writeJob({
+  ): Promise<ClaudeReviewJob> => {
+    const failed = await writeJob({
       ...next,
       status,
       stdout: result.stdout,
@@ -157,6 +176,9 @@ export async function startClaudeBackgroundReview(
       errorMessage,
       rawStartOutput,
     });
+    signal?.throwIfAborted();
+    return failed;
+  };
 
   if (result.killed) {
     return writeStartFailure(
@@ -172,19 +194,14 @@ export async function startClaudeBackgroundReview(
     );
   }
 
-  if (!claudeSessionId) {
+  if (!runningJob) {
     return writeStartFailure("failed", "Claude background session did not report a session id");
   }
 
-  next = await writeJob({
-    ...next,
-    status: "running",
-    claudeSessionId,
-    stdout: result.stdout,
-    stderr: result.stderr,
-    exitCode: result.code,
-    rawStartOutput,
-  });
+  next = await writeJob(runningJob);
+  if (signal?.aborted) {
+    return cancelClaudeBackgroundJob(pi, next, claudeBinary);
+  }
 
   return next;
 }
@@ -193,11 +210,14 @@ export async function refreshClaudeBackgroundJob(
   pi: ExtensionAPI,
   job: ClaudeReviewJob,
   claudeBinary: string,
+  signal?: AbortSignal,
 ): Promise<ClaudeReviewJob> {
   const result = await pi.exec(claudeBinary, claudeAgentsArgs(job.cwd), {
     cwd: job.cwd,
+    signal,
     timeout: BACKGROUND_STATUS_TIMEOUT_MS,
   });
+  signal?.throwIfAborted();
 
   if (result.killed || result.code !== 0) {
     const errorMessage = result.killed
@@ -267,12 +287,15 @@ export async function readClaudeBackgroundLogs(
   pi: ExtensionAPI,
   job: ClaudeReviewJob,
   claudeBinary: string,
+  signal?: AbortSignal,
 ): Promise<ClaudeReviewJob> {
+  signal?.throwIfAborted();
   if (!job.claudeSessionId) {
     throw new Error("Claude session id is not known yet; run /claude-review-status and try again");
   }
 
   const transcript = await readClaudeTranscript(job);
+  signal?.throwIfAborted();
   if (transcript) {
     return applyClaudeLogOutput(
       job,
@@ -283,8 +306,10 @@ export async function readClaudeBackgroundLogs(
 
   const result = await pi.exec(claudeBinary, claudeLogsArgs(job.claudeSessionId), {
     cwd: job.cwd,
+    signal,
     timeout: BACKGROUND_STATUS_TIMEOUT_MS,
   });
+  signal?.throwIfAborted();
 
   return applyClaudeLogOutput(job, result);
 }
@@ -445,7 +470,9 @@ export async function cancelClaudeBackgroundJob(
   pi: ExtensionAPI,
   job: ClaudeReviewJob,
   claudeBinary: string,
+  signal?: AbortSignal,
 ): Promise<ClaudeReviewJob> {
+  signal?.throwIfAborted();
   if (isTerminalJobStatus(job.status)) {
     return job;
   }
@@ -456,8 +483,10 @@ export async function cancelClaudeBackgroundJob(
 
   const result = await pi.exec(claudeBinary, claudeStopArgs(job.claudeSessionId), {
     cwd: job.cwd,
+    signal,
     timeout: BACKGROUND_STATUS_TIMEOUT_MS,
   });
+  signal?.throwIfAborted();
 
   if (result.killed || result.code !== 0) {
     return writeJob({
@@ -475,7 +504,7 @@ export async function cancelClaudeBackgroundJob(
     ...job,
     status: "cancelled",
     stdout: result.stdout || job.stdout,
-    stderr: result.stderr || job.stderr,
+    stderr: result.stderr,
     exitCode: result.code,
     completedAt: new Date().toISOString(),
     errorMessage: null,

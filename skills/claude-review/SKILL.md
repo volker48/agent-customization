@@ -12,7 +12,13 @@ Keep the process working directory at the target repository root. Never `cd` to 
 
 ```json
 {"action":"start","level":"high","context":"review the current branch"}
+```
+
+```json
 {"action":"status"}
+```
+
+```json
 {"action":"result","autoFix":false}
 ```
 
