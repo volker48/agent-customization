@@ -5,12 +5,13 @@ import {
   mkdir,
   readdir,
   readFile,
+  realpath,
   rename,
   unlink,
   writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import type { ClaudeReviewCapsuleProvenance, ClaudeReviewOptions, ReviewLevel } from "./args.js";
 
@@ -32,6 +33,7 @@ export type ClaudeReviewJobStatus =
   | "unknown";
 
 export type ClaudeReviewSource = "marked-output";
+export type ClaudeReviewManagementOperation = "status" | "logs" | "cancel";
 
 export interface ClaudeReviewJob {
   id: string;
@@ -55,6 +57,8 @@ export interface ClaudeReviewJob {
   hasFindings?: boolean | null;
   reviewSource?: ClaudeReviewSource | null;
   errorMessage?: string | null;
+  managementError?: string | null;
+  managementErrorSource?: ClaudeReviewManagementOperation | null;
   rawStartOutput?: string;
   rawAgentsEntry?: unknown;
 }
@@ -75,6 +79,28 @@ export function jobStoreDir(): string {
 
 export function isTerminalJobStatus(status: ClaudeReviewJobStatus): boolean {
   return ["review", "failed", "cancelled", "timeout"].includes(status);
+}
+
+export async function canonicalWorkspacePath(path: string): Promise<string> {
+  const absolutePath = resolve(path);
+  try {
+    return await realpath(absolutePath);
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return absolutePath;
+    }
+    throw new Error(`Failed to canonicalize Claude review workspace ${absolutePath}`, {
+      cause: error,
+    });
+  }
+}
+
+export async function isSameWorkspace(first: string, second: string): Promise<boolean> {
+  const [canonicalFirst, canonicalSecond] = await Promise.all([
+    canonicalWorkspacePath(first),
+    canonicalWorkspacePath(second),
+  ]);
+  return canonicalFirst === canonicalSecond;
 }
 
 export function createJobId(now = new Date()): string {
@@ -160,6 +186,8 @@ export async function createJob(input: CreateClaudeReviewJobInput): Promise<Clau
     hasFindings: null,
     reviewSource: null,
     errorMessage: null,
+    managementError: null,
+    managementErrorSource: null,
   };
   await writeJob(job);
   return job;
@@ -212,6 +240,7 @@ export async function listJobs(options: { cwd?: string } = {}): Promise<ClaudeRe
   await ensureJobStore();
   const files = await readdir(jobStoreDir());
   const jobs: ClaudeReviewJob[] = [];
+  const canonicalCwd = options.cwd ? await canonicalWorkspacePath(options.cwd) : undefined;
 
   for (const file of files) {
     if (!file.endsWith(".json")) {
@@ -220,17 +249,19 @@ export async function listJobs(options: { cwd?: string } = {}): Promise<ClaudeRe
     const path = join(jobStoreDir(), file);
     await secureJobFile(path);
     const content = await readFile(path, "utf8");
+    let job: ClaudeReviewJob;
     try {
-      const job = JSON.parse(content) as ClaudeReviewJob;
+      job = JSON.parse(content) as ClaudeReviewJob;
       assertValidJobId(job.id);
       if (file !== `${job.id}.json`) {
         continue;
       }
-      if (!options.cwd || job.cwd === options.cwd) {
-        jobs.push(job);
-      }
     } catch {
       // Ignore partial or unrelated JSON files in the job store.
+      continue;
+    }
+    if (!canonicalCwd || (await canonicalWorkspacePath(job.cwd)) === canonicalCwd) {
+      jobs.push(job);
     }
   }
 
