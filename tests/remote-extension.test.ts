@@ -6,11 +6,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import remoteExtension from "../pi-extensions/remote/index.js";
 import { startIpcDaemonServer, type IpcEnvelope } from "../pi-extensions/remote/ipc.js";
+import type { SessionState } from "../pi-extensions/remote/session-state.js";
 
 type RegisteredCommand = { handler(args: string, ctx: MockContext): Promise<void> };
 type MockContext = ReturnType<typeof createContext>;
 
 const handlers = new Map<string, (event: unknown, ctx: MockContext) => void | Promise<void>>();
+
+const SOL = testModel("openai-codex", "gpt-5.6-sol", "GPT-5.6 Sol", { xhigh: "xhigh" });
+const KIMI = testModel("openrouter", "moonshotai/kimi-k3", "Kimi K3");
+
+function testModel(
+  provider: string,
+  id: string,
+  name: string,
+  thinkingLevelMap?: Record<string, string>,
+) {
+  return { provider, id, name, reasoning: true, thinkingLevelMap };
+}
 
 function createPi() {
   const commands = new Map<string, RegisteredCommand>();
@@ -24,6 +37,9 @@ function createPi() {
       }),
       getSessionName: vi.fn(() => "Remote test"),
       sendUserMessage: vi.fn(),
+      getThinkingLevel: vi.fn(() => "high"),
+      setModel: vi.fn(async () => true),
+      setThinkingLevel: vi.fn(),
     },
     command(name: string) {
       const command = commands.get(name);
@@ -39,6 +55,9 @@ function createContext() {
   return {
     cwd: "/tmp/project",
     abort: vi.fn(),
+    model: SOL,
+    scopedModels: [{ model: SOL }, { model: KIMI }],
+    modelRegistry: { getAvailable: vi.fn(() => [SOL, KIMI]) },
     ui: {
       notify: vi.fn(),
     },
@@ -133,7 +152,10 @@ describe("remote extension", () => {
         payload: { text: "keep going" },
       });
       await waitFor(() =>
-        expect(pi.sendUserMessage).toHaveBeenCalledWith("keep going", { deliverAs: "steer" }),
+        expect(pi.sendUserMessage).toHaveBeenCalledWith("keep going", {
+          deliverAs: "steer",
+          expandPromptTemplates: true,
+        }),
       );
 
       await daemon.sendToSession({ sessionId: "session-1", type: "abort", payload: {} });
@@ -346,6 +368,118 @@ describe("remote extension", () => {
     }
   });
 
+  it("sends session state ahead of the backfill and when the model or thinking level changes", async () => {
+    const frames: IpcEnvelope[] = [];
+    const daemon = await startIpcDaemonServer(join(root, "daemon.sock"), {
+      onFrame: (frame) => frames.push(frame),
+      getPairingInfo: () => ({ ticket: "ticket-stub", code: "123-456" }),
+    });
+    const { pi, command } = createPi();
+    const ctx = createContext();
+
+    try {
+      remoteExtension(pi as never);
+      await command("remote").handler("", ctx);
+      await daemon.waitForSession("session-1");
+
+      await daemon.sendToSession({ sessionId: "session-1", type: "attach", payload: {} });
+      await waitForFrame(frames, (frame) => frame.type === "event" && hasText(frame, "hi"));
+      expect(frames.find((frame) => frame.type === "event")?.payload).toEqual({
+        role: "system",
+        text: "",
+        toolName: null,
+        status: "session_state",
+        truncatedOutput: false,
+        sessionState: {
+          model: { provider: "openai-codex", id: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+          thinkingLevel: "high",
+          thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh"],
+          models: [
+            { provider: "openai-codex", id: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+            { provider: "openrouter", id: "moonshotai/kimi-k3", name: "Kimi K3" },
+          ],
+        },
+      });
+
+      await handlers.get("model_select")?.(
+        { type: "model_select", model: KIMI, previousModel: SOL, source: "set" },
+        { ...ctx, model: KIMI },
+      );
+      const modelFrame = await waitForFrame(frames, (frame) => sessionModelId(frame) === KIMI.id);
+      expect(modelFrame?.payload).toMatchObject({
+        sessionState: {
+          thinkingLevel: "high",
+          thinkingLevels: ["off", "minimal", "low", "medium", "high"],
+        },
+      });
+
+      await handlers.get("thinking_level_select")?.(
+        { type: "thinking_level_select", level: "low", previousLevel: "high" },
+        ctx,
+      );
+      await waitForFrame(frames, (frame) => sessionThinkingLevel(frame) === "low");
+    } finally {
+      await daemon.close();
+    }
+  });
+
+  it("runs /model and /thinking on the host and dispatches other slash commands", async () => {
+    const frames: IpcEnvelope[] = [];
+    const daemon = await startIpcDaemonServer(join(root, "daemon.sock"), {
+      onFrame: (frame) => frames.push(frame),
+      getPairingInfo: () => ({ ticket: "ticket-stub", code: "123-456" }),
+    });
+    const { pi, command } = createPi();
+    const ctx = createContext();
+    const prompt = (text: string) =>
+      daemon.sendToSession({ sessionId: "session-1", type: "prompt", payload: { text } });
+
+    try {
+      remoteExtension(pi as never);
+      await command("remote").handler("", ctx);
+      await daemon.waitForSession("session-1");
+      await daemon.sendToSession({ sessionId: "session-1", type: "attach", payload: {} });
+      await waitForFrame(frames, (frame) => frame.type === "event" && hasText(frame, "hi"));
+
+      await prompt("/model openrouter/moonshotai/kimi-k3");
+      await waitFor(() => expect(pi.setModel).toHaveBeenLastCalledWith(KIMI));
+      await prompt("/model GPT-5.6-SOL");
+      await waitFor(() => expect(pi.setModel).toHaveBeenLastCalledWith(SOL));
+
+      await prompt("/model gpt-9");
+      await waitForFrame(frames, (frame) => hasText(frame, 'No available model matches "gpt-9".'));
+
+      pi.setModel.mockResolvedValueOnce(false);
+      await prompt("/model moonshotai/kimi-k3");
+      await waitForFrame(frames, (frame) =>
+        hasText(frame, "No API key for openrouter/moonshotai/kimi-k3."),
+      );
+
+      await prompt("/thinking LOW");
+      await waitFor(() => expect(pi.setThinkingLevel).toHaveBeenCalledWith("low"));
+      await prompt("/thinking max");
+      await waitForFrame(frames, (frame) =>
+        hasText(
+          frame,
+          'openai-codex/gpt-5.6-sol doesn\'t support thinking level "max". ' +
+            "Supported: off, minimal, low, medium, high, xhigh.",
+        ),
+      );
+
+      await prompt("/fusion compare approaches");
+      await waitFor(() =>
+        expect(pi.sendUserMessage).toHaveBeenCalledWith("/fusion compare approaches", {
+          deliverAs: "steer",
+          expandPromptTemplates: true,
+        }),
+      );
+      expect(pi.sendUserMessage).toHaveBeenCalledTimes(1);
+      expect(pi.setModel).toHaveBeenCalledTimes(3);
+    } finally {
+      await daemon.close();
+    }
+  });
+
   it("ignores empty remote prompts", async () => {
     const daemon = await startIpcDaemonServer(join(root, "daemon.sock"), {
       getPairingInfo: () => ({ ticket: "ticket-stub", code: "123-456" }),
@@ -446,11 +580,25 @@ describe("remote extension", () => {
 
 function eventTexts(frames: IpcEnvelope[]): string[] {
   return frames.flatMap((frame) => {
-    if (frame.type !== "event" || !hasPayloadText(frame)) {
+    if (frame.type !== "event" || !hasPayloadText(frame) || sessionStateOf(frame)) {
       return [];
     }
     return [frame.payload.text];
   });
+}
+
+function sessionModelId(frame: IpcEnvelope): string | undefined {
+  return sessionStateOf(frame)?.model?.id;
+}
+
+function sessionThinkingLevel(frame: IpcEnvelope): string | undefined {
+  return sessionStateOf(frame)?.thinkingLevel;
+}
+
+function sessionStateOf(frame: IpcEnvelope): SessionState | undefined {
+  return typeof frame.payload === "object" && frame.payload !== null && "sessionState" in frame.payload
+    ? (frame.payload.sessionState as SessionState)
+    : undefined;
 }
 
 function hasText(frame: IpcEnvelope, text: string): boolean {

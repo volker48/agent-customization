@@ -9,6 +9,7 @@ import {
   encodeFrame,
   type Envelope,
 } from "../pi-extensions/remote/protocol.js";
+import { projectSessionState } from "../pi-extensions/remote/session-state.js";
 import { projectTranscriptEvent } from "../pi-extensions/remote/transcript-projection.js";
 
 export type ProtocolFixture = {
@@ -82,6 +83,23 @@ export const fixtureEnvelopes: FixtureEnvelope[] = [
         toolName: "bash",
         result: { content: [{ type: "text", text: "ok" }] },
         isError: false,
+      }),
+    },
+  },
+  {
+    name: "session state event",
+    channel: "session",
+    envelope: {
+      sessionId: "session-1",
+      type: "event",
+      payload: projectSessionState({
+        model: { provider: "openai-codex", id: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+        thinkingLevel: "high",
+        thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh"],
+        models: [
+          { provider: "openai-codex", id: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+          { provider: "openrouter", id: "moonshotai/kimi-k3", name: "Kimi K3" },
+        ],
       }),
     },
   },

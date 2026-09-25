@@ -112,7 +112,15 @@ Phone ──iroh QUIC (ALPN pi/remote/1)── Remote daemon ──unix socket�
   from registry.
 
 - **Prompt injection / abort.** Phone prompt → `pi.sendUserMessage(text,
-  { deliverAs: "steer" })` (always triggers a turn). Phone stop → `ctx.abort()`.
+  { deliverAs: "steer", expandPromptTemplates: true })`, so extension commands, skills,
+  and prompt templates dispatch as if typed in the TUI; other text triggers a turn.
+  `/model <provider/id>` and `/thinking <level>` run on the host instead, because the
+  TUI owns those built-ins. Phone stop → `ctx.abort()`.
+
+- **Session state.** Ahead of each backfill and on every `model_select` /
+  `thinking_level_select`, the extension sends the active model, thinking level,
+  supported levels, and switchable models as an `event` shaped like an empty `system`
+  transcript entry (`status: "session_state"`), which older clients skip.
 
 - **Control-message set.** Control channel: `pair`, `list`, `attach`, `detach`,
   `session_ended`. Per-session: `event` (out), `prompt` / `abort` (in).

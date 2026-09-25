@@ -15,6 +15,13 @@ import { projectCapsule } from "./capsule-projection.js";
 import { FileNodeAllowlist, defaultRemoteRoot, renderPairingTicket } from "./authorization.js";
 import { connectIpcExtension, type IpcEnvelope, type IpcExtensionClient } from "./ipc.js";
 import { CAPSULE_CAPABILITY, CAPSULE_OPERATION } from "./protocol.js";
+import {
+  currentSessionState,
+  parseRemoteCommand,
+  projectNotice,
+  projectSessionState,
+  runRemoteCommand,
+} from "./session-state.js";
 import { projectTranscriptEvent, projectTranscriptMessage } from "./transcript-projection.js";
 
 const DAEMON_SOCKET_FILE = "daemon.sock";
@@ -109,19 +116,28 @@ export default function remoteExtension(pi: ExtensionAPI): void {
         return;
       }
       state.ctx = ctx;
-      const payload = projectTranscriptEvent(event);
-      if (state.backfilling) {
-        if (state.desiredAttached) {
-          state.pendingLiveEvents.push(payload);
-        }
-        return;
-      }
-      if (!state.attached) {
-        return;
-      }
-      await state.client.send({ sessionId: state.sessionId, type: "event", payload });
+      await sendLive(state, projectTranscriptEvent(event));
     });
   }
+
+  pi.on("model_select", async (event, ctx) => {
+    if (!state || state.closed) {
+      return;
+    }
+    state.ctx = ctx;
+    await sendLive(
+      state,
+      projectSessionState(currentSessionState(ctx, event.model, pi.getThinkingLevel())),
+    );
+  });
+
+  pi.on("thinking_level_select", async (event, ctx) => {
+    if (!state || state.closed) {
+      return;
+    }
+    state.ctx = ctx;
+    await sendLive(state, projectSessionState(currentSessionState(ctx, ctx.model, event.level)));
+  });
 
   pi.on("session_shutdown", async (_event, _ctx) => {
     if (!state || state.closed) {
@@ -173,7 +189,7 @@ async function applyInbound(
     state.attached = false;
     state.backfilling = true;
     state.pendingLiveEvents = [];
-    await sendBackfill(state);
+    await sendBackfill(pi, state);
     await drainInbound(state);
     if (!state.desiredAttached) {
       state.pendingLiveEvents = [];
@@ -202,9 +218,18 @@ async function applyInbound(
   }
   if (envelope.type === "prompt") {
     const text = promptText(envelope.payload);
-    if (text.trim().length > 0) {
-      pi.sendUserMessage(text, { deliverAs: "steer" });
+    if (text.trim().length === 0) {
+      return;
     }
+    const command = parseRemoteCommand(text);
+    if (command) {
+      const notice = await runRemoteCommand(pi, state.ctx, command);
+      if (notice) await sendLive(state, projectNotice(notice));
+      return;
+    }
+    // Same dispatch as typing in the TUI: extension commands, skills, and prompt
+    // templates run on the host; other text goes to the agent.
+    pi.sendUserMessage(text, { deliverAs: "steer", expandPromptTemplates: true });
     return;
   }
   if (envelope.type === "abort") {
@@ -243,7 +268,29 @@ function capsuleRequestIdFrom(payload: unknown): string | null {
     : null;
 }
 
-async function sendBackfill(state: RemoteState): Promise<void> {
+/** Sends a host-originated payload with the same attach/backfill gating as live Pi events. */
+async function sendLive(state: RemoteState, payload: unknown): Promise<void> {
+  if (state.backfilling) {
+    if (state.desiredAttached) {
+      state.pendingLiveEvents.push(payload);
+    }
+    return;
+  }
+  if (!state.attached) {
+    return;
+  }
+  await state.client.send({ sessionId: state.sessionId, type: "event", payload });
+}
+
+async function sendBackfill(pi: ExtensionAPI, state: RemoteState): Promise<void> {
+  // State leads the backfill so a reattaching client repaints its header first.
+  await state.client.send({
+    sessionId: state.sessionId,
+    type: "event",
+    payload: projectSessionState(
+      currentSessionState(state.ctx, state.ctx.model, pi.getThinkingLevel()),
+    ),
+  });
   for (const entry of state.ctx.sessionManager.getBranch()) {
     if (entry.type !== "message") {
       continue;
