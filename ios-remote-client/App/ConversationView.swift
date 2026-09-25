@@ -19,6 +19,7 @@ struct ConversationView: View {
   private var items: [ChatItem] { store.transcript(for: session.sessionID) }
   private var isWorking: Bool { store.isAgentWorking(in: session.sessionID) }
   private var isConnected: Bool { store.isAttached(to: session.sessionID) }
+  private var sessionState: SessionState? { store.sessionState(for: session.sessionID) }
 
   var body: some View {
     transcript
@@ -39,6 +40,7 @@ struct ConversationView: View {
       .navigationTitle(session.name)
       .navigationSubtitle(subtitle)
       .navigationBarTitleDisplayMode(.inline)
+      .toolbarTitleMenu { sessionStateMenu }
       .toolbar { toolbarMenu }
       .task(id: "\(session.sessionID):\(attachAttempt)") {
         await store.attach(to: session)
@@ -61,7 +63,7 @@ struct ConversationView: View {
   private var subtitle: String {
     switch store.connectionState {
     case .connected where store.attachedSessionID == session.sessionID:
-      isWorking ? "Working…" : abbreviatedPath(session.cwd)
+      sessionState?.summary ?? (isWorking ? "Working…" : abbreviatedPath(session.cwd))
     case .disconnected:
       "Disconnected"
     default:
@@ -177,6 +179,56 @@ struct ConversationView: View {
     }
   }
 
+  /// Selections only send the command; checkmarks move when the host pushes its new
+  /// state, so the menu always shows what the host actually applied.
+  @ViewBuilder
+  private var sessionStateMenu: some View {
+    if let state = sessionState {
+      if !state.models.isEmpty {
+        Picker("Model", selection: modelSelection(state)) {
+          ForEach(providers(in: state), id: \.self) { provider in
+            Section(provider) {
+              ForEach(state.models.filter { $0.provider == provider }, id: \.reference) { model in
+                Text(model.name).tag(Optional(model))
+              }
+            }
+          }
+        }
+        .pickerStyle(.menu)
+        .disabled(!isConnected)
+      }
+      if state.supportsThinking {
+        Picker("Thinking", selection: thinkingSelection(state)) {
+          ForEach(state.thinkingLevels, id: \.self) { level in
+            Text(level).tag(level)
+          }
+        }
+        .pickerStyle(.menu)
+        .disabled(!isConnected)
+      }
+    }
+  }
+
+  private func modelSelection(_ state: SessionState) -> Binding<ModelChoice?> {
+    Binding(
+      get: { state.model },
+      set: { model in
+        guard let model, model != state.model else { return }
+        Task { _ = await store.selectModel(model, in: session.sessionID) }
+      }
+    )
+  }
+
+  private func thinkingSelection(_ state: SessionState) -> Binding<String> {
+    Binding(
+      get: { state.thinkingLevel },
+      set: { level in
+        guard level != state.thinkingLevel else { return }
+        Task { _ = await store.selectThinkingLevel(level, in: session.sessionID) }
+      }
+    )
+  }
+
   private func send() {
     let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !message.isEmpty else { return }
@@ -201,6 +253,12 @@ struct ConversationView: View {
     capsule = await store.fetchCapsule(for: session.sessionID)
     showingCapsule = capsule != nil
   }
+}
+
+/// Providers in the host's model order, so the menu groups without reordering.
+private func providers(in state: SessionState) -> [String] {
+  var seen = Set<String>()
+  return state.models.map(\.provider).filter { seen.insert($0).inserted }
 }
 
 private func isVisiblyStreaming(_ item: ChatItem) -> Bool {

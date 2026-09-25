@@ -8,6 +8,8 @@ public struct TranscriptEntry: Codable, Equatable, Sendable {
   public let truncatedOutput: Bool
   /// Present on tool activity from current hosts; older hosts omit it.
   public let toolCallId: String?
+  /// Present only on the host's state entries, which carry no transcript content.
+  public let sessionState: SessionState?
 
   public init(
     role: String,
@@ -15,7 +17,8 @@ public struct TranscriptEntry: Codable, Equatable, Sendable {
     toolName: String? = nil,
     status: String? = nil,
     truncatedOutput: Bool = false,
-    toolCallId: String? = nil
+    toolCallId: String? = nil,
+    sessionState: SessionState? = nil
   ) {
     self.role = role
     self.text = text
@@ -23,11 +26,60 @@ public struct TranscriptEntry: Codable, Equatable, Sendable {
     self.status = status
     self.truncatedOutput = truncatedOutput
     self.toolCallId = toolCallId
+    self.sessionState = sessionState
   }
 
   public static func assistant(text: String, status: String) -> TranscriptEntry {
     TranscriptEntry(role: "assistant", text: text, status: status)
   }
+}
+
+/// The host session's model and thinking level, pushed on attach and on every change.
+public struct SessionState: Codable, Equatable, Sendable {
+  public let model: ModelChoice?
+  public let thinkingLevel: String
+  /// Levels the current model accepts; empty when no model is selected.
+  public let thinkingLevels: [String]
+  /// Models the host accepts for `/model`.
+  public let models: [ModelChoice]
+
+  public init(
+    model: ModelChoice?,
+    thinkingLevel: String,
+    thinkingLevels: [String],
+    models: [ModelChoice]
+  ) {
+    self.model = model
+    self.thinkingLevel = thinkingLevel
+    self.thinkingLevels = thinkingLevels
+    self.models = models
+  }
+
+  /// Mirrors Pi's footer: the model id, plus the thinking level for reasoning models.
+  public var summary: String {
+    guard let model else { return "No model" }
+    guard supportsThinking else { return model.id }
+    return thinkingLevel == "off" ? "\(model.id) · thinking off" : "\(model.id) · \(thinkingLevel)"
+  }
+
+  public var supportsThinking: Bool {
+    thinkingLevels.contains { $0 != "off" }
+  }
+}
+
+public struct ModelChoice: Codable, Hashable, Sendable {
+  public let provider: String
+  public let id: String
+  public let name: String
+
+  public init(provider: String, id: String, name: String) {
+    self.provider = provider
+    self.id = id
+    self.name = name
+  }
+
+  /// The `provider/id` form the host's `/model` matches exactly; bare ids can collide.
+  public var reference: String { "\(provider)/\(id)" }
 }
 
 public enum ChatItemKind: Equatable, Sendable {
@@ -147,6 +199,8 @@ public struct ConversationProjection: Equatable, Sendable {
   /// Derived from live lifecycle frames only; backfill carries no run state, so a
   /// freshly attached feed reads idle until the host emits its next live event.
   public private(set) var isAgentWorking: Bool
+  /// Nil until the host reports it; hosts predating session state never do.
+  public private(set) var sessionState: SessionState?
   private let projectionID: String
   private var nextItemIndex: Int
   private var streamingMessageIndex: Array<ChatItem>.Index?
@@ -155,6 +209,7 @@ public struct ConversationProjection: Equatable, Sendable {
   public init(items: [ChatItem] = []) {
     self.items = items
     self.isAgentWorking = false
+    self.sessionState = nil
     self.projectionID = UUID().uuidString
     self.nextItemIndex = items.count
     self.streamingMessageIndex = nil
@@ -163,7 +218,7 @@ public struct ConversationProjection: Equatable, Sendable {
 
   public static func == (lhs: ConversationProjection, rhs: ConversationProjection) -> Bool {
     lhs.items == rhs.items && lhs.streamingMessageIndex == rhs.streamingMessageIndex
-      && lhs.isAgentWorking == rhs.isAgentWorking
+      && lhs.isAgentWorking == rhs.isAgentWorking && lhs.sessionState == rhs.sessionState
   }
 
   public mutating func appendBackfill(_ entries: [TranscriptEntry]) {
@@ -178,6 +233,10 @@ public struct ConversationProjection: Equatable, Sendable {
   }
 
   public mutating func applyLive(_ entry: TranscriptEntry) {
+    if let state = entry.sessionState {
+      sessionState = state
+      return
+    }
     updateActivity(entry)
     guard entry.isRenderable else {
       return

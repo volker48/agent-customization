@@ -34,6 +34,7 @@ private func runProjectionTests() throws {
   try parallelToolCallsKeepSeparateRows()
   try agentActivityFollowsLiveLifecycleFrames()
   try tsGeneratedToolEventCarriesCallID()
+  try sessionStateSummaryMirrorsPiFooter()
   try markdownSplitsParagraphsHeadingsAndFences()
   try unterminatedFenceRendersAsCodeWhileStreaming()
 }
@@ -56,6 +57,8 @@ private func runRemoteClientTests() async throws {
   try await successfulPromptDoesNotClearFeedError()
   try await sessionStoreAbortSendsPerSessionRequest()
   try await sessionStoreAttachesAndRendersBackfillThenLiveDeltas()
+  try await sessionStoreTracksHostSessionStateOutsideTheTranscript()
+  try await sessionStoreSendsModelAndThinkingSelectionsAsHostCommands()
   try await sessionStoreStopsFeedOnSessionEndedControlFrame()
   try await sessionStoreReconnectsAndReattachesAfterFeedError()
   try await sessionStoreReconnectsWhenFeedEndsCleanly()
@@ -291,6 +294,24 @@ private func tsGeneratedToolEventCarriesCallID() throws {
   try expect(entry.toolCallId == "call-1")
   try expect(entry.toolName == "bash")
   try expect(entry.text == "ok")
+}
+
+private func sessionStateSummaryMirrorsPiFooter() throws {
+  let sol = ModelChoice(provider: "openai-codex", id: "gpt-5.6-sol", name: "GPT-5.6 Sol")
+  let reasoning = ["off", "low", "high"]
+
+  try expect(
+    SessionState(model: sol, thinkingLevel: "high", thinkingLevels: reasoning, models: []).summary
+      == "gpt-5.6-sol · high")
+  try expect(
+    SessionState(model: sol, thinkingLevel: "off", thinkingLevels: reasoning, models: []).summary
+      == "gpt-5.6-sol · thinking off")
+  try expect(
+    SessionState(model: sol, thinkingLevel: "off", thinkingLevels: ["off"], models: []).summary
+      == "gpt-5.6-sol")
+  try expect(
+    SessionState(model: nil, thinkingLevel: "off", thinkingLevels: [], models: []).summary
+      == "No model")
 }
 
 private func markdownSplitsParagraphsHeadingsAndFences() throws {
@@ -729,6 +750,55 @@ private func sessionStoreAttachesAndRendersBackfillThenLiveDeltas() async throws
   try expect(texts == ["Question", "Answer", "Live answer"])
   try expect(attachedSessionID == nil)
   try expect(feedErrorMessage == nil)
+}
+
+private func sessionStoreTracksHostSessionStateOutsideTheTranscript() async throws {
+  let fixture = try require(
+    try loadProtocolFixtures().first { $0.name == "session state event" }
+  )
+  let frames: [Envelope] = [
+    .control(.init(type: .attach, payload: ["attached": true, "sessionId": "session-1"])),
+    try decodeFrame(fixture.frame),
+    .session(.init(sessionID: "session-1", type: .event, payload: eventPayload(text: "Answer"))),
+    .control(.init(type: .sessionEnded, payload: ["sessionId": "session-1"])),
+  ]
+  let store = await storeAttachedWith(frames)
+
+  let texts = await store.transcript(for: "session-1").map(\.text)
+  let isWorking = await store.isAgentWorking(in: "session-1")
+  let state = try require(await store.sessionState(for: "session-1"))
+
+  try expect(texts == ["Answer"])
+  try expect(!isWorking)
+  try expect(state.summary == "gpt-5.6-sol · high")
+  try expect(state.thinkingLevels == ["off", "minimal", "low", "medium", "high", "xhigh"])
+  try expect(
+    state.models.map(\.reference) == [
+      "openai-codex/gpt-5.6-sol", "openrouter/moonshotai/kimi-k3",
+    ])
+}
+
+private func sessionStoreSendsModelAndThinkingSelectionsAsHostCommands() async throws {
+  let transport = RecordingTransport(responses: [[], []])
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+  let store = await SessionStore(client: client)
+  let kimi = ModelChoice(provider: "openrouter", id: "moonshotai/kimi-k3", name: "Kimi K3")
+
+  let sentModel = await store.selectModel(kimi, in: "session-1")
+  let sentLevel = await store.selectThinkingLevel("low", in: "session-1")
+
+  let sent = await transport.recordedRequests().flatMap(\.envelopes)
+  try expect(sentModel && sentLevel)
+  try expect(
+    sent == [
+      .session(
+        .init(
+          sessionID: "session-1",
+          type: .prompt,
+          payload: ["text": "/model openrouter/moonshotai/kimi-k3"]
+        )),
+      .session(.init(sessionID: "session-1", type: .prompt, payload: ["text": "/thinking low"])),
+    ])
 }
 
 private func sessionStoreStopsFeedOnSessionEndedControlFrame() async throws {
