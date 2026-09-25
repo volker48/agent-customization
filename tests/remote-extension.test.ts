@@ -57,7 +57,10 @@ function createContext() {
     abort: vi.fn(),
     model: SOL,
     scopedModels: [{ model: SOL }, { model: KIMI }],
-    modelRegistry: { getAvailable: vi.fn(() => [SOL, KIMI]) },
+    modelRegistry: {
+      getAvailable: vi.fn(() => [SOL, KIMI]),
+      refresh: vi.fn(async () => ({ aborted: false, errors: new Map<string, Error>() })),
+    },
     ui: {
       notify: vi.fn(),
     },
@@ -448,6 +451,7 @@ describe("remote extension", () => {
 
       await prompt("/model gpt-9");
       await waitForFrame(frames, (frame) => hasText(frame, 'No available model matches "gpt-9".'));
+      expect(ctx.modelRegistry.refresh).not.toHaveBeenCalled();
 
       pi.setModel.mockResolvedValueOnce(false);
       await prompt("/model moonshotai/kimi-k3");
@@ -475,6 +479,47 @@ describe("remote extension", () => {
       );
       expect(pi.sendUserMessage).toHaveBeenCalledTimes(1);
       expect(pi.setModel).toHaveBeenCalledTimes(3);
+    } finally {
+      await daemon.close();
+    }
+  });
+
+  it("refreshes an unscoped model catalog once before rejecting a remote /model", async () => {
+    const frames: IpcEnvelope[] = [];
+    const daemon = await startIpcDaemonServer(join(root, "daemon.sock"), {
+      onFrame: (frame) => frames.push(frame),
+      getPairingInfo: () => ({ ticket: "ticket-stub", code: "123-456" }),
+    });
+    const { pi, command } = createPi();
+    const ctx = { ...createContext(), scopedModels: [] };
+    const added = testModel("openrouter", "new/model", "New Model");
+    ctx.modelRegistry.getAvailable.mockReturnValue([SOL]);
+    ctx.modelRegistry.refresh.mockImplementationOnce(async () => {
+      ctx.modelRegistry.getAvailable.mockReturnValue([SOL, added]);
+      return { aborted: false, errors: new Map<string, Error>() };
+    });
+    ctx.modelRegistry.refresh.mockResolvedValueOnce({
+      aborted: false,
+      errors: new Map([["openrouter", new Error("offline")]]),
+    });
+    const prompt = (text: string) =>
+      daemon.sendToSession({ sessionId: "session-1", type: "prompt", payload: { text } });
+
+    try {
+      remoteExtension(pi as never);
+      await command("remote").handler("", ctx);
+      await daemon.waitForSession("session-1");
+      await daemon.sendToSession({ sessionId: "session-1", type: "attach", payload: {} });
+      await waitForFrame(frames, (frame) => frame.type === "event" && hasText(frame, "hi"));
+
+      await prompt("/model openrouter/new/model");
+      await waitFor(() => expect(pi.setModel).toHaveBeenCalledWith(added));
+
+      await prompt("/model gpt-9");
+      await waitForFrame(frames, (frame) =>
+        hasText(frame, 'No available model matches "gpt-9" (couldn\'t refresh openrouter).'),
+      );
+      expect(ctx.modelRegistry.refresh).toHaveBeenCalledTimes(2);
     } finally {
       await daemon.close();
     }

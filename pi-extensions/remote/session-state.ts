@@ -27,6 +27,8 @@ type ModelContext = Pick<ExtensionContext, "model" | "modelRegistry" | "scopedMo
 type ModelApi = Pick<ExtensionAPI, "getThinkingLevel" | "setModel" | "setThinkingLevel">;
 
 const REMOTE_COMMAND = /^\/(model|thinking)(?:\s+([\s\S]*))?$/;
+// Matches the TUI's bound on the catalog refresh behind `/model` lookups.
+const MODEL_REFRESH_TIMEOUT_MS = 15_000;
 
 export function currentSessionState(
   ctx: ModelContext,
@@ -91,7 +93,16 @@ async function runModelCommand(
   if (reference.length === 0) {
     return `Model: ${describeModel(ctx.model)}, thinking ${pi.getThinkingLevel()}. Send /model <provider/id> to switch.`;
   }
-  const model = findModel(reference, switchableModels(ctx));
+  let model = findModel(reference, switchableModels(ctx));
+  if (!model && ctx.scopedModels.length === 0) {
+    // Like the TUI, an unscoped miss refreshes the catalog once: models can be added
+    // mid-session, and scoped sessions only ever offer their fixed set.
+    const problem = await refreshCatalog(ctx);
+    model = findModel(reference, ctx.modelRegistry.getAvailable());
+    if (!model && problem) {
+      return `No available model matches "${reference}" (${problem}).`;
+    }
+  }
   if (!model) {
     return `No available model matches "${reference}".`;
   }
@@ -114,6 +125,23 @@ function runThinkingCommand(pi: ModelApi, ctx: ModelContext, level: string): str
   }
   pi.setThinkingLevel(match);
   return null;
+}
+
+/** Returns why the refresh fell short, or null when every provider refreshed. */
+async function refreshCatalog(ctx: ModelContext): Promise<string | null> {
+  try {
+    const result = await ctx.modelRegistry.refresh({
+      signal: AbortSignal.timeout(MODEL_REFRESH_TIMEOUT_MS),
+    });
+    if (result.aborted) {
+      return "model refresh timed out";
+    }
+    return result.errors.size > 0
+      ? `couldn't refresh ${[...result.errors.keys()].join(", ")}`
+      : null;
+  } catch (error) {
+    return `model refresh failed: ${error instanceof Error ? error.message : String(error)}`;
+  }
 }
 
 function switchableModels(ctx: ModelContext): Model<Api>[] {
