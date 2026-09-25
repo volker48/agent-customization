@@ -49,6 +49,8 @@ type RemoteState = {
   pendingLiveEvents: unknown[];
   syncWaiters: Map<number, () => void>;
   nextSyncId: number;
+  /** Tail of the remote prompt queue; prompts run in order, off the inbound read loop. */
+  prompts: Promise<void>;
   closed: boolean;
 };
 
@@ -93,6 +95,7 @@ export default function remoteExtension(pi: ExtensionAPI): void {
         pendingLiveEvents: [],
         syncWaiters: new Map(),
         nextSyncId: 0,
+        prompts: Promise.resolve(),
         closed: false,
       };
       void readInbound(pi, state);
@@ -172,6 +175,14 @@ async function readInbound(pi: ExtensionAPI, state: RemoteState): Promise<void> 
         void applyInbound(pi, state, envelope).catch((error) => handleInboundError(state, error));
         continue;
       }
+      if (envelope.type === "prompt") {
+        // A /model catalog refresh can take seconds; queuing keeps abort responsive.
+        const payload = envelope.payload;
+        state.prompts = state.prompts
+          .then(() => applyPrompt(pi, state, payload))
+          .catch((error) => handleInboundError(state, error));
+        continue;
+      }
       await applyInbound(pi, state, envelope);
     }
   } catch (error) {
@@ -216,25 +227,27 @@ async function applyInbound(
     if (requestId) await sendCapsule(state, requestId);
     return;
   }
-  if (envelope.type === "prompt") {
-    const text = promptText(envelope.payload);
-    if (text.trim().length === 0) {
-      return;
-    }
-    const command = parseRemoteCommand(text);
-    if (command) {
-      const notice = await runRemoteCommand(pi, state.ctx, command);
-      if (notice) await sendLive(state, projectNotice(notice));
-      return;
-    }
-    // Same dispatch as typing in the TUI: extension commands, skills, and prompt
-    // templates run on the host; other text goes to the agent.
-    pi.sendUserMessage(text, { deliverAs: "steer", expandPromptTemplates: true });
-    return;
-  }
   if (envelope.type === "abort") {
     state.ctx.abort();
   }
+}
+
+async function applyPrompt(pi: ExtensionAPI, state: RemoteState, payload: unknown): Promise<void> {
+  const text = promptText(payload);
+  if (state.closed || text.trim().length === 0) {
+    return;
+  }
+  const command = parseRemoteCommand(text);
+  if (command) {
+    const notice = await runRemoteCommand(pi, state.ctx, command);
+    if (notice) await sendLive(state, projectNotice(notice));
+    // Resync even without a change event: a failed lookup may have refreshed the catalog.
+    await sendLive(state, sessionStateEntry(pi, state.ctx));
+    return;
+  }
+  // Same dispatch as typing in the TUI: extension commands, skills, and prompt
+  // templates run on the host; other text goes to the agent.
+  pi.sendUserMessage(text, { deliverAs: "steer", expandPromptTemplates: true });
 }
 
 async function sendCapsule(state: RemoteState, requestId: string): Promise<void> {
@@ -282,14 +295,16 @@ async function sendLive(state: RemoteState, payload: unknown): Promise<void> {
   await state.client.send({ sessionId: state.sessionId, type: "event", payload });
 }
 
+function sessionStateEntry(pi: ExtensionAPI, ctx: ExtensionContext) {
+  return projectSessionState(currentSessionState(ctx, ctx.model, pi.getThinkingLevel()));
+}
+
 async function sendBackfill(pi: ExtensionAPI, state: RemoteState): Promise<void> {
   // State leads the backfill so a reattaching client repaints its header first.
   await state.client.send({
     sessionId: state.sessionId,
     type: "event",
-    payload: projectSessionState(
-      currentSessionState(state.ctx, state.ctx.model, pi.getThinkingLevel()),
-    ),
+    payload: sessionStateEntry(pi, state.ctx),
   });
   for (const entry of state.ctx.sessionManager.getBranch()) {
     if (entry.type !== "message") {

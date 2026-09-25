@@ -514,12 +514,60 @@ describe("remote extension", () => {
 
       await prompt("/model openrouter/new/model");
       await waitFor(() => expect(pi.setModel).toHaveBeenCalledWith(added));
+      await waitForFrame(frames, (frame) =>
+        Boolean(sessionStateOf(frame)?.models.some((model) => model.id === added.id)),
+      );
 
       await prompt("/model gpt-9");
       await waitForFrame(frames, (frame) =>
         hasText(frame, 'No available model matches "gpt-9" (couldn\'t refresh openrouter).'),
       );
       expect(ctx.modelRegistry.refresh).toHaveBeenCalledTimes(2);
+    } finally {
+      await daemon.close();
+    }
+  });
+
+  it("keeps abort responsive and prompts ordered while a /model refresh is pending", async () => {
+    const frames: IpcEnvelope[] = [];
+    const daemon = await startIpcDaemonServer(join(root, "daemon.sock"), {
+      onFrame: (frame) => frames.push(frame),
+      getPairingInfo: () => ({ ticket: "ticket-stub", code: "123-456" }),
+    });
+    const { pi, command } = createPi();
+    const ctx = { ...createContext(), scopedModels: [] };
+    let finishRefresh = () => {};
+    ctx.modelRegistry.refresh.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishRefresh = () => resolve({ aborted: false, errors: new Map<string, Error>() });
+        }),
+    );
+    const prompt = (text: string) =>
+      daemon.sendToSession({ sessionId: "session-1", type: "prompt", payload: { text } });
+
+    try {
+      remoteExtension(pi as never);
+      await command("remote").handler("", ctx);
+      await daemon.waitForSession("session-1");
+      await daemon.sendToSession({ sessionId: "session-1", type: "attach", payload: {} });
+      await waitForFrame(frames, (frame) => frame.type === "event" && hasText(frame, "hi"));
+
+      await prompt("/model gpt-9");
+      await waitFor(() => expect(ctx.modelRegistry.refresh).toHaveBeenCalled());
+      await prompt("keep going");
+      await daemon.sendToSession({ sessionId: "session-1", type: "abort", payload: {} });
+      await waitFor(() => expect(ctx.abort).toHaveBeenCalled());
+      expect(pi.sendUserMessage).not.toHaveBeenCalled();
+
+      finishRefresh();
+      await waitForFrame(frames, (frame) => hasText(frame, 'No available model matches "gpt-9".'));
+      await waitFor(() =>
+        expect(pi.sendUserMessage).toHaveBeenCalledWith("keep going", {
+          deliverAs: "steer",
+          expandPromptTemplates: true,
+        }),
+      );
     } finally {
       await daemon.close();
     }
