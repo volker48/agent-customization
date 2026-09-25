@@ -190,7 +190,7 @@ struct ConversationView: View {
             Section(provider) {
               ForEach(state.modelOptions.filter { $0.provider == provider }, id: \.reference) {
                 model in
-                Text(model.name).tag(Optional(model))
+                Text(model.name).tag(Optional(model.reference))
               }
             }
           }
@@ -210,11 +210,15 @@ struct ConversationView: View {
     }
   }
 
-  private func modelSelection(_ state: SessionState) -> Binding<ModelChoice?> {
+  /// Keyed by `provider/id`, the identity the host matches on, so a display-name
+  /// difference between two snapshots of one model cannot hide the checkmark.
+  private func modelSelection(_ state: SessionState) -> Binding<String?> {
     Binding(
-      get: { state.model },
-      set: { model in
-        guard let model, model != state.model else { return }
+      get: { state.model?.reference },
+      set: { reference in
+        guard reference != state.model?.reference,
+          let model = state.modelOptions.first(where: { $0.reference == reference })
+        else { return }
         Task { _ = await store.selectModel(model, in: session.sessionID) }
       }
     )

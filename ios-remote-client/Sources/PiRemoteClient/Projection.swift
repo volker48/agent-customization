@@ -69,7 +69,9 @@ public struct SessionState: Codable, Equatable, Sendable {
   /// `models` plus the active model when it sits outside them (e.g. a CLI `--model`), so a
   /// picker can always mark the current selection.
   public var modelOptions: [ModelChoice] {
-    guard let model, !models.contains(model) else { return models }
+    guard let model, !models.contains(where: { $0.reference == model.reference }) else {
+      return models
+    }
     return [model] + models
   }
 }

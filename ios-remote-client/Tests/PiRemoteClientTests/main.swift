@@ -329,6 +329,10 @@ private func modelOptionsListTheActiveModelOutsideTheSwitchableSet() throws {
   try expect(
     SessionState(model: nil, thinkingLevel: "off", thinkingLevels: [], models: [sol])
       .modelOptions == [sol])
+  let renamedSol = ModelChoice(provider: sol.provider, id: sol.id, name: "Sol (renamed)")
+  try expect(
+    SessionState(model: renamedSol, thinkingLevel: "high", thinkingLevels: [], models: [sol])
+      .modelOptions == [sol])
 }
 
 private func markdownSplitsParagraphsHeadingsAndFences() throws {
