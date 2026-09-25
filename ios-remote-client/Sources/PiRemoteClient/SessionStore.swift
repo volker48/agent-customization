@@ -1,6 +1,5 @@
 import Foundation
 import Observation
-import SwiftUI
 
 public enum ConnectionState: Equatable, Sendable {
   case connected
@@ -29,6 +28,9 @@ public final class SessionStore {
   private let client: RemoteClient
   private let reconnectDelayNanoseconds: UInt64
   private let registryRefreshIntervalNanoseconds: UInt64
+  /// Identifies the newest `attach` call. A superseded loop (another session, or a
+  /// re-attach of the same one) must neither apply frames nor tear down its successor.
+  private var attachGeneration = 0
 
   public init(
     client: RemoteClient,
@@ -70,16 +72,17 @@ public final class SessionStore {
   }
 
   public func attach(to session: RemoteSession) async {
+    attachGeneration += 1
+    let generation = attachGeneration
     attachedSessionID = session.sessionID
     connectionState = .reconnecting
 
-    while attachedSessionID == session.sessionID && !Task.isCancelled {
-      transcripts[session.sessionID] = ConversationProjection()
-
+    while attachGeneration == generation && !Task.isCancelled {
       do {
-        let action = try await runAttachStream(for: session.sessionID)
+        let action = try await runAttachStream(for: session.sessionID, generation: generation)
+        guard attachGeneration == generation else { return }
         if action == .closed {
-          closeFeed(session.sessionID)
+          closeFeed(generation: generation)
           feedErrorMessage = nil
           return
         }
@@ -87,23 +90,28 @@ public final class SessionStore {
         connectionState = .reconnecting
         await sleepBeforeReconnect()
       } catch is CancellationError {
-        closeFeed(session.sessionID)
+        closeFeed(generation: generation)
         return
       } catch {
+        guard attachGeneration == generation else { return }
         feedErrorMessage = String(describing: error)
         if error is RemoteClientError || error is RemoteProtocolError {
-          closeFeed(session.sessionID)
+          closeFeed(generation: generation)
           return
         }
         connectionState = .reconnecting
         await sleepBeforeReconnect()
       }
     }
-    closeFeed(session.sessionID)
+    closeFeed(generation: generation)
   }
 
   public func transcript(for sessionID: String) -> [ChatItem] {
     transcripts[sessionID]?.items ?? []
+  }
+
+  public func isAgentWorking(in sessionID: String) -> Bool {
+    transcripts[sessionID]?.isAgentWorking ?? false
   }
 
   public func sendPrompt(_ text: String, to sessionID: String) async -> Bool {
@@ -153,200 +161,25 @@ public final class SessionStore {
   }
 }
 
-@available(iOS 17.5, macOS 14.5, *)
-public struct SessionListView: View {
-  private let store: SessionStore
-  @Environment(\.scenePhase) private var scenePhase
-  @State private var navigationPath: [RemoteSession] = []
-
-  public init(store: SessionStore) {
-    self.store = store
-  }
-
-  public var body: some View {
-    NavigationStack(path: $navigationPath) {
-      List(store.sessions) { session in
-        NavigationLink(value: session) {
-          SessionRow(session: session)
-        }
-      }
-      .navigationTitle("Remote Sessions")
-      .navigationDestination(for: RemoteSession.self) { session in
-        ConversationView(store: store, session: session)
-      }
-      .overlay {
-        if store.sessions.isEmpty {
-          ContentUnavailableView("No Remote Sessions", systemImage: "iphone.slash")
-        }
-      }
-      .safeAreaInset(edge: .top) {
-        feedErrorBanner
-      }
-      .refreshable {
-        await store.refresh()
-      }
-      .task(id: registryPollingIsActive) {
-        // Check registryPollingIsActive at .task(id:) startup and again in the
-        // refreshSessionListUntilCancelled closure to close the state-change /
-        // cancellation race window; the inner check is intentional.
-        guard registryPollingIsActive else {
-          return
-        }
-        await store.refreshSessionListUntilCancelled {
-          registryPollingIsActive
-        }
-      }
-    }
-  }
-
-  @ViewBuilder
-  private var feedErrorBanner: some View {
-    if let message = store.feedErrorMessage {
-      ErrorBanner(message: message)
-    }
-  }
-
-  private var registryPollingIsActive: Bool {
-    scenePhase == .active && navigationPath.isEmpty
-  }
-}
-
-@available(iOS 17.5, macOS 14.5, *)
-public struct ConversationView: View {
-  private let store: SessionStore
-  private let session: RemoteSession
-  @Environment(\.scenePhase) private var scenePhase
-  @State private var draft = ""
-  @State private var attachAttempt = 0
-  private let latestMessageAnchorID = "latest-message-anchor"
-
-  public init(store: SessionStore, session: RemoteSession) {
-    self.store = store
-    self.session = session
-  }
-
-  public var body: some View {
-    VStack(spacing: 0) {
-      transcriptView
-      connectionStatusBanner
-      Composer(
-        text: $draft,
-        canSend: canSendPrompt,
-        canStop: canStop,
-        onSend: sendPrompt,
-        onStop: stopTurn
-      )
-    }
-    .navigationTitle(session.name)
-    .toolbar {
-      ToolbarItem(placement: .automatic) {
-        CapsuleButton(store: store, session: session)
-      }
-    }
-    .task(id: attachTaskID) {
-      await store.attach(to: session)
-    }
-    .onChange(of: scenePhase) { _, phase in
-      guard phase == .active && store.attachedSessionID != session.sessionID else {
-        return
-      }
-      attachAttempt += 1
-    }
-  }
-
-  private var attachTaskID: String {
-    "\(session.sessionID):\(attachAttempt)"
-  }
-
-  private var transcriptView: some View {
-    ScrollViewReader { proxy in
-      ZStack(alignment: .bottomTrailing) {
-        ScrollView {
-          LazyVStack(alignment: .leading, spacing: 10) {
-            ForEach(store.transcript(for: session.sessionID)) { item in
-              ChatBubble(item: item)
-            }
-            Color.clear
-              .frame(height: 1)
-              .id(latestMessageAnchorID)
-          }
-          .padding()
-        }
-        latestButton(proxy)
-      }
-    }
-  }
-
-  private var canSendPrompt: Bool {
-    store.attachedSessionID == session.sessionID && store.connectionState == .connected
-  }
-
-  private var canStop: Bool {
-    store.attachedSessionID == session.sessionID
-      && store.connectionState != .disconnected
-  }
-
-  private var connectionStatusBanner: some View {
-    VStack(spacing: 6) {
-      if let message = store.feedErrorMessage {
-        ErrorBanner(message: message)
-      }
-      if let message = store.steeringErrorMessage {
-        ErrorBanner(message: message)
-      }
-      if let message = store.capsuleErrorMessages[session.sessionID] {
-        ErrorBanner(message: message)
-      }
-      ConnectionStatusBanner(state: store.connectionState)
-    }
-    .padding(.vertical, 8)
-  }
-
-  private func sendPrompt(_ text: String) async -> Bool {
-    await store.sendPrompt(text, to: session.sessionID)
-  }
-
-  private func stopTurn() async {
-    _ = await store.abort(sessionID: session.sessionID)
-  }
-
-  private func latestButton(_ proxy: ScrollViewProxy) -> some View {
-    Button {
-      scrollToLatest(proxy)
-    } label: {
-      Label("Latest", systemImage: "arrow.down.to.line")
-    }
-    .font(.caption.weight(.semibold))
-    .padding(.horizontal, 12)
-    .padding(.vertical, 8)
-    .background(.regularMaterial, in: Capsule())
-    .padding()
-    .accessibilityLabel("Jump to latest message")
-  }
-
-  private func scrollToLatest(_ proxy: ScrollViewProxy) {
-    withAnimation {
-      proxy.scrollTo(latestMessageAnchorID, anchor: .bottom)
-    }
-  }
-}
-
 private enum FeedAction {
   case keepOpen
   case closed
 }
 
 private extension SessionStore {
-  func runAttachStream(for sessionID: String) async throws -> FeedAction {
+  func runAttachStream(for sessionID: String, generation: Int) async throws -> FeedAction {
     let stream = try await client.attachStream(sessionID: sessionID)
     var receivedFrame = false
 
     for try await envelope in stream {
       try Task.checkCancellation()
-      guard attachedSessionID == sessionID else {
+      guard attachGeneration == generation else {
         return .keepOpen
       }
       if !receivedFrame {
+        // Each attach resends a full backfill, so the prior transcript stays on
+        // screen through a reconnect and is replaced only once fresh frames arrive.
+        transcripts[sessionID] = ConversationProjection()
         connectionState = .connected
         receivedFrame = true
       }
@@ -399,8 +232,8 @@ private extension SessionStore {
     transcripts[sessionID] = projection
   }
 
-  func closeFeed(_ sessionID: String) {
-    if attachedSessionID == sessionID {
+  func closeFeed(generation: Int) {
+    if attachGeneration == generation {
       attachedSessionID = nil
       connectionState = .disconnected
     }
@@ -424,328 +257,5 @@ private func decodeSessionEnded(_ payload: JSONValue) throws -> String? {
     return try JSONDecoder().decode(SessionEndedPayload.self, from: payload.jsonData()).sessionId
   } catch {
     throw RemoteClientError.invalidPayload(String(describing: error))
-  }
-}
-
-@available(iOS 17.5, macOS 14.5, *)
-public struct CapsuleBriefView: View {
-  public let capsule: CapsuleBrief
-
-  public init(capsule: CapsuleBrief) {
-    self.capsule = capsule
-  }
-
-  public var body: some View {
-    ScrollView {
-      VStack(alignment: .leading, spacing: 14) {
-        Text("Context Capsule")
-          .font(.title3.weight(.semibold))
-        Text(capsule.objective)
-          .font(.body)
-        ForEach(capsule.compactSections, id: \.title) { section in
-          briefSection(section.title, section.items)
-        }
-        disclosure
-      }
-      .frame(maxWidth: .infinity, alignment: .leading)
-      .padding()
-    }
-    .navigationTitle("Capsule")
-  }
-
-  @ViewBuilder
-  private var disclosure: some View {
-    VStack(alignment: .leading, spacing: 4) {
-      Label("Host safety boundary", systemImage: "shield.lefthalf.filled")
-        .font(.headline)
-      Text(
-        "Generated and redacted on the execution host. "
-          + "Payload limit: \(capsule.maxPayloadBytes) bytes."
-      )
-      ForEach(capsule.redactions, id: \.category) { redaction in
-        Text("• \(redaction.category): \(redaction.count) omitted")
-      }
-      if capsule.truncated {
-        Text("Additional content was truncated to fit the bounded projection.")
-      }
-    }
-    .font(.caption)
-    .foregroundStyle(.secondary)
-  }
-
-  @ViewBuilder
-  private func briefSection(_ title: String, _ values: [String]) -> some View {
-    if !values.isEmpty {
-      VStack(alignment: .leading, spacing: 4) {
-        Text(title).font(.headline)
-        ForEach(Array(values.enumerated()), id: \.offset) { _, value in
-          Text("• \(value)").font(.subheadline)
-        }
-      }
-    }
-  }
-}
-
-@available(iOS 17.5, macOS 14.5, *)
-private struct CapsuleButton: View {
-  let store: SessionStore
-  let session: RemoteSession
-  @State private var showingCapsule = false
-  @State private var loading = false
-  @State private var requestTask: Task<Void, Never>?
-
-  var body: some View {
-    Button {
-      requestTask?.cancel()
-      loading = true
-      requestTask = Task { @MainActor in
-        defer {
-          loading = false
-          requestTask = nil
-        }
-        guard await store.fetchCapsule(for: session.sessionID) != nil,
-          !Task.isCancelled
-        else {
-          return
-        }
-        showingCapsule = true
-      }
-    } label: {
-      Label("Capsule", systemImage: loading ? "hourglass" : "doc.text.magnifyingglass")
-    }
-    .disabled(loading || !store.isAttached(to: session.sessionID))
-    .onDisappear {
-      requestTask?.cancel()
-      requestTask = nil
-      loading = false
-    }
-    .sheet(isPresented: $showingCapsule) {
-      if let capsule = store.capsule(for: session.sessionID) {
-        NavigationStack { CapsuleBriefView(capsule: capsule) }
-      }
-    }
-  }
-}
-
-@available(iOS 17.5, macOS 14.5, *)
-private struct SessionRow: View {
-  let session: RemoteSession
-
-  var body: some View {
-    VStack(alignment: .leading, spacing: 4) {
-      Text(session.name)
-        .font(.headline)
-      Text(session.cwd)
-        .font(.subheadline)
-        .foregroundStyle(.secondary)
-    }
-    .accessibilityElement(children: .combine)
-  }
-}
-
-@available(iOS 17.5, macOS 14.5, *)
-private struct ErrorBanner: View {
-  let message: String
-
-  var body: some View {
-    Label {
-      Text(message)
-        .multilineTextAlignment(.leading)
-    } icon: {
-      Image(systemName: "exclamationmark.triangle.fill")
-    }
-    .font(.caption)
-    .foregroundStyle(.red)
-    .frame(maxWidth: .infinity, alignment: .leading)
-    .padding(.horizontal, 12)
-    .padding(.vertical, 8)
-    .background(.red.opacity(0.12))
-  }
-}
-
-@available(iOS 17.5, macOS 14.5, *)
-private struct ConnectionStatusBanner: View {
-  let state: ConnectionState
-
-  var body: some View {
-    Label(title, systemImage: systemImage)
-      .font(.caption)
-      .foregroundStyle(foregroundStyle)
-      .padding(8)
-      .background(.thinMaterial, in: Capsule())
-  }
-
-  private var title: String {
-    switch state {
-    case .connected:
-      "Connected"
-    case .reconnecting:
-      "Reconnecting…"
-    case .disconnected:
-      "Disconnected"
-    }
-  }
-
-  private var systemImage: String {
-    switch state {
-    case .connected:
-      "checkmark.circle.fill"
-    case .reconnecting:
-      "arrow.triangle.2.circlepath"
-    case .disconnected:
-      "wifi.slash"
-    }
-  }
-
-  private var foregroundStyle: Color {
-    switch state {
-    case .connected:
-      .green
-    case .reconnecting:
-      .secondary
-    case .disconnected:
-      .red
-    }
-  }
-}
-
-private struct Composer: View {
-  @Binding var text: String
-  let canSend: Bool
-  let canStop: Bool
-  let onSend: (String) async -> Bool
-  let onStop: () async -> Void
-  @State private var isSending = false
-  @State private var isStopping = false
-
-  private var trimmedText: String {
-    text.trimmingCharacters(in: .whitespacesAndNewlines)
-  }
-
-  var body: some View {
-    HStack(spacing: 8) {
-      TextField("Steer the agent", text: $text, axis: .vertical)
-        .textFieldStyle(.roundedBorder)
-        .lineLimit(1...4)
-      Button("Send") {
-        send()
-      }
-      .disabled(trimmedText.isEmpty || !canSend || isSending)
-      Button("Stop", role: .destructive) {
-        stop()
-      }
-      .disabled(!canStop || isStopping)
-    }
-    .padding()
-    .background(.regularMaterial)
-  }
-
-  private func send() {
-    let message = trimmedText
-    isSending = true
-    Task {
-      if await onSend(message) {
-        text = ""
-      }
-      isSending = false
-    }
-  }
-
-  private func stop() {
-    isStopping = true
-    Task {
-      await onStop()
-      isStopping = false
-    }
-  }
-}
-
-@available(iOS 17.5, macOS 14.5, *)
-private struct ChatBubble: View {
-  let item: ChatItem
-  @State private var isExpanded: Bool
-
-  init(item: ChatItem) {
-    self.item = item
-    self._isExpanded = State(initialValue: !item.isCollapsedByDefault)
-  }
-
-  var body: some View {
-    VStack(alignment: .leading, spacing: 6) {
-      if item.isCollapsedByDefault {
-        collapsedHeader
-      }
-      if isExpanded {
-        expandedContent
-      }
-    }
-    .padding(10)
-    .background(bubbleColor, in: RoundedRectangle(cornerRadius: 12))
-    .frame(maxWidth: .infinity, alignment: item.role == "user" ? .trailing : .leading)
-    .onTapGesture {
-      toggleIfExpandable()
-    }
-    .accessibilityElement(children: .combine)
-  }
-
-  private var collapsedHeader: some View {
-    HStack(spacing: 6) {
-      if hasExpandableContent {
-        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-          .font(.caption2.weight(.bold))
-      }
-      Text(item.collapsedTitle)
-        .font(.caption)
-        .foregroundStyle(.secondary)
-      if hasExpandableContent && !isExpanded {
-        Text("Tap to expand")
-          .font(.caption2)
-          .foregroundStyle(.tertiary)
-      }
-    }
-  }
-
-  @ViewBuilder
-  private var expandedContent: some View {
-    if !item.isCollapsedByDefault && (item.toolName != nil || item.status != nil) {
-      Text(item.collapsedTitle)
-        .font(.caption)
-        .foregroundStyle(.secondary)
-    }
-    if !item.text.isEmpty {
-      Text(item.text)
-        .font(.body)
-    }
-    if item.truncatedOutput {
-      Text("output truncated")
-        .font(.caption2)
-        .foregroundStyle(.secondary)
-    }
-  }
-
-  private var hasExpandableContent: Bool {
-    !item.text.isEmpty || item.truncatedOutput
-  }
-
-  private var bubbleColor: Color {
-    switch item.role {
-    case "user":
-      .blue.opacity(0.18)
-    case "assistant":
-      .green.opacity(0.16)
-    case "toolResult":
-      .orange.opacity(0.14)
-    default:
-      .gray.opacity(0.14)
-    }
-  }
-
-  private func toggleIfExpandable() {
-    guard item.isCollapsedByDefault && hasExpandableContent else {
-      return
-    }
-    withAnimation {
-      isExpanded.toggle()
-    }
   }
 }

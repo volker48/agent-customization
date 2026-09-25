@@ -1,3 +1,5 @@
 // Copy this file to Local.xcconfig for signed device builds.
 // Keep Local.xcconfig out of version control.
 DEVELOPMENT_TEAM = YOUR_APPLE_DEVELOPMENT_TEAM
+// A free (Personal Team) Apple ID needs a bundle ID nobody else has registered.
+// PRODUCT_BUNDLE_IDENTIFIER = com.example.pi-remote

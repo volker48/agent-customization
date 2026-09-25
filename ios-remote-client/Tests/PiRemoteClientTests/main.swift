@@ -29,6 +29,13 @@ private func runProjectionTests() throws {
   try freshProjectionsDoNotReuseChatItemIDs()
   try streamingDeltasKeepTheirChatItemID()
   try compactCapsuleSectionsExposeBoundedHostDisclosure()
+  try toolFramesWithCallIDCoalesceIntoOneRow()
+  try toolErrorSurvivesTrailingToolResultMessage()
+  try parallelToolCallsKeepSeparateRows()
+  try agentActivityFollowsLiveLifecycleFrames()
+  try tsGeneratedToolEventCarriesCallID()
+  try markdownSplitsParagraphsHeadingsAndFences()
+  try unterminatedFenceRendersAsCodeWhileStreaming()
 }
 
 private func runRemoteClientTests() async throws {
@@ -55,6 +62,8 @@ private func runRemoteClientTests() async throws {
   try await sessionStoreRefreshLoopTracksSessionRegistry()
   try await sessionStoreRefreshLoopPausesWhenRegistryIsInactive()
   try await sessionStoreIgnoresSupersededSessionFeed()
+  try await sessionStoreKeepsTranscriptUntilFreshFramesArrive()
+  try await reattachingSameSessionDoesNotDropTheNewFeed()
 }
 
 private func envelopeRoundTripsTSGeneratedFixturesByteForByte() throws {
@@ -216,6 +225,99 @@ private func streamingDeltasKeepTheirChatItemID() throws {
 
   try expect(projection.items == [.assistant(text: "Hello there", status: "completed")])
   try expect(projection.items[0].id == initialID)
+}
+
+private func toolFramesWithCallIDCoalesceIntoOneRow() throws {
+  var projection = ConversationProjection()
+
+  projection.applyLive(tool("", status: "running"))
+  projection.applyLive(tool("a", status: "running"))
+  projection.applyLive(tool("ab", status: "completed"))
+  projection.applyLive(tool("ab", status: "started"))
+  projection.applyLive(tool("ab", status: "completed"))
+
+  try expect(projection.items == [ChatItem(tool("ab", status: "completed"))])
+  try expect(projection.items[0].toolRunState == .succeeded)
+}
+
+private func toolErrorSurvivesTrailingToolResultMessage() throws {
+  var projection = ConversationProjection()
+
+  projection.applyLive(tool("", status: "running"))
+  projection.applyLive(tool("boom", status: "error"))
+  projection.applyLive(tool("boom", status: "completed"))
+
+  try expect(projection.items.count == 1)
+  try expect(projection.items[0].toolRunState == .failed)
+}
+
+private func parallelToolCallsKeepSeparateRows() throws {
+  var projection = ConversationProjection()
+
+  projection.applyLive(tool("", status: "running", callID: "a"))
+  projection.applyLive(tool("", status: "running", callID: "b"))
+  projection.applyLive(tool("second", status: "completed", callID: "b"))
+  projection.applyLive(tool("first", status: "completed", callID: "a"))
+
+  try expect(projection.items.map(\.text) == ["first", "second"])
+  try expect(projection.items.map(\.toolCallId) == ["a", "b"])
+}
+
+private func agentActivityFollowsLiveLifecycleFrames() throws {
+  var projection = ConversationProjection()
+  projection.appendBackfill([.assistant(text: "Earlier", status: "completed")])
+  try expect(!projection.isAgentWorking)
+
+  projection.applyLive(.init(role: "system", text: "", status: "turn_started"))
+  try expect(projection.isAgentWorking)
+  projection.applyLive(.init(role: "system", text: "", status: "turn_completed"))
+  try expect(projection.isAgentWorking)
+  projection.applyLive(.init(role: "system", text: "", status: "agent_completed"))
+  try expect(!projection.isAgentWorking)
+
+  projection.applyLive(.assistant(text: "Hi", status: "streaming"))
+  try expect(projection.isAgentWorking)
+}
+
+private func tsGeneratedToolEventCarriesCallID() throws {
+  let fixture = try require(
+    try loadProtocolFixtures().first { $0.name == "session tool event with call id" }
+  )
+  let entry = try JSONDecoder().decode(
+    TranscriptEntry.self,
+    from: try decodeFrame(fixture.frame).payload.jsonData()
+  )
+
+  try expect(entry.toolCallId == "call-1")
+  try expect(entry.toolName == "bash")
+  try expect(entry.text == "ok")
+}
+
+private func markdownSplitsParagraphsHeadingsAndFences() throws {
+  let blocks = parseMarkdownBlocks(
+    "## Plan\nFirst **line**\nsecond line\n\n```swift\nlet x = 1\n\nprint(x)\n```\nAfter"
+  )
+
+  try expect(
+    blocks == [
+      .heading(level: 2, text: "Plan"),
+      .paragraph("First **line**\nsecond line"),
+      .code(language: "swift", code: "let x = 1\n\nprint(x)"),
+      .paragraph("After"),
+    ])
+}
+
+private func unterminatedFenceRendersAsCodeWhileStreaming() throws {
+  try expect(
+    parseMarkdownBlocks("Run:\n~~~\npnpm test") == [
+      .paragraph("Run:"), .code(language: nil, code: "pnpm test"),
+    ])
+  try expect(parseMarkdownBlocks("#hashtag") == [.paragraph("#hashtag")])
+}
+
+private func tool(_ text: String, status: String, callID: String = "call-1") -> TranscriptEntry {
+  TranscriptEntry(
+    role: "toolResult", text: text, toolName: "bash", status: status, toolCallId: callID)
 }
 
 private func pairAndListSendControlFrames() async throws {
@@ -781,6 +883,39 @@ private func sessionStoreReconnectsAndReattachesAfterFeedError() async throws {
   try expect(streamCount == 2)
 }
 
+private func sessionStoreKeepsTranscriptUntilFreshFramesArrive() async throws {
+  let transport = ReconnectingAttachTransport(streams: [
+    .success([liveEvent(text: "earlier")]),
+    .failure([], RemoteClientError.emptyResponse),
+  ])
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+  let store = await SessionStore(client: client, reconnectDelayNanoseconds: 0)
+
+  await store.attach(to: .init(sessionID: "session-1", name: "Work", cwd: "/repo"))
+
+  let texts = await store.transcript(for: "session-1").map(\.text)
+  try expect(texts == ["earlier"])
+}
+
+private func reattachingSameSessionDoesNotDropTheNewFeed() async throws {
+  let transport = HeldOpenAttachTransport()
+  let client = RemoteClient(ticket: "ticket", transport: transport)
+  let store = await SessionStore(client: client, reconnectDelayNanoseconds: 0)
+  let session = RemoteSession(sessionID: "session-1", name: "Work", cwd: "/repo")
+
+  let firstTask = Task { await store.attach(to: session) }
+  try await waitUntil { await store.transcript(for: "session-1").map(\.text) == ["stream 1"] }
+  let secondTask = Task { await store.attach(to: session) }
+  firstTask.cancel()
+  await firstTask.value
+  try await waitUntil { await store.transcript(for: "session-1").map(\.text) == ["stream 2"] }
+
+  let stillAttached = await store.isAttached(to: "session-1")
+  secondTask.cancel()
+  await secondTask.value
+  try expect(stillAttached)
+}
+
 private func storeAttachedWith(_ frames: [Envelope]) async -> SessionStore {
   let transport = RecordingTransport(responses: [], streams: [frames])
   let client = RemoteClient(ticket: "ticket", transport: transport)
@@ -797,6 +932,34 @@ private struct RecordedRequest: Sendable {
 private enum StreamScript: Sendable {
   case success([Envelope])
   case failure([Envelope], Error)
+}
+
+/// Each attach stream sends one frame and stays open until its consumer cancels.
+private actor HeldOpenAttachTransport: RemoteTransport {
+  nonisolated let localNodeID = "node-a"
+
+  private var streamCount = 0
+
+  func request(ticket: String, envelopes: [Envelope]) async throws -> [Envelope] {
+    []
+  }
+
+  nonisolated func stream(
+    ticket: String,
+    envelopes: [Envelope]
+  ) -> AsyncThrowingStream<Envelope, Error> {
+    AsyncThrowingStream { continuation in
+      Task {
+        let number = await nextStreamNumber()
+        continuation.yield(liveEvent(text: "stream \(number)"))
+      }
+    }
+  }
+
+  private func nextStreamNumber() -> Int {
+    streamCount += 1
+    return streamCount
+  }
 }
 
 private actor SwitchingAttachTransport: RemoteTransport {
