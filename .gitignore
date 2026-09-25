@@ -9,3 +9,4 @@ ios-remote-client/Local.xcconfig
 .pi-subagents/
 
 target/
+/build/
