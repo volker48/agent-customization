@@ -43,4 +43,3 @@ Use project scripts and installed tooling; do not replace a project's toolchain 
 ## Git and coordination
 
 - One logical change per commit; imperative subject, at most 72 characters. Never amend or rebase commits pushed to shared branches.
-- When related local Pi sessions need coordination, use `pi-intercom` if available: `send` for notifications, `ask` only when blocked. Skip it when work can proceed independently.
