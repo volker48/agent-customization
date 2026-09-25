@@ -26,7 +26,8 @@ A **remote control** capability delivered as a Pi extension plus a local **daemo
 - The phone connects over iroh (QUIC, encrypted, public-key-addressed), authorizes via
   a one-time **pairing** (code + node-id **allowlist**, see ADR-0003), lists sessions,
   attaches to one, receives a full-transcript **backfill** plus live deltas, and sends
-  prompts that are injected with `pi.sendUserMessage(..., { deliverAs: "steer" })`.
+  prompts that the extension runs as `/model` / `/thinking` or otherwise injects with
+  `pi.sendUserMessage(..., { deliverAs: "steer", expandPromptTemplates: true })`.
 
 Architecture:
 
@@ -188,7 +189,7 @@ Paired device (normal):
   daemon → extension    → (socket) attach { sessionId }
   extension → daemon    → backfill: projected transcript entries
   daemon → phone        → event frames (backfill, then live deltas)
-  phone  → daemon       → prompt { sessionId, text }  → extension → sendUserMessage(steer)
+  phone  → daemon       → prompt { sessionId, text }  → extension → /model|/thinking, else sendUserMessage(steer)
   phone  → daemon       → abort  { sessionId }         → extension → ctx.abort()
 ```
 
