@@ -1,0 +1,18 @@
+{
+  "name": "pi-review",
+  "version": "0.1.0+codex.20260906144009",
+  "description": "Independent configurable code reviews using your Pi harness and models.",
+  "author": {
+    "name": "Marcus McCurdy"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Pi Review",
+    "shortDescription": "Review code with your configured Pi models.",
+    "longDescription": "Run independent Pi reviews and reconcile actionable findings in Codex.",
+    "developerName": "Marcus McCurdy",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": ["Use Pi Review to review my current changes."]
+  }
+}

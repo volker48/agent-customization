@@ -1,0 +1,3 @@
+interface:
+  display_name: "Rethinking Skills and Prompts"
+  short_description: "Refine agent instructions, scope, and completion"

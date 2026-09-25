@@ -1,0 +1,7 @@
+{
+  "models": [
+    { "provider": "opencode", "id": "muse-spark-1.3-contributor-free", "thinking": "medium" },
+    { "provider": "opencode", "id": "gemini-3.8-flash", "thinking": "medium" }
+  ],
+  "timeoutSeconds": 600
+}
