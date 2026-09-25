@@ -170,7 +170,9 @@ function acceptDaemonSocket(socket: Socket, state: DaemonState, options: IpcDaem
     const parsed = parseBufferedFrames(buffered + chunk.toString("utf8"));
     buffered = parsed.remaining;
     for (const envelope of parsed.envelopes) {
-      void handleReceivedEnvelope(envelope, socket, state, options);
+      void handleReceivedEnvelope(envelope, socket, state, options).catch((error: unknown) => {
+        socket.destroy(error instanceof Error ? error : new Error(String(error)));
+      });
     }
   });
   socket.on("error", () => socket.destroy());
