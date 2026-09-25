@@ -184,11 +184,12 @@ struct ConversationView: View {
   @ViewBuilder
   private var sessionStateMenu: some View {
     if let state = sessionState {
-      if !state.models.isEmpty {
+      if !state.modelOptions.isEmpty {
         Picker("Model", selection: modelSelection(state)) {
           ForEach(providers(in: state), id: \.self) { provider in
             Section(provider) {
-              ForEach(state.models.filter { $0.provider == provider }, id: \.reference) { model in
+              ForEach(state.modelOptions.filter { $0.provider == provider }, id: \.reference) {
+                model in
                 Text(model.name).tag(Optional(model))
               }
             }
@@ -258,7 +259,7 @@ struct ConversationView: View {
 /// Providers in the host's model order, so the menu groups without reordering.
 private func providers(in state: SessionState) -> [String] {
   var seen = Set<String>()
-  return state.models.map(\.provider).filter { seen.insert($0).inserted }
+  return state.modelOptions.map(\.provider).filter { seen.insert($0).inserted }
 }
 
 private func isVisiblyStreaming(_ item: ChatItem) -> Bool {

@@ -35,6 +35,7 @@ private func runProjectionTests() throws {
   try agentActivityFollowsLiveLifecycleFrames()
   try tsGeneratedToolEventCarriesCallID()
   try sessionStateSummaryMirrorsPiFooter()
+  try modelOptionsListTheActiveModelOutsideTheSwitchableSet()
   try markdownSplitsParagraphsHeadingsAndFences()
   try unterminatedFenceRendersAsCodeWhileStreaming()
 }
@@ -312,6 +313,22 @@ private func sessionStateSummaryMirrorsPiFooter() throws {
   try expect(
     SessionState(model: nil, thinkingLevel: "off", thinkingLevels: [], models: []).summary
       == "No model")
+}
+
+private func modelOptionsListTheActiveModelOutsideTheSwitchableSet() throws {
+  let sol = ModelChoice(provider: "openai-codex", id: "gpt-5.6-sol", name: "GPT-5.6 Sol")
+  let kimi = ModelChoice(provider: "openrouter", id: "moonshotai/kimi-k3", name: "Kimi K3")
+  let cli = ModelChoice(provider: "anthropic", id: "claude-opus-5-5", name: "Claude Opus 5.5")
+
+  try expect(
+    SessionState(model: sol, thinkingLevel: "high", thinkingLevels: [], models: [sol, kimi])
+      .modelOptions == [sol, kimi])
+  try expect(
+    SessionState(model: cli, thinkingLevel: "high", thinkingLevels: [], models: [sol, kimi])
+      .modelOptions == [cli, sol, kimi])
+  try expect(
+    SessionState(model: nil, thinkingLevel: "off", thinkingLevels: [], models: [sol])
+      .modelOptions == [sol])
 }
 
 private func markdownSplitsParagraphsHeadingsAndFences() throws {
