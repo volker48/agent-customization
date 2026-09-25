@@ -371,7 +371,7 @@ describe("remote extension", () => {
     }
   });
 
-  it("sends session state ahead of the backfill and when the model or thinking level changes", async () => {
+  it("sends session state before the backfill and on model or thinking changes", async () => {
     const frames: IpcEnvelope[] = [];
     const daemon = await startIpcDaemonServer(join(root, "daemon.sock"), {
       onFrame: (frame) => frames.push(frame),
@@ -689,8 +689,9 @@ function sessionThinkingLevel(frame: IpcEnvelope): string | undefined {
 }
 
 function sessionStateOf(frame: IpcEnvelope): SessionState | undefined {
-  return typeof frame.payload === "object" && frame.payload !== null && "sessionState" in frame.payload
-    ? (frame.payload.sessionState as SessionState)
+  const payload = frame.payload;
+  return typeof payload === "object" && payload !== null && "sessionState" in payload
+    ? (payload.sessionState as SessionState)
     : undefined;
 }
 

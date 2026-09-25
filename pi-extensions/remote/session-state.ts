@@ -74,7 +74,10 @@ export function parseRemoteCommand(text: string): RemoteCommand | null {
   return { name: match[1] === "model" ? "model" : "thinking", argument: (match[2] ?? "").trim() };
 }
 
-/** Applies a remote command and returns a notice for the client, or null when the state push says enough. */
+/**
+ * Applies a remote command and returns a notice for the client, or null when the state
+ * push says enough.
+ */
 export async function runRemoteCommand(
   pi: ModelApi,
   ctx: ModelContext,
@@ -91,7 +94,8 @@ async function runModelCommand(
   reference: string,
 ): Promise<string | null> {
   if (reference.length === 0) {
-    return `Model: ${describeModel(ctx.model)}, thinking ${pi.getThinkingLevel()}. Send /model <provider/id> to switch.`;
+    const current = `Model: ${describeModel(ctx.model)}, thinking ${pi.getThinkingLevel()}.`;
+    return `${current} Send /model <provider/id> to switch.`;
   }
   let model = findModel(reference, switchableModels(ctx));
   if (!model && ctx.scopedModels.length === 0) {
@@ -109,7 +113,8 @@ async function runModelCommand(
   try {
     return (await pi.setModel(model)) ? null : `No API key for ${describeModel(model)}.`;
   } catch (error) {
-    return `Couldn't switch to ${describeModel(model)}: ${error instanceof Error ? error.message : String(error)}`;
+    const reason = error instanceof Error ? error.message : String(error);
+    return `Couldn't switch to ${describeModel(model)}: ${reason}`;
   }
 }
 
