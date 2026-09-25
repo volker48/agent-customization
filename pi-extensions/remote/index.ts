@@ -15,6 +15,13 @@ import { projectCapsule } from "./capsule-projection.js";
 import { FileNodeAllowlist, defaultRemoteRoot, renderPairingTicket } from "./authorization.js";
 import { connectIpcExtension, type IpcEnvelope, type IpcExtensionClient } from "./ipc.js";
 import { CAPSULE_CAPABILITY, CAPSULE_OPERATION } from "./protocol.js";
+import {
+  currentSessionState,
+  parseRemoteCommand,
+  projectNotice,
+  projectSessionState,
+  runRemoteCommand,
+} from "./session-state.js";
 import { projectTranscriptEvent, projectTranscriptMessage } from "./transcript-projection.js";
 
 const DAEMON_SOCKET_FILE = "daemon.sock";
@@ -42,6 +49,8 @@ type RemoteState = {
   pendingLiveEvents: unknown[];
   syncWaiters: Map<number, () => void>;
   nextSyncId: number;
+  /** Tail of the remote prompt queue; prompts run in order, off the inbound read loop. */
+  prompts: Promise<void>;
   closed: boolean;
 };
 
@@ -86,6 +95,7 @@ export default function remoteExtension(pi: ExtensionAPI): void {
         pendingLiveEvents: [],
         syncWaiters: new Map(),
         nextSyncId: 0,
+        prompts: Promise.resolve(),
         closed: false,
       };
       void readInbound(pi, state);
@@ -109,19 +119,28 @@ export default function remoteExtension(pi: ExtensionAPI): void {
         return;
       }
       state.ctx = ctx;
-      const payload = projectTranscriptEvent(event);
-      if (state.backfilling) {
-        if (state.desiredAttached) {
-          state.pendingLiveEvents.push(payload);
-        }
-        return;
-      }
-      if (!state.attached) {
-        return;
-      }
-      await state.client.send({ sessionId: state.sessionId, type: "event", payload });
+      await sendLive(state, projectTranscriptEvent(event));
     });
   }
+
+  pi.on("model_select", async (event, ctx) => {
+    if (!state || state.closed) {
+      return;
+    }
+    state.ctx = ctx;
+    await sendLive(
+      state,
+      projectSessionState(currentSessionState(ctx, event.model, pi.getThinkingLevel())),
+    );
+  });
+
+  pi.on("thinking_level_select", async (event, ctx) => {
+    if (!state || state.closed) {
+      return;
+    }
+    state.ctx = ctx;
+    await sendLive(state, projectSessionState(currentSessionState(ctx, ctx.model, event.level)));
+  });
 
   pi.on("session_shutdown", async (_event, _ctx) => {
     if (!state || state.closed) {
@@ -156,6 +175,14 @@ async function readInbound(pi: ExtensionAPI, state: RemoteState): Promise<void> 
         void applyInbound(pi, state, envelope).catch((error) => handleInboundError(state, error));
         continue;
       }
+      if (envelope.type === "prompt") {
+        // A /model catalog refresh can take seconds; queuing keeps abort responsive.
+        const payload = envelope.payload;
+        state.prompts = state.prompts
+          .then(() => applyPrompt(pi, state, payload))
+          .catch((error) => handleInboundError(state, error));
+        continue;
+      }
       await applyInbound(pi, state, envelope);
     }
   } catch (error) {
@@ -173,7 +200,7 @@ async function applyInbound(
     state.attached = false;
     state.backfilling = true;
     state.pendingLiveEvents = [];
-    await sendBackfill(state);
+    await sendBackfill(pi, state);
     await drainInbound(state);
     if (!state.desiredAttached) {
       state.pendingLiveEvents = [];
@@ -200,16 +227,27 @@ async function applyInbound(
     if (requestId) await sendCapsule(state, requestId);
     return;
   }
-  if (envelope.type === "prompt") {
-    const text = promptText(envelope.payload);
-    if (text.trim().length > 0) {
-      pi.sendUserMessage(text, { deliverAs: "steer" });
-    }
-    return;
-  }
   if (envelope.type === "abort") {
     state.ctx.abort();
   }
+}
+
+async function applyPrompt(pi: ExtensionAPI, state: RemoteState, payload: unknown): Promise<void> {
+  const text = promptText(payload);
+  if (state.closed || text.trim().length === 0) {
+    return;
+  }
+  const command = parseRemoteCommand(text);
+  if (command) {
+    const notice = await runRemoteCommand(pi, state.ctx, command);
+    if (notice) await sendLive(state, projectNotice(notice));
+    // Resync even without a change event: a failed lookup may have refreshed the catalog.
+    await sendLive(state, sessionStateEntry(pi, state.ctx));
+    return;
+  }
+  // Same dispatch as typing in the TUI: extension commands, skills, and prompt
+  // templates run on the host; other text goes to the agent.
+  pi.sendUserMessage(text, { deliverAs: "steer", expandPromptTemplates: true });
 }
 
 async function sendCapsule(state: RemoteState, requestId: string): Promise<void> {
@@ -243,7 +281,31 @@ function capsuleRequestIdFrom(payload: unknown): string | null {
     : null;
 }
 
-async function sendBackfill(state: RemoteState): Promise<void> {
+/** Sends a host-originated payload with the same attach/backfill gating as live Pi events. */
+async function sendLive(state: RemoteState, payload: unknown): Promise<void> {
+  if (state.backfilling) {
+    if (state.desiredAttached) {
+      state.pendingLiveEvents.push(payload);
+    }
+    return;
+  }
+  if (!state.attached) {
+    return;
+  }
+  await state.client.send({ sessionId: state.sessionId, type: "event", payload });
+}
+
+function sessionStateEntry(pi: ExtensionAPI, ctx: ExtensionContext) {
+  return projectSessionState(currentSessionState(ctx, ctx.model, pi.getThinkingLevel()));
+}
+
+async function sendBackfill(pi: ExtensionAPI, state: RemoteState): Promise<void> {
+  // State leads the backfill so a reattaching client repaints its header first.
+  await state.client.send({
+    sessionId: state.sessionId,
+    type: "event",
+    payload: sessionStateEntry(pi, state.ctx),
+  });
   for (const entry of state.ctx.sessionManager.getBranch()) {
     if (entry.type !== "message") {
       continue;

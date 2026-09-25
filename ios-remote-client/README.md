@@ -12,6 +12,7 @@ open Xcode.
   per `toolCallId`), and Markdown block splitting. Unit-tested on macOS.
 - `App/` — the SwiftUI app (iOS 26): pairing (QR scan or paste + six-digit code),
   session list, chat view with Markdown, collapsible tool rows, send/steer and Stop,
+  the host's model and thinking level in the header with a title menu to switch them,
   Context Capsule sheet, and settings. `scripts/render-app-icon.swift` regenerates
   the app icon.
 

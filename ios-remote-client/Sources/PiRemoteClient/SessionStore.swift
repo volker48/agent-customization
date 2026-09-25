@@ -114,6 +114,10 @@ public final class SessionStore {
     transcripts[sessionID]?.isAgentWorking ?? false
   }
 
+  public func sessionState(for sessionID: String) -> SessionState? {
+    transcripts[sessionID]?.sessionState
+  }
+
   public func sendPrompt(_ text: String, to sessionID: String) async -> Bool {
     do {
       try await client.sendPrompt(sessionID: sessionID, text: text)
@@ -123,6 +127,17 @@ public final class SessionStore {
       steeringErrorMessage = String(describing: error)
       return false
     }
+  }
+
+  /// Asks the host to switch models. Success means the frame was sent; the session
+  /// state follows the host's next push, so a rejected switch never shows as applied.
+  public func selectModel(_ model: ModelChoice, in sessionID: String) async -> Bool {
+    await sendPrompt("/model \(model.reference)", to: sessionID)
+  }
+
+  /// Asks the host to change the thinking level; see `selectModel(_:in:)`.
+  public func selectThinkingLevel(_ level: String, in sessionID: String) async -> Bool {
+    await sendPrompt("/thinking \(level)", to: sessionID)
   }
 
   public func fetchCapsule(for sessionID: String) async -> CapsuleBrief? {
