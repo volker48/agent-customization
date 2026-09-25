@@ -71,6 +71,21 @@ export const fixtureEnvelopes: FixtureEnvelope[] = [
     },
   },
   {
+    name: "session tool event with call id",
+    channel: "session",
+    envelope: {
+      sessionId: "session-1",
+      type: "event",
+      payload: projectTranscriptEvent({
+        type: "tool_execution_end",
+        toolCallId: "call-1",
+        toolName: "bash",
+        result: { content: [{ type: "text", text: "ok" }] },
+        isError: false,
+      }),
+    },
+  },
+  {
     name: "session prompt request",
     channel: "session",
     envelope: {

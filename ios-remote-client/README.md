@@ -1,8 +1,37 @@
 # Pi Remote Client
 
-This directory contains the Swift package used by the Pi remote-control iOS client
-and a small iOS app target. Xcode.app is required for Apple SDKs, but these commands
-run entirely from a terminal; do not open Xcode.
+A native iOS app for watching and steering Pi sessions running on your laptop over
+`pi/remote/1` (see `REMOTE_CONTROL_PRD.md` and GitHub issue #16). Xcode.app is
+required for Apple SDKs, but these commands run entirely from a terminal; do not
+open Xcode.
+
+## Layout
+
+- `Sources/PiRemoteClient/` — UI-free Swift package: wire protocol, iroh transport,
+  `RemoteClient`, `SessionStore`, transcript projection (tool frames fold into one row
+  per `toolCallId`), and Markdown block splitting. Unit-tested on macOS.
+- `App/` — the SwiftUI app (iOS 26): pairing (QR scan or paste + six-digit code),
+  session list, chat view with Markdown, collapsible tool rows, send/steer and Stop,
+  Context Capsule sheet, and settings. `scripts/render-app-icon.swift` regenerates
+  the app icon.
+
+## Install on your iPhone
+
+No App Store or TestFlight is needed; this is a local development install.
+
+1. In Xcode Settings → Accounts, sign in with your Apple ID once. A free account
+   gives you a Personal Team; a paid Developer Program membership also works.
+2. Create `Local.xcconfig` from `Local.xcconfig.example` with your Team ID
+   (`defaults read com.apple.dt.Xcode IDEProvisioningTeamByIdentifier` prints it) and,
+   for a Personal Team, a bundle ID that is unique to you.
+3. On the iPhone, enable Settings → Privacy & Security → Developer Mode.
+4. Connect the phone by cable (or on the same network once paired) and run
+   `./scripts/install-device.sh <device-udid>`.
+5. The first launch may be blocked until you trust your developer certificate in
+   Settings → General → VPN & Device Management.
+
+Personal Team builds expire after 7 days; rerun `install-device.sh` to refresh (the
+app keeps its identity and pairing). Paid-account builds last a year.
 
 ## One-time setup
 
@@ -68,16 +97,13 @@ DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" \
 
 iOS has no Mac-style notarization step. App Store/TestFlight export is intentionally
 not part of this local device workflow; add that as a separate export pipeline when
-those distribution requirements exist. The local development target intentionally has
-no AppIcon asset; add one before distributing through TestFlight or the App Store.
-
+those distribution requirements exist. 
 See <https://scottwillsey.com/building-and-shipping-mac-and-ios-apps-without-ever-opening-xcode/> for more info.
 
 ## Dependency caveat
 
 The pinned `iroh-ffi` 1.0.0 prebuilt framework can emit Xcode 26 linker warnings
-because some object files report iOS/macOS 26.5 build floors while this package
-declares iOS 17.5 and macOS 14.5. The final app currently reports a 17.5 minimum,
-but test it on the minimum supported OS before shipping. The dependency-side fix is
+because some object files report iOS/macOS 26.5 build floors while the package
+declares iOS 17.5 / macOS 14.5 and the app targets iOS 26.0. The dependency-side fix is
 to rebuild the xcframework with the dependency's `cargo make swift-xcframework`
 task if older-OS support is required.
