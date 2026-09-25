@@ -8,6 +8,8 @@ export type TranscriptEntry = {
   toolName: string | null;
   status: string | null;
   truncatedOutput: boolean;
+  /** Present only on tool activity so clients can fold one call's frames into one row. */
+  toolCallId?: string;
 };
 
 export type TranscriptProjectionOptions = {
@@ -18,6 +20,7 @@ export type TranscriptMessage = {
   role: TranscriptRole;
   content?: unknown;
   toolName?: string;
+  toolCallId?: string;
 };
 
 export type TranscriptProjectionEvent =
@@ -65,16 +68,11 @@ export function projectTranscriptEvent(
     case "message_end":
       return projectMessageEvent(event.type, event.message, options);
     case "tool_execution_start":
-      return emptyEntry("toolResult", event.toolName, "running");
+      return withToolCallId(emptyEntry("toolResult", event.toolName, "running"), event.toolCallId);
     case "tool_execution_update":
-      return projectToolEvent(event.toolName, "running", event.partialResult, options);
+      return projectToolEvent(event, "running", event.partialResult, options);
     case "tool_execution_end":
-      return projectToolEvent(
-        event.toolName,
-        event.isError ? "error" : "completed",
-        event.result,
-        options,
-      );
+      return projectToolEvent(event, event.isError ? "error" : "completed", event.result, options);
     case "turn_start":
       return emptyEntry("system", null, "turn_started");
     case "turn_end":
@@ -103,30 +101,40 @@ function projectMessage(
 ): TranscriptEntry {
   const truncated = truncateText(extractText(message.content), outputLimit(options));
 
-  return {
-    role: message.role,
-    text: truncated.text,
-    toolName: message.toolName ?? null,
-    status,
-    truncatedOutput: truncated.truncated,
-  };
+  return withToolCallId(
+    {
+      role: message.role,
+      text: truncated.text,
+      toolName: message.toolName ?? null,
+      status,
+      truncatedOutput: truncated.truncated,
+    },
+    message.toolCallId,
+  );
 }
 
 function projectToolEvent(
-  toolName: string,
+  event: { toolCallId: string; toolName: string },
   status: string,
   result: unknown,
   options: TranscriptProjectionOptions,
 ): TranscriptEntry {
   const truncated = truncateText(extractToolText(result), outputLimit(options));
 
-  return {
-    role: "toolResult",
-    text: truncated.text,
-    toolName,
-    status,
-    truncatedOutput: truncated.truncated,
-  };
+  return withToolCallId(
+    {
+      role: "toolResult",
+      text: truncated.text,
+      toolName: event.toolName,
+      status,
+      truncatedOutput: truncated.truncated,
+    },
+    event.toolCallId,
+  );
+}
+
+function withToolCallId(entry: TranscriptEntry, toolCallId: string | undefined): TranscriptEntry {
+  return typeof toolCallId === "string" && toolCallId.length > 0 ? { ...entry, toolCallId } : entry;
 }
 
 function emptyEntry(

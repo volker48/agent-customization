@@ -25,6 +25,11 @@
     "frame": "{\"sessionId\":\"session-1\",\"type\":\"event\",\"payload\":{\"role\":\"assistant\",\"text\":\"line one\\nline two line three line four 😀\",\"toolName\":null,\"status\":\"streaming\",\"truncatedOutput\":false}}\n"
   },
   {
+    "name": "session tool event with call id",
+    "channel": "session",
+    "frame": "{\"sessionId\":\"session-1\",\"type\":\"event\",\"payload\":{\"role\":\"toolResult\",\"text\":\"ok\",\"toolName\":\"bash\",\"status\":\"completed\",\"truncatedOutput\":false,\"toolCallId\":\"call-1\"}}\n"
+  },
+  {
     "name": "session prompt request",
     "channel": "session",
     "frame": "{\"sessionId\":\"session-1\",\"type\":\"prompt\",\"payload\":{\"text\":\"continue from the phone\"}}\n"

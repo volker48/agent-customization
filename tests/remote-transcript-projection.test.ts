@@ -47,6 +47,7 @@ describe("remote transcript projection", () => {
       toolName: "bash",
       status: "completed",
       truncatedOutput: true,
+      toolCallId: "call-1",
     });
   });
 
@@ -75,6 +76,7 @@ describe("remote transcript projection", () => {
       toolName: "bash",
       status: "completed",
       truncatedOutput: true,
+      toolCallId: "call-1",
     });
   });
 
@@ -96,6 +98,28 @@ describe("remote transcript projection", () => {
         partialResult: [{ type: "text", text: "file contents" }],
       }),
     ).toMatchObject({ text: "file contents", toolName: "read", status: "running" });
+  });
+
+  it("tags every frame of one tool call with its call id", () => {
+    const frames = projectTranscriptEvents([
+      { type: "tool_execution_start", toolCallId: "call-7", toolName: "bash" },
+      { type: "tool_execution_update", toolCallId: "call-7", toolName: "bash", partialResult: "a" },
+      { type: "tool_execution_end", toolCallId: "call-7", toolName: "bash", result: "ab" },
+      {
+        type: "message_end",
+        message: { role: "toolResult", toolCallId: "call-7", toolName: "bash", content: "ab" },
+      },
+    ]);
+
+    expect(frames.map((frame) => frame.toolCallId)).toEqual([
+      "call-7",
+      "call-7",
+      "call-7",
+      "call-7",
+    ]);
+    expect(projectTranscriptMessage({ role: "assistant", content: "hi" })).not.toHaveProperty(
+      "toolCallId",
+    );
   });
 
   it("projects turn and agent lifecycle events without message text", () => {
