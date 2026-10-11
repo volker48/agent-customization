@@ -23,6 +23,7 @@ Preconditions:
 
 - Notes is healthy at `http://127.0.0.1:4173`.
 - The disposable data directory contains `Quarterly plan` with body text `Draft budget`.
+- `Quarterly plan` is the only note whose title or body contains `quarterly`.
 - `control-notes doctor` reports the expected URL and data directory.
 
 - **Toolbar entry.** Choose the `Search` button. Run `control-notes browser click --role button --name "Search"`. A dialog named `Search notes` appears with focus in its searchbox.

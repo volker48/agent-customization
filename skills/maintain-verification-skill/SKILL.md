@@ -26,7 +26,7 @@ Only edit the verification skill's own directory (its SKILL.md, features/, and a
 
 ## Pass
 
-0. **Locate the target.** Find the verification skill to maintain: the project-local skill whose body has launch/drive sections and a feature map. Look in `.agents/skills/verify-*/`, `.claude/skills/verify-*/`, `.pi/skills/verify-*/`, `.codex/skills/verify-*/`, and `.cursor/skills/verify-*/`; resolve symlinks so one skill reached through two directories counts once. Several distinct candidates → ask which one; none → stop and point at the `create-verification-skill` skill instead of inventing a target.
+0. **Locate the target.** Find the verification skill to maintain: the project-local skill whose body has launch/drive sections and a feature map. Start with `verify-*` directories under `.agents/skills/`, `.claude/skills/`, `.pi/skills/`, `.codex/skills/`, and `.cursor/skills/`, then any other skill directory this repo uses; judge candidates by that content, not by name. Resolve symlinks so one skill reached through two directories counts once. Several distinct candidates → ask which one; none → stop and point at the `create-verification-skill` skill instead of inventing a target.
 
 1. **Index hygiene.** Read the feature map README and glob its sibling files. Fix missing, extra, duplicate, or dead entries. Check that every harness-facing entry point (e.g. the `.claude/skills/` symlink to the `.agents/skills/` copy) still resolves to the same `SKILL.md`. Lightweight; no generated inventory.
 

@@ -32,4 +32,4 @@ ln -s ../../.agents/skills/verify-<app> .claude/skills/verify-<app>
 - Keep generated skills to `name` and `description`: those are the fields every harness is guaranteed to accept, so the skill stays valid everywhere.
 - Helpers run through the shell. Every harness has a shell tool; not every harness has a browser tool, an MCP server, or subagents.
 - Subagents are optional. When a harness offers them (Claude Code's Agent tool, Codex subagents, Pi's subagent extension), use them for parallel read-only work; otherwise do the same work sequentially and keep notes compact.
-- Paths in skill bodies are relative to the repo root. Skills are loaded from different directories per harness, but commands always run from the project.
+- Paths in skill bodies are relative to the repo root. Skills are loaded from different directories per harness, and a session may start in a nested directory, so generated skills tell the agent to run helpers from the repo root (e.g. `cd "$(git rev-parse --show-toplevel)"` first).

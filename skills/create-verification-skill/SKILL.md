@@ -42,7 +42,7 @@ Write `verify-<app>/SKILL.md` with these sections, each grounded in what the int
 - **Drive:** the harness recipe with real selectors/commands from this repo, not examples. Prefer stable handles (ARIA labels, data attributes, prompt strings, route paths) over coordinates and tab order.
 - **Evidence:** what to capture for a proof and where it goes. State the proof standards: exercise the real user path, not internal setters or test-only endpoints; capture the action and the resulting state, not just the final screen; verify side effects (files written, rows inserted, messages sent) alongside what's visible; mocks only where a production boundary already isolates the external system. When the safe path is a dry-run or test mode, verify what it actually skips by observing (files, network, git refs) rather than trusting its name: some dry-runs still touch the network or open a browser.
 - **Cleanup:** how to tear down instances the run created. Never kill by process name; kill what you started (record PIDs, tmux session names, container IDs). Cleanup removes instances and scratch state, never the evidence: proof artifacts survive the teardown, in a location the skill names.
-- **Helpers:** any script the skill ships is executable and its invocation is shown in the skill body, using paths relative to the repo root so every harness resolves them the same way. A helper the reader has to reverse-engineer is not a helper.
+- **Helpers:** any script the skill ships is executable and its invocation is shown in the skill body, using paths relative to the repo root (and a first step that changes to the repo root) so every harness resolves them the same way. A helper the reader has to reverse-engineer is not a helper.
 
 ## 3. Seed the feature map
 

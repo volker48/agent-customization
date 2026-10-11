@@ -280,14 +280,14 @@ per feature, one live pass driving every feature, and at most one PR of proven c
 Both work from Claude Code (`/create-verification-skill`), Codex (`$create-verification-skill`),
 and Pi (`/skill:create-verification-skill`), and are explicit-only: model invocation is disabled
 via `disable-model-invocation` (Claude Code, Pi) and `agents/openai.yaml` (Codex). Generated
-skills live in `.agents/skills/verify-<app>/` with a `.claude/skills/` symlink, and drive the
-app through repo-owned scripts rather than any one harness's tools.
+skills default to `.agents/skills/verify-<app>/` with a `.claude/skills/` symlink (an existing
+repo convention wins), and drive the app through repo-owned scripts rather than any one harness's tools.
 
 Credit: adapted from Lauren Tan's [`create-verification-skill`][pstack-create] and
 [`maintain-verification-skill`][pstack-maintain] in the [pstack][pstack] plugin for Cursor
 (MIT; upstream license kept as `LICENSE.upstream` in each skill). The feature-map example
-under `references/` is carried over, with one fix to the search
-example's proof step.
+under `references/` is carried over, with small fixes to its fixtures
+and proof steps.
 
 [pstack]: https://github.com/cursor/plugins/tree/4bf3e083c6dec126e254f96181b84a105b6e3e70/pstack
 [pstack-create]: https://github.com/cursor/plugins/blob/4bf3e083c6dec126e254f96181b84a105b6e3e70/pstack/skills/create-verification-skill/SKILL.md
