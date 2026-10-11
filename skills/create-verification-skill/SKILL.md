@@ -32,7 +32,7 @@ If the checkout doesn't build or start as-is, fix that first (or report it preci
 **Portability.** The generated skill must work from any harness with a shell:
 
 - Drive the app through repo-owned, executable helper scripts (shell, Node, Python — whatever the repo already uses), not through harness-specific tools such as a particular browser MCP server, Claude-only slash commands, or a Pi extension. A harness tool may be mentioned as an optional shortcut, never as the only path.
-- Frontmatter uses only the portable Agent Skills fields: `name: verify-<app>` and a `description` that names the app, the surface, and when to reach for it. Without frontmatter the skill never registers. Leave model invocation enabled so agents can reach for it mid-task.
+- The generated skill's frontmatter uses only the portable Agent Skills fields: `name: verify-<app>` and a `description` that names the app, the surface, and when to reach for it. Without frontmatter the skill never registers. Leave model invocation enabled so agents can reach for it mid-task.
 - Refer to other skills by name ("the `maintain-verification-skill` skill"), not by one harness's invocation syntax.
 
 Write `verify-<app>/SKILL.md` with these sections, each grounded in what the interview actually found (no placeholders left):

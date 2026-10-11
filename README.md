@@ -286,7 +286,8 @@ app through repo-owned scripts rather than any one harness's tools.
 Credit: adapted from Lauren Tan's [`create-verification-skill`][pstack-create] and
 [`maintain-verification-skill`][pstack-maintain] in the [pstack][pstack] plugin for Cursor
 (MIT; upstream license kept as `LICENSE.upstream` in each skill). The feature-map example
-under `references/` is carried over unchanged.
+under `references/` is carried over, with one fix to the search
+example's proof step.
 
 [pstack]: https://github.com/cursor/plugins/tree/4bf3e083c6dec126e254f96181b84a105b6e3e70/pstack
 [pstack-create]: https://github.com/cursor/plugins/blob/4bf3e083c6dec126e254f96181b84a105b6e3e70/pstack/skills/create-verification-skill/SKILL.md

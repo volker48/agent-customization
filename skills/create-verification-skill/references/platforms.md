@@ -29,7 +29,7 @@ ln -s ../../.agents/skills/verify-<app> .claude/skills/verify-<app>
 
 ## Portability rules
 
-- Unknown frontmatter keys are ignored by all three harnesses, but keep generated skills to `name` and `description` so they stay valid everywhere.
+- Keep generated skills to `name` and `description`: those are the fields every harness is guaranteed to accept, so the skill stays valid everywhere.
 - Helpers run through the shell. Every harness has a shell tool; not every harness has a browser tool, an MCP server, or subagents.
 - Subagents are optional. When a harness offers them (Claude Code's Agent tool, Codex subagents, Pi's subagent extension), use them for parallel read-only work; otherwise do the same work sequentially and keep notes compact.
 - Paths in skill bodies are relative to the repo root. Skills are loaded from different directories per harness, but commands always run from the project.
