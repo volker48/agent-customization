@@ -10,3 +10,6 @@ ios-remote-client/Local.xcconfig
 
 target/
 /build/
+
+# Types Claude Code writes beside a mod it loads; build-specific.
+plugins/*/.claude-plugin/types/

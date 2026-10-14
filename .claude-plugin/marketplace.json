@@ -1,0 +1,14 @@
+{
+  "name": "agent-customization",
+  "description": "Claude Code plugins from agent-customization.",
+  "owner": {
+    "name": "Marcus McCurdy"
+  },
+  "plugins": [
+    {
+      "name": "mermaid",
+      "source": "./plugins/mermaid",
+      "description": "Draws mermaid code blocks in assistant replies as images in the terminal, rendered by merman-cli."
+    }
+  ]
+}
