@@ -95,7 +95,15 @@ async function mermaidTheme($: EngineInterface): Promise<string> {
 // Shared by every redraw of a diagram (streaming, scroll, resize) for this load;
 // the PNG cache on disk carries renders across reloads and sessions.
 const renders = new Map<string, Promise<Diagram | undefined>>();
+const toasted = new Set<string>();
 let cacheDir: Promise<string> | undefined;
+
+/** Toasts `text` once per load, so a failure retried on every redraw says so once. */
+function toastOnce($: EngineInterface, text: string): void {
+  if (toasted.has(text)) return;
+  toasted.add(text);
+  $.ui.toast(text);
+}
 
 async function makeCacheDir($: EngineInterface): Promise<string> {
   const home = await $.env.get("HOME");
@@ -106,27 +114,48 @@ async function makeCacheDir($: EngineInterface): Promise<string> {
   return dir;
 }
 
-/** Renders `source` to a cached PNG, or toasts why not and answers undefined. */
+/** Reads a PNG's size, rejecting when the file is missing or not a whole PNG header. */
+async function readDiagram($: EngineInterface, path: string): Promise<Diagram> {
+  const png = await $.fs.read(path, { as: "bytes" });
+  return { path, ...pngSize(png.base64) };
+}
+
+/**
+ * Renders `source` into the PNG cache at `<hash>.png`.
+ *
+ * merman-cli writes a temporary file that is renamed into place once it reads
+ * back as a PNG, so the cached path never holds a partial render, even with
+ * another session rendering the same diagram. Answers undefined when
+ * merman-cli rejects the source; rejects on failures worth retrying.
+ */
 async function renderPng($: EngineInterface, args: string[], source: string, hash: string) {
+  cacheDir ??= makeCacheDir($).catch((error: unknown) => {
+    cacheDir = undefined;
+    throw error;
+  });
+  const dir = await cacheDir;
+  const path = `${dir}/${hash}.png`;
+  const cached = await readDiagram($, path).catch(() => undefined);
+  if (cached !== undefined) return cached;
+
+  // merman-cli picks its encoder from the extension, so the name ends in .png.
+  const temporary = `${dir}/${hash}.${crypto.randomUUID()}.tmp.png`;
   try {
-    cacheDir ??= makeCacheDir($);
-    const path = `${await cacheDir}/${hash}.png`;
-    if (!(await $.fs.exists(path))) {
-      const ran = await $.process.run(["merman-cli", ...args, "-o", path, "-"], {
-        stdin: source,
-        timeoutMs: RENDER_TIMEOUT_MS,
-      });
-      if (ran.exitCode !== 0) {
-        const reason = ran.stderr.trim().split("\n")[0] || `exit ${ran.exitCode}`;
-        $.ui.toast(`mermaid: merman-cli could not render a diagram: ${reason}`);
-        return undefined;
-      }
+    const ran = await $.process.run(["merman-cli", ...args, "-o", temporary, "-"], {
+      stdin: source,
+      timeoutMs: RENDER_TIMEOUT_MS,
+    });
+    if (ran.exitCode !== 0) {
+      const reason = ran.stderr.trim().split("\n")[0] || `exit ${ran.exitCode}`;
+      toastOnce($, `mermaid: merman-cli could not render a diagram: ${reason}`);
+      return undefined;
     }
-    const png = await $.fs.read(path, { as: "bytes" });
-    return { path, ...pngSize(png.base64) };
-  } catch (error) {
-    $.ui.toast(`mermaid: ${error instanceof Error ? error.message : String(error)}`);
-    return undefined;
+    const diagram = await readDiagram($, temporary);
+    const moved = await $.process.run(["mv", "-f", temporary, path]);
+    if (moved.exitCode !== 0) throw new Error(`mv to ${path}: ${moved.stderr.trim()}`);
+    return { ...diagram, path };
+  } finally {
+    await $.process.run(["rm", "-f", temporary]);
   }
 }
 
@@ -135,7 +164,15 @@ async function render($: EngineInterface, source: string, theme: string) {
   const hash = await sha256(JSON.stringify([args, source]));
   let pending = renders.get(hash);
   if (pending === undefined) {
-    pending = renderPng($, args, source, hash);
+    // A parse error is kept: the same source fails the same way. Anything else
+    // (merman-cli missing, a timeout, the cache directory) is retried next draw.
+    pending = renderPng($, args, source, hash).catch((error: unknown) => {
+      renders.delete(hash);
+      // Errors from `$` calls already lead with the plugin's name.
+      const message = error instanceof Error ? error.message : String(error);
+      toastOnce($, message.startsWith("mermaid: ") ? message : `mermaid: ${message}`);
+      return undefined;
+    });
     renders.set(hash, pending);
   }
   return pending;
