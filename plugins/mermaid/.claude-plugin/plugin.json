@@ -1,0 +1,8 @@
+{
+  "name": "mermaid",
+  "version": "0.1.0",
+  "description": "Draws mermaid code blocks in assistant replies as images in the terminal, rendered by merman-cli.",
+  "author": {
+    "name": "Marcus McCurdy"
+  }
+}

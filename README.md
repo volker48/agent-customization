@@ -9,6 +9,9 @@ claude-hooks/          # Claude Code hooks (Python)
   hooks.json           # Hook event → command mappings (merge into ~/.claude/settings.json)
   play-sound.py        # Sound player invoked by hooks
 
+plugins/               # Claude Code plugins
+  mermaid/             # Draws mermaid blocks in replies as terminal images (merman-cli)
+
 opencode-plugins/      # OpenCode plugins (TypeScript)
   sound-notifications.ts
 
