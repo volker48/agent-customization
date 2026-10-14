@@ -28,14 +28,21 @@ image's alt text.
 
 ## Install
 
-Load it from this folder:
+Type this at the prompt of a Claude Code session:
+
+```text
+/plugin install mermaid --marketplace volker48/agent-customization
+```
+
+Answer `y` to add the marketplace, then pick a scope (user scope loads it in
+every session). Get later changes with `claude plugin update mermaid` and
+`/reload-plugins`.
+
+To run it from a working copy while changing it:
 
 ```sh
 claude --plugin-dir /path/to/agent-customization/plugins/mermaid
 ```
-
-To load it in every session, add the folder to `CLAUDE_CODE_PLUGIN_DIRS` in
-the `env` block of `~/.claude/settings.json`.
 
 ## Development
 
