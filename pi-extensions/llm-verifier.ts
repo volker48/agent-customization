@@ -5,6 +5,7 @@ import {
   requirePiModelRegistry,
   resolveVerifierModel,
 } from "./llm-verifier/pi/model-client.js";
+import { handleLavRunCommand } from "./llm-verifier/pi/run-command.js";
 
 const DEFAULT_MODEL_ENV = "PI_LAV_VERIFIER_MODEL";
 
@@ -15,7 +16,8 @@ export default function llmVerifierExtension(pi: ExtensionAPI): void {
       const ref = process.env[DEFAULT_MODEL_ENV]?.trim();
       if (!ref) {
         ctx.ui.notify(
-          `LLM-as-a-Verifier core is loaded. Set ${DEFAULT_MODEL_ENV}=provider/model to run provider preflight.`,
+          `LLM-as-a-Verifier is loaded. Set ${DEFAULT_MODEL_ENV}=provider/model ` +
+            "for provider preflight and multi-candidate /lav-run (or pass --verifier).",
           "info",
         );
         return;
@@ -35,5 +37,10 @@ export default function llmVerifierExtension(pi: ExtensionAPI): void {
         ctx.ui.notify(`Verifier preflight failed: ${message}`, "error");
       }
     },
+  });
+
+  pi.registerCommand("lav-run", {
+    description: "Run isolated coding candidates, verify frozen evidence, and apply the winner",
+    handler: handleLavRunCommand,
   });
 }
