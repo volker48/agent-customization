@@ -24,19 +24,6 @@ _Avoid_: extension, hook
 A Claude Code customization unit — an event→shell-command mapping declared in `settings.json` that fires on harness events (`SessionStart`, `PreToolUse`, etc.).
 _Avoid_: extension, plugin
 
-## RTK
-
-**RTK** (Rust Token Killer):
-An external token-optimizing CLI proxy binary that produces terser equivalents of shell commands to cut token cost. Invoked as `rtk rewrite <cmd>`.
-_Avoid_: rust type kit (a different, unrelated `rtk`)
-
-**Intercept**:
-The canonical verb for what an RTK integration does — it catches a `bash` command before execution and swaps in RTK's terser version. Reserve "rewrite" for the literal `rtk rewrite` subcommand, not for the integration's behavior.
-_Avoid_: rewrite (as a verb for the integration), hook, proxy
-
-**RTK integration**:
-The per-harness glue that intercepts bash commands and routes them through RTK — a Pi extension (`pi-extensions/rtk.ts`) and a parallel Claude Code hook.
-
 ## Claude review
 
 **Claude review**:

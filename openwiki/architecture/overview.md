@@ -14,7 +14,7 @@ This repository is a customization bundle for multiple AI coding-agent harnesses
 
 | Path | Purpose |
 | --- | --- |
-| `pi-extensions/` | Pi extensions and shared TypeScript cores. Main domains: Fusion, remote control, web tools, Claude review, RTK, autoname, learn, sound notifications. |
+| `pi-extensions/` | Pi extensions and shared TypeScript cores. Main domains: Fusion, remote control, web tools, Claude review, autoname, learn, sound notifications. |
 | `pi-extensions/lib/` | Shared deep modules such as Exa search and webfetch cores. Extension files own registration and schemas; cores own reusable behavior. |
 | `pi-subagents/` | Repo-owned overrides for builtin Pi subagent role prompts, installed as user-scope symlinks. |
 | `opencode-plugins/` | OpenCode plugin implementations, currently including sound notifications. |
@@ -65,6 +65,5 @@ Most behavior is covered by targeted Vitest files:
 - Webfetch: `tests/webfetch.test.ts`, `tests/webfetch.baseline.test.ts`.
 - Remote control: `tests/remote-*.test.ts`, `tests/remote.e2e.test.ts`, `tests/ios-remote-fixtures.test.ts`.
 - Claude review and companion workflows: `tests/claude-review.test.ts`, `tests/claude-pi-*.test.ts`.
-- RTK: `tests/rtk.test.ts`, `tests/rtk.e2e.test.ts`.
 
 When changing a domain, start with the page for that domain, then inspect the source and matching tests before editing.

@@ -32,13 +32,9 @@ Targeted scripts:
 
 ```bash
 pnpm baseline:webfetch # WEBFETCH_BASELINE=1 vitest run tests/webfetch.baseline.test.ts
-pnpm test:rtk
-pnpm test:rtk:e2e     # RTK_E2E=1
 pnpm test:remote:e2e  # REMOTE_E2E=1
 pnpm test:fusion
 pnpm test:fusion:e2e  # FUSION_E2E=1
-pnpm verify:rtk
-pnpm validate:rtk
 ```
 
 Run the narrowest relevant tests while iterating, then broaden to `pnpm typecheck` and `pnpm test` for cross-domain changes.
@@ -60,7 +56,6 @@ Run the narrowest relevant tests while iterating, then broaden to `pnpm typechec
 | Remote control | `tests/remote-authorization.test.ts`, `tests/remote-cli.test.ts`, `tests/remote-daemon*.test.ts`, `tests/remote-extension.test.ts`, `tests/remote-ipc.test.ts`, `tests/remote-iroh-transport.test.ts`, `tests/remote-protocol.test.ts`, `tests/remote-transcript-projection.test.ts`, `tests/remote.e2e.test.ts`, `tests/ios-remote-fixtures.test.ts` |
 | Claude review | `tests/claude-review.test.ts`, `tests/claude-pi-review.test.ts` |
 | Claude/Pi companion | `tests/claude-pi-background-cancel.test.ts`, `tests/claude-pi-continue.test.ts`, `tests/claude-pi-implement.test.ts`, `tests/claude-pi-jobs.test.ts`, `tests/claude-pi-setup.test.ts` |
-| RTK | `tests/rtk.test.ts`, `tests/rtk.e2e.test.ts` |
 
 ## Configuration and local state
 
@@ -70,7 +65,6 @@ Do not read or document live secrets. Source-level config names are safe to ment
 - `GITHUB_TOKEN` or `GH_TOKEN` for authenticated GitHub API calls inside webfetch GitHub orientation.
 - `WEBFETCH_ALLOW_PRIVATE_HOSTS` to override private-host protection.
 - `PI_FUSION_CONFIG` for Fusion config path.
-- `PI_RTK_BIN`, `PI_RTK_DEBUG` for RTK.
 - `PI_AUTONAME_MODEL`, `PI_AUTONAME_FALLBACK_MODEL`, `PI_AUTONAME_PROMPT_FILE` for autoname.
 - `PI_CLAUDE_REVIEW_BIN` for Claude review.
 - `PI_COMPANION_DATA_DIR` for Claude/Pi companion state.
