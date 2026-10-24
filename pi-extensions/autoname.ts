@@ -458,7 +458,8 @@ function generateNameWithLoader(
   modelRefs: ModelRef[],
   ctx: ExtensionCommandContext,
 ): Promise<NamingResult> {
-  if (!ctx.hasUI) {
+  // RPC mode has dialog UI but no terminal, so custom() resolves undefined there.
+  if (ctx.mode !== "tui") {
     return generateName(prompt, transcript, modelRefs, ctx);
   }
 
