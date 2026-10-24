@@ -11,13 +11,11 @@ per-model thinking, and deadline. Config also supports `PI_CODING_AGENT_DIR`,
 ## Requirements
 
 - Node 22.18+ (native TypeScript execution).
-- Pi on PATH, with RPC `agent_settled` support (verified with installed Pi 0.85.0).
+- Pi on PATH, with RPC `agent_settled` support (verified with installed Pi 1.4.0).
 - Models and authentication configured in Pi. Use `PI_REVIEW_BIN` for another executable.
 
 There are no runtime dependencies to install. The runner uses Pi's documented RPC interface
 because it reuses the installed CLI without coupling the plugin to a separate SDK install.
-The local SDK documentation was the starting point; the installed SDK import currently fails
-on a missing `@earendil-works/pi-server` dependency, whereas the bundled CLI works.
 
 ## Direct use
 
