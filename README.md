@@ -19,7 +19,6 @@ pi-extensions/         # Pi agent extensions (TypeScript)
   sound-notifications.ts
   exa-search.ts        # Exa web search tool
   webfetch.ts          # Generic web fetch tool
-  rtk.ts               # RTK bash rewrite hook
   prolong.ts           # PRO-LONG active-branch programmatic memory
   fusion/              # Multi-model Fusion panel and judge command
 
@@ -245,10 +244,6 @@ nonce recovery, and cleanup:
 pnpm verify:prolong -- --model provider/model --keep-session
 ```
 
-### Pi: RTK (`pi-extensions/rtk.ts`)
-
-Intercepts `bash` tool calls and delegates command rewriting to `rtk rewrite <command>`. Only rewrites when RTK returns a different non-empty command. Supports `PI_RTK_BIN` or Pi's `--rtk-bin` flag for binary overrides.
-
 ### Pi: Fusion (`pi-extensions/fusion/`)
 
 Adds a `/fusion` command that runs a configured multi-model panel, judges the panel
@@ -310,9 +305,6 @@ pnpm format        # Format with oxfmt
 pnpm test          # Run tests with vitest
 pnpm test:prolong  # Focused PRO-LONG storage and extension tests
 pnpm verify:prolong -- --benchmark-only # Model-free active-branch benchmark
-pnpm test:rtk      # Fast RTK extension regression tests
-pnpm test:rtk:e2e  # Opt-in real RTK integration tests
-pnpm verify:rtk    # Standalone Pi CLI verification using --session and --extension
 ```
 
 Requires Node.js ≥ 22.

@@ -27,19 +27,6 @@ Key behavior:
 
 Relevant tests: `tests/claude-review.test.ts`.
 
-### RTK integration
-
-`pi-extensions/rtk.ts` intercepts Pi `bash` tool calls and invokes `rtk rewrite <command>` before execution. It stores the original/rewritten command by tool call id so the later tool result can include rewrite metadata.
-
-Configuration:
-
-- Flag: `--rtk-bin` via `pi.registerFlag`.
-- Env fallback: `PI_RTK_BIN`.
-- Debug env: `PI_RTK_DEBUG`.
-- Rewrite timeout: 2 seconds.
-
-Relevant tests: `tests/rtk.test.ts`, `tests/rtk.e2e.test.ts`, and `scripts/verify-rtk-extension.mjs`.
-
 ### Autoname
 
 `pi-extensions/autoname.ts` names Pi sessions for later retrieval. It waits for the session to be idle, builds a bounded structured brief from the task, compaction/branch summaries, selected resource metadata, recent conversation, and the latest assistant outcome, then calls a configured model and falls back to another model if needed. Resource evidence is intentionally narrow: file paths and Markdown headings, sanitized web URLs and headings, and parsed titles from `gh issue/pr view --json`; arbitrary tool output is not copied into the naming brief. Leading expanded skill blocks are removed from user task text, and the brief is sent as JSON data labeled untrusted session history rather than as prompt markup.

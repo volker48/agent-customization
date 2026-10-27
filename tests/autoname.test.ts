@@ -25,6 +25,7 @@ type RegisteredCommand = {
 type MockCommandContext = {
   cwd: string;
   hasUI?: boolean;
+  mode?: "tui" | "rpc" | "json" | "print";
   waitForIdle: () => Promise<void>;
   sessionManager: {
     getBranch: () => unknown[];
@@ -597,6 +598,7 @@ describe("autoname extension", () => {
     const custom = customMock as NonNullable<MockCommandContext["ui"]["custom"]>;
     const context = createContext({
       hasUI: true,
+      mode: "tui",
       ui: {
         notify: vi.fn(),
         custom,
@@ -608,6 +610,26 @@ describe("autoname extension", () => {
 
     expect(customMock).toHaveBeenCalledOnce();
     expect(getSessionName()).toBe("Loader Visible Autoname");
+  });
+
+  it("names the session in RPC mode, where custom components are unavailable", async () => {
+    vi.mocked(complete).mockResolvedValue(textResponse("Rpc Mode Autoname") as never);
+    const { pi, getCommand, getSessionName } = createMockPi();
+    const customMock = vi.fn(async () => undefined);
+    const context = createContext({
+      hasUI: true,
+      mode: "rpc",
+      ui: {
+        notify: vi.fn(),
+        custom: customMock as NonNullable<MockCommandContext["ui"]["custom"]>,
+      },
+    });
+
+    autonameExtension(pi as never);
+    await getCommand().handler("", context);
+
+    expect(getSessionName()).toBe("Rpc Mode Autoname");
+    expect(context.ui.notify).toHaveBeenCalledWith("Session named: Rpc Mode Autoname", "info");
   });
 
   it("reports provider errors instead of treating them as empty names", async () => {

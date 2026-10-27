@@ -21,7 +21,7 @@ Recent git history includes webfetch token efficiency and repository orientation
 - [Fusion workflow](fusion/workflow.md) — `/fusion` panel/judge/calling-model execution.
 - [Fusion inner tools](fusion/inner-tools.md) — why Fusion exposes only restricted `web_search` and `webfetch` to inner models.
 - [Remote control architecture](remote-control/architecture.md) — `/remote`, daemon, iroh transport, pairing, IPC, and transcript projection.
-- [Extensions overview](extensions/overview.md) — non-Fusion Pi extensions, Claude review, RTK, autoname, learn, sound hooks/plugins, skills, and prompts.
+- [Extensions overview](extensions/overview.md) — non-Fusion Pi extensions, Claude review, autoname, learn, sound hooks/plugins, skills, and prompts.
 - [Development operations](operations/development.md) — setup, scripts, tests, and change guidance.
 - [Architecture decisions](operations/decisions.md) — ADR map, the `pr-watch` → `babysit` ownership boundary, and decisions future agents should preserve.
 
@@ -43,8 +43,6 @@ pnpm test:unit
 pnpm test:fusion
 pnpm test:fusion:e2e      # requires FUSION_E2E=1 via script
 pnpm test:remote:e2e      # requires REMOTE_E2E=1 via script
-pnpm test:rtk
-pnpm verify:rtk
 pnpm baseline:webfetch
 ```
 
