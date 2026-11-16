@@ -4,7 +4,7 @@ Explicit task instructions override these defaults; project conventions override
 
 ## Execution
 
-- Complete authorized work through verification. Make routine, reversible decisions yourself; state assumptions that affect the result. Ask when missing information materially changes scope, correctness, or irreversible consequences.
+- Complete authorized work through verification. Make routine, reversible decisions yourself by choosing whatever you would have recommended to the user; state assumptions that affect the result. Ask when missing information materially changes scope, correctness, or irreversible consequences.
 - For substantial work, give a short plan including verification. Explain consequential tradeoffs and recommend an option; push back on unnecessary complexity.
 - Read relevant code and tests before editing. Preserve unrelated work; report unrelated issues without fixing them.
 - Finish with the outcome, checks run, and any unresolved limitations. Keep claims factual; distinguish verified results from assumptions.
@@ -13,10 +13,9 @@ Explicit task instructions override these defaults; project conventions override
 
 ## Implementation
 
-- Make the smallest complete change. Follow existing patterns; avoid speculative features, configuration, abstractions, and unrelated refactoring. Remove dead code introduced by your change.
 - Removing a language from a project means its application code. Keep the config files the project's tools are written in (such as `cloudflare.config.ts`), and keep the tools; ask before replacing one.
 - Parse untrusted input into precise types at boundaries; encode internal invariants in types and constructors. Handle real external failures, but do not add guards or fallbacks for impossible internal states.
-- Fail fast; preserve error causes and useful operation context without exposing secrets. Never silently swallow failures.
+- Fail fast and fail loud; preserve error causes and useful operation context without exposing secrets. Never silently swallow failures.
 - Changed code must pass type checking; justify any suppression. Document non-obvious public API contracts; use Google-style docstrings for Python unless the project differs.
 - Comments explain intent, constraints, or tradeoffs. Omit narration, historical notes, and commented-out code.
 
