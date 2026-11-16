@@ -155,6 +155,11 @@ private struct PairingCodeView: View {
           .spring(duration: 0.12)
         }
 
+      Button("Pair") { Task { await pair() } }
+        .buttonStyle(.glassProminent)
+        .controlSize(.large)
+        .disabled(digits.count != 6 || isPairing)
+
       if isPairing {
         ProgressView("Pairing…")
       } else if let errorMessage {
@@ -179,6 +184,7 @@ private struct PairingCodeView: View {
   private var codeBoxes: some View {
     ZStack {
       TextField("", text: $digits)
+        .accessibilityLabel("Pairing code")
         .keyboardType(.numberPad)
         .textContentType(.oneTimeCode)
         .focused($isFocused)
@@ -188,10 +194,9 @@ private struct PairingCodeView: View {
           let filtered = String(newValue.filter(\.isNumber).prefix(6))
           if filtered != newValue {
             digits = filtered
-          } else if filtered.count == 6 {
-            Task { await pair() }
           }
         }
+        .onSubmit { Task { await pair() } }
 
       HStack(spacing: 8) {
         ForEach(0..<6, id: \.self) { index in
@@ -202,6 +207,7 @@ private struct PairingCodeView: View {
         }
       }
       .allowsHitTesting(false)
+      .accessibilityHidden(true)
     }
     .contentShape(.rect)
     .onTapGesture { isFocused = true }
@@ -221,7 +227,7 @@ private struct PairingCodeView: View {
   }
 
   private func pair() async {
-    guard !isPairing else { return }
+    guard digits.count == 6, !isPairing else { return }
     isPairing = true
     errorMessage = nil
     defer { isPairing = false }

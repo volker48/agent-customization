@@ -8,5 +8,5 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["opencode-plugins/**/*.ts", "pi-extensions/**/*.ts", "tests/**/*.ts"]
+  "include": ["opencode-plugins/**/*.ts", "pi-extensions/**/*.ts", "tests/**/*.ts", "e2e.config.ts"]
 }

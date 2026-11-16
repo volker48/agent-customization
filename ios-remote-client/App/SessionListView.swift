@@ -24,16 +24,15 @@ struct SessionListView: View {
           }
         }
         .refreshable { await store.refresh() }
-        .task(id: isPolling) {
-          // `.task(id:)` restarts when polling toggles; the closure re-checks so a
-          // navigation push that races the restart still stops the loop.
-          guard isPolling else { return }
-          if !hasLoaded {
-            await store.refresh()
-            hasLoaded = true
-          }
-          await store.refreshSessionListUntilCancelled { isPolling }
-        }
+    }
+    // Loading, empty, and list content can replace one another without cancelling polling.
+    .task(id: isPolling) {
+      guard isPolling else { return }
+      if !hasLoaded {
+        await store.refresh()
+        hasLoaded = true
+      }
+      await store.refreshSessionListUntilCancelled { isPolling }
     }
     .sheet(isPresented: $showingSettings) {
       SettingsView(model: model, client: client)

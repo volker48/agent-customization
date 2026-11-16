@@ -38,6 +38,7 @@ function createPi() {
         commands.set(name, command);
       }),
       getSessionName: vi.fn(() => "Remote E2E"),
+      getThinkingLevel: vi.fn(() => "medium"),
       sendUserMessage: vi.fn(),
     },
     command(name: string) {
@@ -52,6 +53,8 @@ function createContext() {
   return {
     cwd: "/tmp/remote-e2e",
     abort: vi.fn(),
+    scopedModels: [],
+    modelRegistry: { getAvailable: vi.fn(() => []) },
     ui: { notify: vi.fn() },
     sessionManager: {
       getSessionId: vi.fn(() => "session-1"),
@@ -118,6 +121,11 @@ describeIf("remote extension e2e", () => {
     await expect(attach.readUntil((frame) => frame.type === "attach")).resolves.toMatchObject({
       payload: { attached: true, sessionId: "session-1" },
     });
+    await expect(
+      attach.readUntil((frame) => hasStatus(frame, "session_state")),
+    ).resolves.toMatchObject({
+      payload: { sessionState: { model: null, thinkingLevel: "medium", models: [] } },
+    });
     await expect(attach.readUntil((frame) => hasText(frame, "hello"))).resolves.toBeDefined();
     await expect(attach.readUntil((frame) => hasText(frame, "hi"))).resolves.toBeDefined();
 
@@ -131,7 +139,10 @@ describeIf("remote extension e2e", () => {
       { sessionId: "session-1", type: "prompt", payload: { text: "keep going" } },
     ]);
     await waitFor(() =>
-      expect(pi.sendUserMessage).toHaveBeenCalledWith("keep going", { deliverAs: "steer" }),
+      expect(pi.sendUserMessage).toHaveBeenCalledWith("keep going", {
+        deliverAs: "steer",
+        expandPromptTemplates: true,
+      }),
     );
 
     await exchange(client, daemon.ticket, [{ sessionId: "session-1", type: "abort", payload: {} }]);
@@ -198,6 +209,15 @@ function hasText(frame: Envelope, text: string): boolean {
     frame.payload !== null &&
     "text" in frame.payload &&
     frame.payload.text === text
+  );
+}
+
+function hasStatus(frame: Envelope, status: string): boolean {
+  return (
+    typeof frame.payload === "object" &&
+    frame.payload !== null &&
+    "status" in frame.payload &&
+    frame.payload.status === status
   );
 }
 

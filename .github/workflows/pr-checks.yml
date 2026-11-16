@@ -73,7 +73,7 @@ jobs:
           -s hermes-plugins/trajectory_analyzer/tests -p 'test_*.py' -v
 
   swift-remote-control:
-    name: Swift checks and iOS simulator build
+    name: Swift checks and iOS end-to-end tests
     runs-on: macos-26
 
     steps:
@@ -85,10 +85,33 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@8912a9102ac27614460f54aedde9e1e7f9aec20d # v6.0.5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Check Swift formatting and run unit tests
         working-directory: ios-remote-client
         run: ./scripts/test.sh
 
-      - name: Build iOS Simulator app
-        working-directory: ios-remote-client
-        run: ./scripts/build-simulator.sh
+      - name: Build and test iOS Simulator app
+        run: pnpm test:ios:e2e
+
+      - name: Test remote extension against the daemon
+        run: pnpm test:remote:e2e
+
+      - name: Upload end-to-end report and failure screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ios-e2e-results
+          path: .e2e/
+          include-hidden-files: true
+          if-no-files-found: ignore

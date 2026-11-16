@@ -28,6 +28,7 @@ targets:
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
         CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]: Simulator.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1"
     info:

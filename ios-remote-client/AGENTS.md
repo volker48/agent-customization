@@ -17,7 +17,9 @@ Run from `ios-remote-client/`:
 ```
 
 `project.yml` is the committed XcodeGen source. `scripts/build-simulator.sh` performs
-an unsigned simulator build for fast checks. `scripts/install-device.sh` performs a
+a local ad-hoc signed simulator build with Keychain entitlements for fast checks.
+Run `pnpm test:ios:e2e` from the repository root for the mobile UI flows.
+`scripts/install-device.sh` performs a
 signed Release archive and installs the app with `devicectl`; set `DEVELOPMENT_TEAM`
 or create `Local.xcconfig` from `Local.xcconfig.example` first.
 

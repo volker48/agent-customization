@@ -11,15 +11,15 @@
   "scripts": {
     "lint": "pnpm lint:core && pnpm lint:extra",
     "lint:core": "oxlint -c .oxlintrc.json pi-extensions opencode-plugins",
-    "lint:extra": "oxlint -c .oxlintrc.json .opencode/plugins scripts tests",
+    "lint:extra": "oxlint -c .oxlintrc.json .opencode/plugins scripts tests e2e.config.ts",
     "format": "pnpm format:core && pnpm format:rule && pnpm format:config",
     "format:core": "oxfmt --write pi-extensions opencode-plugins",
     "format:rule": "oxfmt --write scripts/oxlint-no-record-unknown.mjs",
-    "format:config": "oxfmt --write .oxlintrc.json package.json tsconfig.json",
+    "format:config": "oxfmt --write .oxlintrc.json package.json tsconfig.json e2e.config.ts tests/ios",
     "format:check": "pnpm format:check:core && pnpm format:check:rule && pnpm format:check:config",
     "format:check:core": "oxfmt --check pi-extensions opencode-plugins",
     "format:check:rule": "oxfmt --check scripts/oxlint-no-record-unknown.mjs",
-    "format:check:config": "oxfmt --check .oxlintrc.json package.json tsconfig.json",
+    "format:check:config": "oxfmt --check .oxlintrc.json package.json tsconfig.json e2e.config.ts tests/ios",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.mjs",
@@ -28,6 +28,7 @@
     "test:rtk": "vitest run tests/rtk.test.ts",
     "test:rtk:e2e": "RTK_E2E=1 vitest run tests/rtk.e2e.test.ts",
     "test:remote:e2e": "REMOTE_E2E=1 vitest run tests/remote.e2e.test.ts",
+    "test:ios:e2e": "./ios-remote-client/scripts/build-simulator.sh && E2E_TELEMETRY_DISABLED=1 e2e run",
     "test:fusion": "vitest run tests/fusion.test.ts tests/fusion-*.test.ts",
     "test:fusion:e2e": "FUSION_E2E=1 vitest run tests/fusion.e2e.test.ts",
     "verify:rtk": "node scripts/verify-rtk-extension.mjs",
@@ -44,18 +45,20 @@
     "turndown-plugin-gfm": "1.0.2"
   },
   "devDependencies": {
+    "@e2e-dev/mobile": "0.9.0",
     "@earendil-works/pi-ai": "0.84.2",
     "@earendil-works/pi-coding-agent": "0.84.2",
     "@earendil-works/pi-tui": "0.84.2",
     "@opencode-ai/plugin": "1.1.4",
     "@types/node": "25.2.3",
+    "e2e": "0.15.2",
     "oxfmt": "0.32.0",
     "oxlint": "1.47.0",
     "typescript": "5.9.3",
     "vitest": "4.0.18"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.12"
   },
   "packageManager": "pnpm@11.9.0",
   "pi": {

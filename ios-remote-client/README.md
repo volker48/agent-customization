@@ -83,7 +83,7 @@ Run from this directory:
 ```bash
 ./scripts/test.sh                 # Swift format check and package test executable
 ./scripts/generate-project.sh     # Regenerate the disposable Xcode project
-./scripts/build-simulator.sh      # Unsigned iOS Simulator build
+./scripts/build-simulator.sh      # Ad-hoc signed iOS Simulator build (no Apple account)
 ./scripts/install-device.sh UDID  # Archive, sign, and install on a connected iPhone
 ```
 
@@ -100,6 +100,52 @@ iOS has no Mac-style notarization step. App Store/TestFlight export is intention
 not part of this local device workflow; add that as a separate export pipeline when
 those distribution requirements exist. 
 See <https://scottwillsey.com/building-and-shipping-mac-and-ios-apps-without-ever-opening-xcode/> for more info.
+
+## End-to-end tests
+
+From the repository root, run:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm test:ios:e2e
+pnpm test:remote:e2e
+```
+
+The [tester-army/e2e](https://github.com/tester-army/e2e) mobile engine drives the
+actual SwiftUI app with agent-device. The build embeds Simulator-only Keychain
+entitlements and uses local ad-hoc signing, so the app exercises its real persisted
+device identity without a developer account. Device builds retain their normal
+provisioning. Pairing accepts a six-digit code and submits it with **Pair**.
+
+`e2e.config.ts` selects iPhone 17 Pro by default. Set `IOS_E2E_DEVICE` to the name of
+an installed iOS 26+ simulator to select another. After building, run a subset with
+`E2E_TELEMETRY_DISABLED=1 pnpm exec e2e run --grep 'capsule'`. Tests use explicit
+locators and assertions and require no model subscription or API key.
+
+`tests/ios/remote-fixture.ts` starts a separate real daemon for each test with a
+temporary identity, allowlist, pairing window, and Unix socket. Scripted Pi session
+responses enter through the production IPC API and reach the app through real
+iroh connections. The fixture replaces only the execution host's agent behavior;
+it never modifies your running Pi sessions or your daemon's pairing state. The
+simulator app is reinstalled for each test to clear its saved ticket; its Keychain
+identity persists just as it does on an iPhone.
+
+The suite covers first-run pairing, invalid ticket/code retries, session registry
+refresh, transcript backfill and live updates, prompt/steering/Stop, tool disclosure
+and copying, model and thinking choices, capsules and errors, reconnecting, session
+shutdown/switching, settings, persisted identity, and re-pairing. The Simulator has
+no supported QR scanner: camera permission, QR recognition, and physical-device
+installation still require a real iPhone. An actual relay outage is not injected
+by this deterministic suite.
+
+Results and failure screenshots are written to ignored `.e2e/`; PR checks upload
+them as `ios-e2e-results` even when tests fail. The first run builds agent-device's
+XCTest runner and may take longer than subsequent runs. The fixture needs network
+access to initialize iroh's relay, as does the production app.
+
+The companion `test:remote:e2e` test exercises the actual Pi extension against the
+daemon, including pairing, session state, backfill, live events, prompts, and abort.
+PR checks run both suites on macOS.
 
 ## Dependency caveat
 
